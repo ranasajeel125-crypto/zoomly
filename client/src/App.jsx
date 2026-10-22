@@ -12,6 +12,19 @@ export const TIER_COLORS = {
   Diamond: "#c4b5fd",
 };
 
+export function Logo({ size = 40, withWordmark = false }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+      <img src="/logo.svg" alt="Zoomly logo" style={{ width: size, height: size, borderRadius: Math.round(size * 0.24), flexShrink: 0 }} />
+      {withWordmark && (
+        <span style={{ fontSize: Math.round(size * 0.62), fontWeight: 900, letterSpacing: -0.5 }}>
+          Zoom<span style={{ color: "var(--accent)" }}>ly</span>
+        </span>
+      )}
+    </span>
+  );
+}
+
 export function Avatar({ user, size = 40 }) {
   const letter = (user?.display_name || user?.username || "?").trim().charAt(0).toUpperCase() || "?";
   if (user?.avatar_url) {
@@ -119,7 +132,10 @@ function AuthView({ onAuthed }) {
   return (
     <div style={{ maxWidth: 420, margin: "0 auto", padding: "48px 20px 24px" }}>
       <div style={{ textAlign: "center", marginBottom: 24 }}>
-        <div style={{ fontSize: 44, fontWeight: 900, letterSpacing: -1 }}>
+        <div style={{ display: "flex", justifyContent: "center" }}>
+          <Logo size={76} />
+        </div>
+        <div style={{ fontSize: 40, fontWeight: 900, letterSpacing: -1, marginTop: 10 }}>
           Zoom<span style={{ color: "var(--accent)" }}>ly</span>
         </div>
         <p style={{ color: "var(--dim)", marginTop: 4 }}>Short videos, creators, coins &amp; rewards — all in one app.</p>
@@ -147,7 +163,7 @@ function AuthView({ onAuthed }) {
           {busy ? "Please wait…" : mode === "signup" ? "Create account" : "Log in"}
         </button>
       </form>
-      {mode === "signup" && <p style={{ color: "var(--dim)", fontSize: 13, marginTop: 12 }}>Signing up with a friend&apos;s referral code gives you 10 welcome coins — and them 25.</p>}
+      {mode === "signup" && <p style={{ color: "var(--dim)", fontSize: 13, marginTop: 12 }}>Signing up with a friend&apos;s referral code gives you 10 welcome coins — and them 20.</p>}
     </div>
   );
 }
@@ -351,6 +367,7 @@ function FeedView({ me, onOpenProfile, refreshMe }) {
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px 0" }}>
+        <Logo size={30} />
         <div style={{ display: "flex", flex: 1, gap: 6 }}>
           <button className={`tab-btn ${stream === "following" ? "active" : ""}`} onClick={() => setStream("following")}>
             Following
@@ -979,7 +996,7 @@ function RewardsView({ me, refreshMe }) {
   }
 
   async function shareCode() {
-    const text = `Join me on Zoomly! Use my referral code ${data?.my_code} when you sign up — you get 10 welcome coins and I get 25.`;
+    const text = `Join me on Zoomly! Use my referral code ${data?.my_code} when you sign up — you get 10 welcome coins and I get 20.`;
     if (navigator.share) {
       try {
         await navigator.share({ title: "Zoomly", text });
@@ -1059,7 +1076,7 @@ function RewardsView({ me, refreshMe }) {
       <div className="card" style={{ marginTop: 14 }}>
         <h3 style={{ margin: "0 0 4px" }}>🔗 Your referral code</h3>
         <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>
-          Share your code — every friend who joins with it earns you <strong style={{ color: "var(--text)" }}>25 coins</strong>, and they get <strong style={{ color: "var(--text)" }}>10 welcome coins</strong>. You have {data.referral_count} referral{data.referral_count === 1 ? "" : "s"} so far.
+          Share your code — every friend who joins with it earns you <strong style={{ color: "var(--text)" }}>20 coins</strong>, and they get <strong style={{ color: "var(--text)" }}>10 welcome coins</strong>. You have {data.referral_count} referral{data.referral_count === 1 ? "" : "s"} so far.
         </p>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <code style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, padding: "9px 12px", fontWeight: 700, fontSize: 15 }}>{data.my_code}</code>
@@ -1199,7 +1216,10 @@ export function App() {
   if (booting) {
     return (
       <div style={{ padding: 48, textAlign: "center" }}>
-        <div style={{ fontSize: 36, fontWeight: 900 }}>
+        <div style={{ display: "flex", justifyContent: "center" }}>
+          <Logo size={64} />
+        </div>
+        <div style={{ fontSize: 36, fontWeight: 900, marginTop: 10 }}>
           Zoom<span style={{ color: "var(--accent)" }}>ly</span>
         </div>
         <p style={{ color: "var(--dim)" }}>Loading…</p>

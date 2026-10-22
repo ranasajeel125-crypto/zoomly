@@ -45,14 +45,14 @@ const adminCode = admin.user.referral_code;
 check("admin has referral code", /^ZOOM-\d+-/.test(adminCode), adminCode);
 check("admin flagged is_admin", admin.user.is_admin === true);
 
-// Signup user B WITH admin's referral code -> B +10, admin +25
+// Signup user B WITH admin's referral code -> B +10, admin +20
 const before = (await api("getMe", { token: adminToken })).user.coin_balance;
 const bSignup = await api("signup", { username: userB, display_name: "Test Fan", password: "test-pass-123", referral_code: adminCode });
 check("user B signup with referral", bSignup.ok === true, JSON.stringify(bSignup));
 check("user B got 10 welcome coins", bSignup.user.coin_balance === 10, `balance=${bSignup.user.coin_balance}`);
 const bToken = bSignup.token;
 const adminAfter = (await api("getMe", { token: adminToken })).user;
-check("admin got +25 referral coins", adminAfter.coin_balance === before + 25, `before=${before} after=${adminAfter.coin_balance}`);
+check("admin got +20 referral coins", adminAfter.coin_balance === before + 20, `before=${before} after=${adminAfter.coin_balance}`);
 check("admin referral count is >= 1", adminAfter.referral_count >= 1);
 
 // Double claim must fail

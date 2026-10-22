@@ -160,7 +160,7 @@ async function postDtos(postRows, viewer) {
 }
 
 // ---- Referral -------------------------------------------------------------
-// First valid claim only: sets referred_by, inviter +25 coins, claimer +10.
+// First valid claim only: sets referred_by, inviter +20 coins, claimer +10.
 async function applyReferral(user, rawCode) {
   const code = String(rawCode || "").trim().toUpperCase();
   if (!code) return { ok: false, message: "Enter a referral code." };

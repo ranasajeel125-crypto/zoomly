@@ -19,7 +19,7 @@ deployable on Render's free tier. Same proven stack as the SMM panel.
   and a video grid, delete your own videos.
 - **Referral system** — every user gets a personal code (`ZOOM-<id>-<USERNAME>`)
   to copy/share from the Rewards tab. A new user can enter a code at signup
-  or claim one later: the inviter gets **+25 coins**, the new user gets
+  or claim one later: the inviter gets **+20 coins**, the new user gets
   **+10 welcome coins**. Profiles show referral count and "my referrals".
 - **Coin system** — coin balance per user. The Buy Coins page shows the
   owner's JazzCash number **03266040350** (Muhammad Sajeel) and 5 packs:
@@ -37,6 +37,17 @@ deployable on Render's free tier. Same proven stack as the SMM panel.
 - **Admin** — the account whose username matches the `ADMIN_USERNAME` env
   var can review coin requests. Sign up with that exact username right
   after deploying to claim the owner account.
+
+## Branding
+
+- **Logo / app icon:** `client/public/logo.svg` — a bold dark "Z" with a
+  play-button cut on a lime rounded square. It is used as the site favicon,
+  the header logo, and the login/signup branding.
+- **Play Store icon:** `client/public/app-icon-512.png` — a 512×512 PNG
+  rendered from the same SVG, ready for the later Android/Play Store step
+  (Play requires a 512×512 icon). If the logo ever changes, re-render the
+  PNG from `logo.svg` at 512×512.
+- The page title and in-app branding are "Zoomly" throughout.
 
 ## Media storage — Cloudinary (important)
 
