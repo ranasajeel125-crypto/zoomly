@@ -328,6 +328,131 @@ check("tokenless sendGift rejected", noTokenGift.ok === false);
 const badGift = await api("sendGift", { token: viewerToken, live_session_id: sid, gift_key: "yacht" });
 check("unknown gift rejected", badGift.ok === false);
 
+// ---- Follow state for the watch screen (getLive.broadcaster_followed) ------------
+
+check("getLive says broadcaster not followed yet", detail.broadcaster_followed === false, JSON.stringify(detail.broadcaster_followed));
+const followRes = await api("toggleFollow", { token: viewerToken, user_id: creatorId });
+check("toggleFollow follows the broadcaster", followRes.ok === true && followRes.following === true);
+const detailFollowed = await api("getLive", { token: viewerToken, live_session_id: sid });
+check("getLive now reports broadcaster_followed", detailFollowed.broadcaster_followed === true);
+const unfollowRes = await api("toggleFollow", { token: viewerToken, user_id: creatorId });
+check("toggleFollow unfollows again", unfollowRes.ok === true && unfollowRes.following === false);
+
+// ---- Guest seat: request -> decline -> accept -> publish wiring -> leave/remove ---
+// A third user watches alongside the fan; the fan asks to sit as guest.
+
+async function waitForCount(sock, pred, n, label, timeoutMs = 8000) {
+  const t0 = Date.now();
+  for (;;) {
+    const hits = sock.messages.filter(pred);
+    if (hits.length >= n) return hits[n - 1];
+    if (Date.now() - t0 > timeoutMs) throw new Error(`Timed out waiting for ${label}`);
+    await sleep(100);
+  }
+}
+
+// An unauthenticated socket cannot even ask (auth gate answers first).
+await new Promise((resolve) => {
+  let settled = false;
+  const raw = new WebSocket(BASE.replace(/^http/, "ws") + "/ws");
+  const finish = (ok) => {
+    if (settled) return;
+    settled = true;
+    check("unauthenticated guest-request rejected", ok);
+    try {
+      raw.close();
+    } catch {
+      /* ignore */
+    }
+    resolve();
+  };
+  raw.on("open", () => raw.send(JSON.stringify({ type: "guest-request" })));
+  raw.on("message", (rawMsg) => {
+    try {
+      if (JSON.parse(String(rawMsg)).type === "auth-error") finish(true);
+    } catch {
+      /* ignore */
+    }
+  });
+  setTimeout(() => finish(false), 5000);
+});
+
+const guestName = `guest_${suffix}`;
+const guestUser = await api("signup", { username: guestName, display_name: "Guest Fan", password: "test-pass-123" });
+check("guest-seat third user signup", guestUser.ok === true);
+const guestSock = await connectSocket(guestUser.token);
+guestSock.send({ type: "join", liveSessionId: sid });
+await guestSock.waitFor((m) => m.type === "joined", 8000, "third viewer joined");
+check("third viewer joined the room", true);
+
+// 1) Request reaches the broadcaster; a duplicate is refused.
+fanSock.send({ type: "guest-request" });
+const req1 = await hostSock.waitFor((m) => m.type === "guest-request" && m.from?.user?.username === viewerName, 8000, "guest-request at host");
+check("host received the join request with the requester", typeof req1.requestId === "string");
+fanSock.send({ type: "guest-request" });
+const dupErr = await fanSock.waitFor((m) => m.type === "error" && /intezar/.test(m.message || ""), 8000, "duplicate request error");
+check("duplicate join request refused", Boolean(dupErr));
+
+// 2) Decline changes nothing.
+hostSock.send({ type: "guest-respond", requestId: req1.requestId, accept: false });
+const declined = await fanSock.waitFor((m) => m.type === "guest-declined", 8000, "guest-declined");
+check("requester told about the decline", Boolean(declined));
+check("decline seated nobody", !hostSock.messages.some((m) => m.type === "guest-seated") && !fanSock.messages.some((m) => m.type === "guest-seated"));
+
+// 3) A fresh request, accepted this time: the whole room hears guest-seated.
+fanSock.send({ type: "guest-request" });
+const req2 = await waitForCount(hostSock, (m) => m.type === "guest-request", 2, "second guest-request");
+hostSock.send({ type: "guest-respond", requestId: req2.requestId, accept: true });
+const seated = await fanSock.waitFor((m) => m.type === "guest-seated", 8000, "guest-seated at requester");
+check("guest-seated broadcast with the fan as guest", seated.guestPeerId === fanSock.peerId && seated.guest?.username === viewerName, JSON.stringify(seated));
+await hostSock.waitFor((m) => m.type === "guest-seated", 8000, "guest-seated at host");
+await guestSock.waitFor((m) => m.type === "guest-seated", 8000, "guest-seated at other viewer");
+check("host + other viewer also saw guest-seated", true);
+
+// 4) One seat only: further requests are refused while it is taken.
+guestSock.send({ type: "guest-request" });
+const seatTaken = await guestSock.waitFor((m) => m.type === "error" && /betha/.test(m.message || ""), 8000, "seat-taken error");
+check("second join attempt while seated refused", Boolean(seatTaken));
+
+// 5) Guest-ready wires the stage: host initiates the guest-peer link,
+//    the guest learns the existing viewers, signaling reaches the guest.
+fanSock.send({ type: "guest-ready" });
+const guestPeerAtHost = await hostSock.waitFor((m) => m.type === "guest-peer" && m.peerId === fanSock.peerId, 8000, "guest-peer at host");
+check("host told to initiate the guest connection", guestPeerAtHost.initiate === true);
+const guestPeerAtGuest = await fanSock.waitFor((m) => m.type === "guest-peer" && m.peerId === hostSock.peerId, 8000, "guest-peer at guest");
+check("guest told the host peer id", guestPeerAtGuest.initiate === false);
+await fanSock.waitFor((m) => m.type === "viewer-joined" && m.peerId === guestSock.peerId, 8000, "guest learns existing viewers");
+check("guest learned the existing viewers to publish to", true);
+hostSock.send({ type: "signal", to: fanSock.peerId, data: { kind: "offer", description: { type: "offer", sdp: "fake" } } });
+const guestSignal = await fanSock.waitFor((m) => m.type === "signal" && m.from === hostSock.peerId && m.data?.kind === "offer", 8000, "offer relayed to guest");
+check("signaling relay works for the guest's peers", Boolean(guestSignal));
+
+// 6) Guest leaves: room hears guest-left and the host re-offers to the
+//    ex-guest as a plain viewer.
+fanSock.send({ type: "guest-leave" });
+const left1 = await hostSock.waitFor((m) => m.type === "guest-left" && m.guestPeerId === fanSock.peerId, 8000, "guest-left at host");
+check("guest-left broadcast on leave", left1.removed === false);
+await guestSock.waitFor((m) => m.type === "guest-left", 8000, "guest-left at other viewer");
+await waitForCount(hostSock, (m) => m.type === "viewer-joined" && m.peerId === fanSock.peerId, 2, "host re-offers to ex-guest");
+check("host re-notified about the ex-guest as a plain viewer", true);
+
+// 7) Re-seat and let the host remove the guest instead.
+fanSock.send({ type: "guest-request" });
+const req3 = await waitForCount(hostSock, (m) => m.type === "guest-request", 3, "third guest-request");
+hostSock.send({ type: "guest-respond", requestId: req3.requestId, accept: true });
+await waitForCount(fanSock, (m) => m.type === "guest-seated", 2, "second guest-seated");
+hostSock.send({ type: "guest-remove" });
+const removedMsg = await fanSock.waitFor((m) => m.type === "guest-left" && m.removed === true, 8000, "guest-left (removed)");
+check("host remove ends the seat with removed=true", removedMsg.guestPeerId === fanSock.peerId);
+
+// 8) The seat is free again afterwards.
+fanSock.send({ type: "guest-request" });
+const req4 = await waitForCount(hostSock, (m) => m.type === "guest-request", 4, "fourth guest-request (seat free again)");
+hostSock.send({ type: "guest-respond", requestId: req4.requestId, accept: false });
+await waitForCount(fanSock, (m) => m.type === "guest-declined", 2, "final decline");
+check("seat usable again after leave + remove", true);
+guestSock.close();
+
 // ---- jsdom: the Live tab renders with this broadcast running ---------------------------
 
 try {
@@ -356,6 +481,19 @@ try {
       window.HTMLMediaElement.prototype.pause = () => {};
       window.HTMLMediaElement.prototype.load = () => {};
       window.scrollTo = () => {};
+      // jsdom may lack a WebSocket client: stub one so the watch room can
+      // mount (it renders its chrome while the socket never connects).
+      if (!window.WebSocket) {
+        window.WebSocket = class {
+          constructor() {
+            this.readyState = 0;
+          }
+          send() {}
+          close() {
+            this.readyState = 3;
+          }
+        };
+      }
     },
   });
   const { document } = dom.window;
@@ -379,6 +517,16 @@ try {
   check("Live tab did NOT crash the app", !t.includes("could not open"));
   check("running broadcast listed in Live tab", t.includes("Live test show"), t.slice(0, 300));
   check("Go Live button rendered", t.includes("Go Live"));
+  // Enter the watch screen: the Follow and Join Live (guest) buttons must
+  // render there (render-level check for both).
+  const watchBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Watch");
+  check("Watch button found for the broadcast", Boolean(watchBtn));
+  watchBtn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await waitForText("watch screen shows Follow + Join Live", (x) => x.includes("Join Live") && x.includes("Follow"), 25000);
+  const wt = bodyText();
+  check("watch screen renders the Follow button", wt.includes("Follow"));
+  check("watch screen renders the Join Live button", wt.includes("Join Live"));
+  check("watch screen did NOT crash the app", !wt.includes("could not open"));
   dom.window.close();
 } catch (err) {
   check(`jsdom Live tab check (${err.message})`, false);
@@ -387,7 +535,7 @@ try {
 // ---- Ending: viewer leave, then broadcaster disconnect ----------------------------
 
 fanSock.close();
-const leftMsg = await hostSock.waitFor((m) => m.type === "viewer-left", 8000, "viewer-left at broadcaster");
+const leftMsg = await hostSock.waitFor((m) => m.type === "viewer-left" && m.peerId === fanSock.peerId, 8000, "viewer-left at broadcaster");
 check("broadcaster notified when viewer leaves", leftMsg.peerId === fanSock.peerId);
 const count0 = await hostSock.waitFor((m) => m.type === "viewer-count" && m.count === 0, 8000, "viewer-count=0");
 check("viewer-count back to 0", Boolean(count0));

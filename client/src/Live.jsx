@@ -1,5 +1,11 @@
 // Zoomly LIVE: browse live broadcasts, go live, watch + chat + gifts.
 //
+// Viewers can follow the broadcaster from the watch screen, and one
+// viewer at a time can take the guest seat: the host accepts their join
+// request and they publish camera/mic as a second publisher next to the
+// host (split stage, same mesh + TURN-retry rules). Gifts always target
+// the host's session with the usual 50/50 split.
+//
 // The watch and broadcast rooms are full-screen stages (TikTok-style):
 // the video fills the whole viewport and the chat, controls, gift sheet
 // and PK score bar float over it.
@@ -199,6 +205,24 @@ function useLiveRoom(sessionId, handlers = {}) {
             break;
           case "match-peer":
             h.onMatchPeer?.(msg);
+            break;
+          case "guest-request":
+            h.onGuestRequest?.(msg);
+            break;
+          case "guest-request-expired":
+            h.onGuestRequestExpired?.(msg);
+            break;
+          case "guest-declined":
+            h.onGuestDeclined?.(msg);
+            break;
+          case "guest-seated":
+            h.onGuestSeated?.(msg);
+            break;
+          case "guest-peer":
+            h.onGuestPeer?.(msg);
+            break;
+          case "guest-left":
+            h.onGuestLeft?.(msg);
             break;
           case "live-ended":
             setEnded(true);
@@ -562,7 +586,7 @@ function GoLiveSetup({ me, onStart, onCancel }) {
 
 function BroadcastRoom({ me, session, stream, onDone }) {
   const videoRef = useRef(null);
-  const matchVideoRef = useRef(null);
+  const secondVideoRef = useRef(null);
   const pcsRef = useRef(new Map()); // peerId -> { pc, pendingIce, kind: "viewer" | "match-viewer" | "match-peer" }
   const matchPeerIdRef = useRef(null);
   const [earned, setEarned] = useState(0);
@@ -579,6 +603,10 @@ function BroadcastRoom({ me, session, stream, onDone }) {
   const [others, setOthers] = useState([]);
   const [pendingInviteTo, setPendingInviteTo] = useState(null);
   const [incomingInvite, setIncomingInvite] = useState(null);
+  // Guest seat state
+  const [guestSeat, setGuestSeat] = useState(null);
+  const [guestRequests, setGuestRequests] = useState([]);
+  const guestPeerIdRef = useRef(null);
 
   const room = useLiveRoom(session.id, {
     onGift: (msg) => {
@@ -651,6 +679,31 @@ function BroadcastRoom({ me, session, stream, onDone }) {
       matchPeerIdRef.current = msg.peerId;
       if (msg.initiate) void connectViewer(msg.peerId, "match-peer");
     },
+    onGuestRequest: (msg) => {
+      setGuestRequests((prev) => [...prev.filter((r) => r.requestId !== msg.requestId), msg]);
+    },
+    onGuestRequestExpired: (msg) => {
+      setGuestRequests((prev) => prev.filter((r) => r.requestId !== msg.requestId));
+    },
+    onGuestSeated: (msg) => {
+      setGuestSeat({ peerId: msg.guestPeerId, user: msg.guest });
+      setGuestRequests([]);
+    },
+    onGuestPeer: (msg) => {
+      guestPeerIdRef.current = msg.peerId;
+      if (msg.initiate) {
+        // Replace the plain viewer connection to the guest with the
+        // full-duplex guest connection.
+        closePeer(msg.peerId);
+        void connectViewer(msg.peerId, "guest-peer");
+      }
+    },
+    onGuestLeft: (msg) => {
+      closePeer(msg.guestPeerId);
+      if (guestPeerIdRef.current === msg.guestPeerId) guestPeerIdRef.current = null;
+      if (secondVideoRef.current) secondVideoRef.current.srcObject = null;
+      setGuestSeat(null);
+    },
   });
   const { sockRef } = room;
 
@@ -711,7 +764,7 @@ function BroadcastRoom({ me, session, stream, onDone }) {
       if (entry.kind === "match-viewer" || entry.kind === "match-peer") closePeer(peerId);
     }
     matchPeerIdRef.current = null;
-    if (matchVideoRef.current) matchVideoRef.current.srcObject = null;
+    if (secondVideoRef.current) secondVideoRef.current.srcObject = null;
   }
 
   // Creates a peer connection to a viewer (or the match peer) and wires
@@ -731,8 +784,8 @@ function BroadcastRoom({ me, session, stream, onDone }) {
     pcsRef.current.set(peerId, entry);
     for (const track of stream.getTracks()) pc.addTrack(track, stream);
     pc.ontrack = (e) => {
-      if (kind === "match-peer" && matchVideoRef.current && e.streams[0]) {
-        matchVideoRef.current.srcObject = e.streams[0];
+      if ((kind === "match-peer" || kind === "guest-peer") && secondVideoRef.current && e.streams[0]) {
+        secondVideoRef.current.srcObject = e.streams[0];
       }
     };
     pc.onicecandidate = (e) => {
@@ -848,6 +901,15 @@ function BroadcastRoom({ me, session, stream, onDone }) {
     setIncomingInvite(null);
   }
 
+  function respondGuest(requestId, accept) {
+    sockRef.current?.send({ type: "guest-respond", requestId, accept });
+    setGuestRequests((prev) => prev.filter((r) => r.requestId !== requestId));
+  }
+
+  function removeGuest() {
+    sockRef.current?.send({ type: "guest-remove" });
+  }
+
   async function endLive() {
     if (endHandledRef.current) return;
     endHandledRef.current = true;
@@ -868,6 +930,9 @@ function BroadcastRoom({ me, session, stream, onDone }) {
 
   const mySide = match ? (match.liveSessionA === session.id ? "a" : "b") : null;
   const opponent = match ? (mySide === "a" ? match.b : match.a) : null;
+  // The stage splits for a PK opponent OR a seated guest (never both —
+  // the server keeps the two exclusive).
+  const splitView = Boolean(match || guestSeat);
 
   return (
     <div style={stageStyle}>
@@ -876,17 +941,30 @@ function BroadcastRoom({ me, session, stream, onDone }) {
       <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
         <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
           <video ref={videoRef} autoPlay muted playsInline style={videoFillStyle} />
-          {match && <div style={tileLabelStyle("rgba(0,0,0,0.65)")}>Tum · @{me.username}</div>}
+          {splitView && <div style={tileLabelStyle("rgba(0,0,0,0.65)")}>Tum · @{me.username}</div>}
           {lastGift && (
             <div key={`${lastGift.key}-${giftCount}`} style={{ position: "absolute", right: 12, top: "34%", fontSize: 52, filter: "drop-shadow(0 2px 8px rgba(0,0,0,0.6))" }}>
               {lastGift.emoji}
             </div>
           )}
         </div>
-        {match && (
+        {splitView && (
           <div style={{ position: "relative", flex: 1, minHeight: 0, borderTop: "2px solid rgba(255,255,255,0.18)" }}>
-            <video ref={matchVideoRef} autoPlay playsInline style={videoFillStyle} />
-            <div style={tileLabelStyle("rgba(224,36,94,0.85)")}>⚔️ @{opponent?.user?.username}</div>
+            <video ref={secondVideoRef} autoPlay playsInline style={videoFillStyle} />
+            {match ? (
+              <div style={tileLabelStyle("rgba(224,36,94,0.85)")}>⚔️ @{opponent?.user?.username}</div>
+            ) : (
+              <>
+                <div style={tileLabelStyle("rgba(0,0,0,0.65)")}>🪑 @{guestSeat?.user?.username} · Guest</div>
+                <button
+                  type="button"
+                  onClick={removeGuest}
+                  style={{ position: "absolute", right: 10, top: 10, background: "rgba(160,20,40,0.85)", color: "#fff", border: "none", borderRadius: 10, padding: "5px 10px", fontSize: 13, fontWeight: 700 }}
+                >
+                  ✕ Remove
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -923,7 +1001,23 @@ function BroadcastRoom({ me, session, stream, onDone }) {
 
       {/* bottom overlay: challenge panel, chat, controls */}
       <div style={bottomOverlayStyle}>
-        {!match && incomingInvite && (
+        {!splitView &&
+          guestRequests.map((req) => (
+            <div key={req.requestId} style={{ background: "rgba(8,40,60,0.85)", border: "1px solid #38bdf8", borderRadius: 14, padding: "10px 12px", backdropFilter: "blur(3px)" }}>
+              <div style={{ fontSize: 15, color: "#fff" }}>
+                🪑 <strong>@{req.from?.user?.username}</strong> live me bethna chahta hai!
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button className="btn btn-primary btn-small" onClick={() => respondGuest(req.requestId, true)}>
+                  ✓ Accept — bethne do
+                </button>
+                <button className="btn btn-danger btn-small" onClick={() => respondGuest(req.requestId, false)}>
+                  ✕ Decline
+                </button>
+              </div>
+            </div>
+          ))}
+        {!splitView && incomingInvite && (
           <div style={{ background: "rgba(60,5,25,0.82)", border: "1px solid #e0245e", borderRadius: 14, padding: "10px 12px", backdropFilter: "blur(3px)" }}>
             <div style={{ fontSize: 15, color: "#fff" }}>
               ⚔️ <strong>@{incomingInvite.from?.user?.username}</strong> ne PK Match ka challenge bheja hai!
@@ -938,10 +1032,10 @@ function BroadcastRoom({ me, session, stream, onDone }) {
             </div>
           </div>
         )}
-        {!match && !incomingInvite && pendingInviteTo && (
+        {!splitView && !incomingInvite && pendingInviteTo && (
           <p style={{ color: "#fff", fontSize: 14, margin: 0, textShadow: "0 1px 4px rgba(0,0,0,0.9)" }}>⚔️ Challenge bhej diya hai — jawab ka intezar karo…</p>
         )}
-        {!match && !incomingInvite && !pendingInviteTo && showChallenge && (
+        {!splitView && !incomingInvite && !pendingInviteTo && showChallenge && (
           <div style={{ background: "rgba(15,15,15,0.85)", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 14, padding: 10, display: "grid", gap: 8, backdropFilter: "blur(3px)", maxHeight: "38dvh", overflowY: "auto" }}>
             {others.length === 0 && <p style={{ color: "rgba(255,255,255,0.75)", fontSize: 14, margin: 0 }}>Abhi koi aur broadcaster live nahi hai.</p>}
             {others.map((l) => (
@@ -961,7 +1055,7 @@ function BroadcastRoom({ me, session, stream, onDone }) {
         <ChatFeed messages={room.messages} />
         <div style={bottomBarStyle}>
           <ChatInput onSend={room.sendChat} disabled={!room.connected} placeholder="Viewers se baat karo…" />
-          {!match && (
+          {!splitView && (
             <button type="button" onClick={toggleChallenge} style={roundBtnStyle} aria-label="PK Match challenge" title="PK Match challenge">
               ⚔️
             </button>
@@ -979,7 +1073,7 @@ function BroadcastRoom({ me, session, stream, onDone }) {
 
 function WatchRoom({ me, session, refreshMe, onBack }) {
   const videoRef = useRef(null);
-  const matchVideoRef = useRef(null);
+  const secondVideoRef = useRef(null);
   const pcsRef = useRef(new Map()); // peerId -> { pc, pendingIce, kind: "main" | "match" }
   const mainPeerRef = useRef(null);
   const matchPeerRef = useRef(null);
@@ -993,6 +1087,18 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
   const [needsTap, setNeedsTap] = useState(false);
   const [muted, setMuted] = useState(true);
   const [showGifts, setShowGifts] = useState(false);
+  // Follow (same toggleFollow RPC as profiles/feed)
+  const [following, setFollowing] = useState(false);
+  const [followBusy, setFollowBusy] = useState(false);
+  // Guest seat: who is seated (anyone), my pending request, and my own
+  // publishing state when I am the guest.
+  const [seatedGuest, setSeatedGuest] = useState(null);
+  const [joinPending, setJoinPending] = useState(false);
+  const [amGuest, setAmGuest] = useState(false);
+  const seatedGuestRef = useRef(null);
+  const guestStreamRef = useRef(null);
+  const myVideoRef = useRef(null);
+  const amGuestRef = useRef(false);
   // PK match state
   const [match, setMatch] = useState(null);
   const [matchResult, setMatchResult] = useState(null);
@@ -1000,16 +1106,67 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
   const room = useLiveRoom(session.id, {
     onJoined: (msg) => {
       if (msg.broadcasterPeerId) mainPeerRef.current = msg.broadcasterPeerId;
+      if (msg.guestPeerId) {
+        seatedGuestRef.current = msg.guestPeerId;
+        setSeatedGuest({ peerId: msg.guestPeerId, user: msg.guest });
+      }
     },
     onBroadcasterJoined: (msg) => {
       if (msg.matchId) matchPeerRef.current = msg.peerId;
       else mainPeerRef.current = msg.peerId;
     },
+    onViewerJoined: (msg) => {
+      // While I am the seated guest, every (new) viewer gets my stream.
+      if (amGuestRef.current) void publishToViewer(msg.peerId);
+    },
+    onGuestSeated: (msg) => {
+      seatedGuestRef.current = msg.guestPeerId;
+      setSeatedGuest({ peerId: msg.guestPeerId, user: msg.guest });
+      if (msg.guestPeerId === sockRef.current?.peerId) {
+        setJoinPending(false);
+        void becomeGuest();
+      }
+    },
+    onGuestDeclined: () => {
+      setJoinPending(false);
+      setNotice("Host ne tumhari join request decline kar di.");
+    },
+    onGuestRequestExpired: () => setJoinPending(false),
+    onGuestLeft: (msg) => {
+      if (seatedGuestRef.current === msg.guestPeerId) seatedGuestRef.current = null;
+      setSeatedGuest(null);
+      const entry = pcsRef.current.get(msg.guestPeerId);
+      if (entry && entry.kind === "guest") closePcEntry(msg.guestPeerId, entry);
+      if (secondVideoRef.current) secondVideoRef.current.srcObject = null;
+      if (amGuestRef.current && msg.guestPeerId === sockRef.current?.peerId) endGuesting(msg.removed === true);
+    },
     onSignal: async (msg) => {
       if (!msg.data) return;
+      if (msg.data.kind === "renegotiate") {
+        // A viewer of my guest stream asks me to re-offer via TURN relay.
+        const entry = pcsRef.current.get(msg.from);
+        if (entry?.kind === "guest-viewer") {
+          closePcEntry(msg.from, entry);
+          void publishToViewer(msg.from, { relayOnly: true });
+        }
+        return;
+      }
       if (msg.data.kind === "offer" && msg.data.description) {
-        const kind = msg.from === mainPeerRef.current ? "main" : "match";
+        const kind = msg.from === mainPeerRef.current ? "main" : msg.from === seatedGuestRef.current ? "guest" : "match";
         await answerOffer(msg.from, msg.data.description, kind, { relayOnly: !!msg.data.relay });
+      } else if (msg.data.kind === "answer" && msg.data.description) {
+        // Answers to my guest-publishing offers.
+        const entry = pcsRef.current.get(msg.from);
+        if (entry) {
+          try {
+            await entry.pc.setRemoteDescription(msg.data.description);
+            for (const cand of entry.pendingIce.splice(0)) {
+              await entry.pc.addIceCandidate(cand).catch(() => {});
+            }
+          } catch {
+            /* peer went away mid-handshake */
+          }
+        }
       } else if (msg.data.kind === "ice" && msg.data.candidate) {
         const entry = pcsRef.current.get(msg.from);
         if (entry) {
@@ -1030,7 +1187,13 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
       setMatchResult(msg);
       closeMatchPcs();
     },
-    onEnded: () => closeAllPcs(),
+    onEnded: () => {
+      closeAllPcs();
+      if (guestStreamRef.current) {
+        guestStreamRef.current.getTracks().forEach((t) => t.stop());
+        guestStreamRef.current = null;
+      }
+    },
   });
   const { sockRef } = room;
 
@@ -1039,6 +1202,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
     if (res.ok) {
       setDetail(res);
       setBalance(res.my_coin_balance);
+      if (typeof res.broadcaster_followed === "boolean") setFollowing(res.broadcaster_followed);
       // Adopt the server's ICE list (STUN + TURN) for peer connections.
       setIceServers(res.ice_servers);
     }
@@ -1051,9 +1215,15 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
   useEffect(
     () => () => {
       closeAllPcs();
+      guestStreamRef.current?.getTracks().forEach((t) => t.stop());
     },
     []
   );
+
+  // My local preview tile (shown while I am the seated guest).
+  useEffect(() => {
+    if (myVideoRef.current && guestStreamRef.current) myVideoRef.current.srcObject = guestStreamRef.current;
+  }, [amGuest]);
 
   function clearEntryTimers(entry) {
     for (const key of ["disconnectTimer", "renegoTimer", "giveUpTimer"]) {
@@ -1084,12 +1254,13 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
       if (entry.kind === "match") closePcEntry(peerId, entry);
     }
     matchPeerRef.current = null;
-    if (matchVideoRef.current) matchVideoRef.current.srcObject = null;
+    if (secondVideoRef.current) secondVideoRef.current.srcObject = null;
   }
 
   function showVideoFailure(kind) {
     setVideoStatus("");
     if (kind === "main") setVideoError("Video connection nahi ban saka — is network par direct (P2P) connection mushkil hai. Chat phir bhi chal raha hai.");
+    else if (kind === "guest") setVideoError("Guest ki video connect nahi ho saki — chat phir bhi chal raha hai.");
     else setVideoError("PK wale broadcaster ki video connect nahi ho saki — chat aur score phir bhi chal rahe hain.");
   }
 
@@ -1124,8 +1295,13 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
     const pc = new RTCPeerConnection(peerConnectionConfig(relayOnly));
     const entry = { pc, pendingIce: [], kind, relayOnly, disconnectTimer: null, renegoTimer: null, giveUpTimer: null, pairLogged: false };
     pcsRef.current.set(fromPeerId, entry);
+    // While I am the seated guest, the connection to the host is
+    // full-duplex: my camera/mic rides on it too.
+    if (kind === "main" && guestStreamRef.current) {
+      for (const track of guestStreamRef.current.getTracks()) pc.addTrack(track, guestStreamRef.current);
+    }
     pc.ontrack = (e) => {
-      const video = kind === "main" ? videoRef.current : matchVideoRef.current;
+      const video = kind === "main" ? videoRef.current : secondVideoRef.current;
       if (video && e.streams[0]) {
         video.srcObject = e.streams[0];
         if (kind === "main") video.play().catch(() => setNeedsTap(true));
@@ -1166,6 +1342,117 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
     } catch {
       if (kind === "main") setVideoError("Video connection nahi ban saka — chat phir bhi chal raha hai.");
     }
+  }
+
+  // ---- guest seat (I am the guest) -------------------------------------------
+  // Accepted by the host: grab camera/mic, then tell the server I am
+  // ready to publish. Denial aborts the seat — I stay a plain viewer and
+  // my normal viewer connection to the host was never touched.
+
+  async function becomeGuest() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      sockRef.current?.send({ type: "guest-abort" });
+      setError("Is browser me camera support nahi hai — tum viewer hi rahoge.");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      guestStreamRef.current = stream;
+      amGuestRef.current = true;
+      setAmGuest(true);
+      sockRef.current?.send({ type: "guest-ready" });
+    } catch {
+      sockRef.current?.send({ type: "guest-abort" });
+      setError("Camera/mic ki ijazat nahi mili — tum viewer hi rahoge.");
+    }
+  }
+
+  function endGuesting(removed = false) {
+    if (!amGuestRef.current) return;
+    amGuestRef.current = false;
+    setAmGuest(false);
+    setJoinPending(false);
+    guestStreamRef.current?.getTracks().forEach((t) => t.stop());
+    guestStreamRef.current = null;
+    for (const [peerId, entry] of [...pcsRef.current.entries()]) {
+      if (entry.kind === "guest-viewer") closePcEntry(peerId, entry);
+    }
+    // The host connection is replaced by the broadcaster's fresh
+    // plain-viewer offer (the server re-notifies them on guest-left).
+    const hostPeer = mainPeerRef.current;
+    const hostEntry = hostPeer ? pcsRef.current.get(hostPeer) : null;
+    if (hostEntry) closePcEntry(hostPeer, hostEntry);
+    if (myVideoRef.current) myVideoRef.current.srcObject = null;
+    if (removed) setNotice("Host ne tumhe live se hata diya — tum ab sirf viewer ho.");
+  }
+
+  function leaveSeat() {
+    sockRef.current?.send({ type: "guest-leave" });
+    endGuesting(false);
+  }
+
+  function requestJoin() {
+    if (joinPending || seatedGuest || room.ended) return;
+    setError("");
+    setNotice("");
+    sockRef.current?.send({ type: "guest-request" });
+    setJoinPending(true);
+  }
+
+  // While seated I offer my stream to every viewer; they answer and
+  // receive it. Same ICE + one-relay-retry policy as every other peer.
+  async function publishToViewer(peerId, opts = {}) {
+    const sock = sockRef.current;
+    const stream = guestStreamRef.current;
+    if (!sock || !stream || pcsRef.current.has(peerId)) return;
+    const { relayOnly = false } = opts;
+    const pc = new RTCPeerConnection(peerConnectionConfig(relayOnly));
+    const entry = { pc, pendingIce: [], kind: "guest-viewer", relayOnly, retried: relayOnly, disconnectTimer: null, renegoTimer: null, giveUpTimer: null, pairLogged: false };
+    pcsRef.current.set(peerId, entry);
+    for (const track of stream.getTracks()) pc.addTrack(track, stream);
+    pc.onicecandidate = (e) => {
+      if (e.candidate) sock.signal(peerId, { kind: "ice", candidate: e.candidate.toJSON() });
+    };
+    pc.oniceconnectionstatechange = () => {
+      if (pcsRef.current.get(peerId) !== entry) return;
+      const st = pc.iceConnectionState;
+      if (st === "connected" || st === "completed") {
+        clearEntryTimers(entry);
+        if (!entry.pairLogged) {
+          entry.pairLogged = true;
+          void logSelectedCandidatePair(pc, "guest publish");
+        }
+      } else if (st === "disconnected") {
+        clearTimeout(entry.disconnectTimer);
+        entry.disconnectTimer = setTimeout(() => {
+          if (pcsRef.current.get(peerId) === entry && pc.iceConnectionState === "disconnected") retryGuestPublish(peerId, entry);
+        }, 4000);
+      } else if (st === "failed") {
+        retryGuestPublish(peerId, entry);
+      }
+    };
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      sock.signal(peerId, { kind: "offer", description: pc.localDescription, relay: relayOnly || undefined });
+    } catch {
+      pcsRef.current.delete(peerId);
+    }
+  }
+
+  function retryGuestPublish(peerId, entry) {
+    if (pcsRef.current.get(peerId) !== entry) return;
+    clearEntryTimers(entry);
+    closePcEntry(peerId, entry);
+    if (!entry.retried) void publishToViewer(peerId, { relayOnly: true });
+  }
+
+  async function toggleFollow() {
+    if (!broadcaster?.id || followBusy || detail?.is_mine) return;
+    setFollowBusy(true);
+    const res = await call("toggleFollow", { user_id: broadcaster.id });
+    setFollowBusy(false);
+    if (res.ok) setFollowing(res.following);
   }
 
   async function sendGift(gift) {
@@ -1216,10 +1503,18 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
           ) : null}
           {match && <div style={tileLabelStyle("rgba(0,0,0,0.65)")}>@{broadcaster?.username}</div>}
         </div>
-        {match && (
+        {(match || seatedGuest) && (
           <div style={{ position: "relative", flex: 1, minHeight: 0, borderTop: "2px solid rgba(255,255,255,0.18)" }}>
-            <video ref={matchVideoRef} autoPlay playsInline style={videoFillStyle} />
-            <div style={tileLabelStyle("rgba(224,36,94,0.85)")}>⚔️ @{matchOpponent?.user?.username}</div>
+            {amGuest ? (
+              <video ref={myVideoRef} autoPlay muted playsInline style={videoFillStyle} />
+            ) : (
+              <video ref={secondVideoRef} autoPlay playsInline style={videoFillStyle} />
+            )}
+            {match ? (
+              <div style={tileLabelStyle("rgba(224,36,94,0.85)")}>⚔️ @{matchOpponent?.user?.username}</div>
+            ) : (
+              <div style={tileLabelStyle("rgba(0,0,0,0.65)")}>🪑 {amGuest ? "Tum (Guest)" : `@${seatedGuest?.user?.username} · Guest`}</div>
+            )}
           </div>
         )}
       </div>
@@ -1241,11 +1536,37 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
         <span className="chip" style={darkChipStyle}>
           🪙 {balance}
         </span>
-        <div style={{ flexBasis: "100%", display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ flexBasis: "100%", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <Avatar user={broadcaster} size={30} />
           <span style={{ fontSize: 14, color: "#fff", textShadow: "0 1px 4px rgba(0,0,0,0.9)" }}>
             {broadcaster?.display_name} <span style={{ color: "rgba(255,255,255,0.7)" }}>@{broadcaster?.username}</span>
           </span>
+          {!detail?.is_mine && broadcaster?.id && (
+            <button
+              type="button"
+              className={following ? "btn btn-small" : "btn btn-primary btn-small"}
+              onClick={toggleFollow}
+              disabled={followBusy}
+              style={following ? { background: "rgba(20,20,20,0.6)", borderColor: "rgba(255,255,255,0.3)", color: "#fff" } : undefined}
+            >
+              {following ? "✓ Following" : "+ Follow"}
+            </button>
+          )}
+          {amGuest ? (
+            <button type="button" className="btn btn-danger btn-small" onClick={leaveSeat}>
+              🚪 Leave seat
+            </button>
+          ) : seatedGuest ? (
+            <span style={{ fontSize: 13, color: "rgba(255,255,255,0.85)", textShadow: "0 1px 4px rgba(0,0,0,0.9)" }}>
+              🪑 Guest: @{seatedGuest.user?.username}
+            </span>
+          ) : joinPending ? (
+            <span style={{ fontSize: 13, color: "rgba(255,255,255,0.85)", textShadow: "0 1px 4px rgba(0,0,0,0.9)" }}>🪑 Request bheja… host ke jawab ka intezar karo</span>
+          ) : (
+            <button type="button" className="btn btn-primary btn-small" onClick={requestJoin} disabled={!room.connected || room.ended} style={{ background: "#38bdf8", borderColor: "#38bdf8" }}>
+              🪑 Join Live
+            </button>
+          )}
         </div>
       </div>
 

@@ -739,6 +739,10 @@ export const Actions = {
       const session = (await db.select().from(schema.liveSessions).where(eq(schema.liveSessions.id, sessionId)).limit(1))[0];
       if (!session) return { ok: false, message: "Live session not found." };
       const broadcaster = (await db.select().from(schema.users).where(eq(schema.users.id, session.userId)).limit(1))[0];
+      const followRow =
+        session.userId === user.id
+          ? null
+          : (await db.select({ id: schema.follows.id }).from(schema.follows).where(and(eq(schema.follows.followerId, user.id), eq(schema.follows.followeeId, session.userId))).limit(1))[0];
       return {
         ok: true,
         session: liveSessionDto(session, broadcaster),
@@ -746,6 +750,7 @@ export const Actions = {
         ice_servers: ICE_SERVERS,
         my_coin_balance: user.coinBalance,
         is_mine: session.userId === user.id,
+        broadcaster_followed: Boolean(followRow),
       };
     }
   ),

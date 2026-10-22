@@ -31,6 +31,24 @@
 //   S->C  {type:"live-ended", liveSessionId}
 //   C->S  {type:"leave"}
 //
+// Guest seat (one viewer joins the stage, TikTok-style):
+//   C->S  {type:"guest-request"}                    (a viewer asks to join)
+//   S->C  {type:"guest-request", requestId, from:{peerId,user}, expiresAt}
+//                                                   (to the broadcaster)
+//   C->S  {type:"guest-respond", requestId, accept}
+//   S->C  {type:"guest-declined"}                   (to the requester)
+//   S->C  {type:"guest-request-expired", requestId} (requester + broadcaster)
+//   S->C  {type:"guest-seated", guestPeerId, guest} (whole room)
+//   C->S  {type:"guest-ready"}   (guest has camera/mic and can publish)
+//   S->C  {type:"guest-peer", peerId, initiate}     (host<->guest wiring)
+//   C->S  {type:"guest-leave"} | {type:"guest-abort"} (guest steps down)
+//   C->S  {type:"guest-remove"}                     (broadcaster removes)
+//   S->C  {type:"guest-left", guestPeerId, removed} (whole room)
+// The seated guest stays a member of the room's viewers map; the seat is
+// just marked on the room. While a guest is seated no PK match can run
+// in the room (and vice versa) — v1 keeps the stage to two publishers
+// of one kind at a time.
+//
 // PK matches (two broadcasters, one shared 5-minute battle):
 //   C->S  {type:"match-invite", toLiveSessionId}
 //   S->C  {type:"match-invite", inviteId, from:{liveSessionId,title,user}}
@@ -53,12 +71,12 @@ import { MATCH_DURATION_MS, MATCH_INVITE_TTL_MS } from "./config.mjs";
 const AUTH_TIMEOUT_MS = 10_000;
 const MAX_CHAT_CHARS = 500;
 
-const rooms = new Map(); // sessionId -> { broadcaster, viewers: Map }
+const rooms = new Map(); // sessionId -> { broadcaster, viewers: Map, guest, guestRequests: Map }
 
 function roomFor(sessionId) {
   let room = rooms.get(sessionId);
   if (!room) {
-    room = { broadcaster: null, viewers: new Map() };
+    room = { broadcaster: null, viewers: new Map(), guest: null, guestWired: false, guestRequests: new Map(), sessionId };
     rooms.set(sessionId, room);
   }
   return room;
@@ -138,6 +156,8 @@ export async function endLiveSession(sessionId, { notify = true } = {}) {
   const room = rooms.get(sessionId);
   if (room) {
     if (notify) broadcastRoom(sessionId, { type: "live-ended", liveSessionId: sessionId });
+    for (const req of room.guestRequests.values()) clearTimeout(req.timer);
+    room.guestRequests.clear();
     for (const conn of roomConns(room)) conn.sessionId = null;
     rooms.delete(sessionId);
   }
@@ -328,9 +348,18 @@ async function handleMatchInvite(conn, toLiveSessionId) {
     send(conn, { type: "error", message: "Woh broadcaster pehle se ek match me hai." });
     return;
   }
+  const myRoom = rooms.get(conn.sessionId);
+  if (myRoom?.guest) {
+    send(conn, { type: "error", message: "Tumhare live me guest betha hai — match abhi nahi ho sakta." });
+    return;
+  }
   const targetRoom = rooms.get(toLiveSessionId);
   if (!targetRoom?.broadcaster) {
     send(conn, { type: "error", message: "Woh broadcaster ab live nahi hai." });
+    return;
+  }
+  if (targetRoom.guest) {
+    send(conn, { type: "error", message: "Us broadcaster ke live me guest betha hai — match abhi nahi ho sakta." });
     return;
   }
   for (const inv of invites.values()) {
@@ -378,7 +407,156 @@ async function handleMatchRespond(conn, inviteId, accept) {
     if (fromRoom?.broadcaster) send(fromRoom.broadcaster, { type: "match-declined", by: publicUser(conn.user) });
     return;
   }
+  if (fromRoom.guest || rooms.get(invite.toSessionId)?.guest) {
+    send(conn, { type: "error", message: "Kisi ek live me guest betha hai — match abhi nahi ho sakta." });
+    if (fromRoom?.broadcaster) send(fromRoom.broadcaster, { type: "match-declined", by: publicUser(conn.user) });
+    return;
+  }
   await startMatch(invite.fromSessionId, invite.toSessionId);
+}
+
+// ---- Guest seat -------------------------------------------------------------
+// One viewer at a time can sit on the stage as a guest publisher. The
+// flow mirrors the match invites: request -> broadcaster accepts or
+// declines -> the guest confirms camera/mic ("guest-ready") -> wiring.
+// Wiring mirrors the match cross-wiring too: the broadcaster initiates a
+// full-duplex peer connection to the guest (replacing its plain viewer
+// connection to them), and the guest is told about every viewer so it
+// can publish to each of them. New viewers who join mid-seat are wired
+// to both publishers (see handleJoin).
+const GUEST_REQUEST_TTL_MS = 30_000;
+
+function seatGuest(room, guestConn) {
+  room.guest = { peerId: guestConn.peerId, user: publicUser(guestConn.user) };
+  room.guestWired = false;
+  broadcastRoom(room.sessionId, { type: "guest-seated", liveSessionId: room.sessionId, guestPeerId: guestConn.peerId, guest: room.guest.user });
+}
+
+function wireGuest(room, guestConn) {
+  room.guestWired = true;
+  if (room.broadcaster) {
+    send(room.broadcaster, { type: "guest-peer", peerId: guestConn.peerId, initiate: true });
+    send(guestConn, { type: "guest-peer", peerId: room.broadcaster.peerId, initiate: false });
+  }
+  for (const viewer of room.viewers.values()) {
+    if (viewer !== guestConn) {
+      send(guestConn, { type: "viewer-joined", peerId: viewer.peerId, user: publicUser(viewer.user), guestPublisher: true });
+    }
+  }
+}
+
+// Frees the seat and tells the whole room. If the ex-guest is still
+// connected and the seat had been wired, the broadcaster is re-notified
+// about them as a plain viewer so it re-offers its normal stream.
+function unseatGuest(room, { removed = false } = {}) {
+  if (!room.guest) return;
+  const guestPeerId = room.guest.peerId;
+  const wasWired = room.guestWired;
+  room.guest = null;
+  room.guestWired = false;
+  broadcastRoom(room.sessionId, { type: "guest-left", liveSessionId: room.sessionId, guestPeerId, removed });
+  const guestConn = room.viewers.get(guestPeerId);
+  if (guestConn && wasWired && room.broadcaster) {
+    send(room.broadcaster, { type: "viewer-joined", peerId: guestConn.peerId, user: publicUser(guestConn.user) });
+  }
+}
+
+function handleGuestRequest(conn) {
+  if (!conn.sessionId || conn.role !== "viewer") {
+    send(conn, { type: "error", message: "Sirf viewers hi live me bethne ki request bhej sakte hain." });
+    return;
+  }
+  const room = rooms.get(conn.sessionId);
+  if (!room?.broadcaster) {
+    send(conn, { type: "error", message: "Broadcaster ab live nahi hai." });
+    return;
+  }
+  if (isInMatch(conn.sessionId)) {
+    send(conn, { type: "error", message: "PK match ke doran guest nahi beth sakta." });
+    return;
+  }
+  if (room.guest) {
+    send(conn, { type: "error", message: "Ek guest pehle se betha hai." });
+    return;
+  }
+  for (const req of room.guestRequests.values()) {
+    if (req.fromPeerId === conn.peerId) {
+      send(conn, { type: "error", message: "Tumhari request pehle se bheji hui hai — jawab ka intezar karo." });
+      return;
+    }
+  }
+  const requestId = crypto.randomBytes(8).toString("hex");
+  const timer = setTimeout(() => {
+    if (room.guestRequests.delete(requestId)) {
+      send(conn, { type: "guest-request-expired", requestId });
+      if (room.broadcaster) send(room.broadcaster, { type: "guest-request-expired", requestId });
+    }
+  }, GUEST_REQUEST_TTL_MS);
+  room.guestRequests.set(requestId, { fromPeerId: conn.peerId, timer });
+  send(room.broadcaster, {
+    type: "guest-request",
+    requestId,
+    from: { peerId: conn.peerId, user: publicUser(conn.user) },
+    expiresAt: Date.now() + GUEST_REQUEST_TTL_MS,
+  });
+}
+
+function handleGuestRespond(conn, requestId, accept) {
+  if (conn.role !== "broadcaster" || !conn.sessionId) return;
+  const room = rooms.get(conn.sessionId);
+  const req = room && typeof requestId === "string" ? room.guestRequests.get(requestId) : undefined;
+  if (!req) {
+    send(conn, { type: "error", message: "Ye request khatam ho chuki hai." });
+    return;
+  }
+  room.guestRequests.delete(requestId);
+  clearTimeout(req.timer);
+  const requester = room.viewers.get(req.fromPeerId);
+  if (!accept) {
+    if (requester) send(requester, { type: "guest-declined" });
+    return;
+  }
+  if (room.guest || isInMatch(conn.sessionId)) {
+    send(conn, { type: "error", message: room.guest ? "Ek guest pehle se betha hai." : "PK match ke doran guest nahi beth sakta." });
+    if (requester) send(requester, { type: "guest-declined" });
+    return;
+  }
+  if (!requester) {
+    send(conn, { type: "error", message: "Woh viewer ab live me nahi hai." });
+    return;
+  }
+  seatGuest(room, requester);
+}
+
+function handleGuestReady(conn) {
+  if (!conn.sessionId) return;
+  const room = rooms.get(conn.sessionId);
+  if (!room || room.guest?.peerId !== conn.peerId) return;
+  wireGuest(room, conn);
+}
+
+function handleGuestLeave(conn) {
+  if (!conn.sessionId) return;
+  const room = rooms.get(conn.sessionId);
+  if (room && room.guest?.peerId === conn.peerId) unseatGuest(room);
+}
+
+function handleGuestRemove(conn) {
+  if (conn.role !== "broadcaster" || !conn.sessionId) return;
+  const room = rooms.get(conn.sessionId);
+  if (room?.guest) unseatGuest(room, { removed: true });
+}
+
+// Drops a departing viewer's pending guest requests (the broadcaster's
+// request card must not outlive the requester).
+function dropGuestRequestsFrom(room, peerId) {
+  for (const [requestId, req] of [...room.guestRequests.entries()]) {
+    if (req.fromPeerId === peerId) {
+      room.guestRequests.delete(requestId);
+      clearTimeout(req.timer);
+      if (room.broadcaster) send(room.broadcaster, { type: "guest-request-expired", requestId });
+    }
+  }
 }
 
 function removeFromRoom(conn) {
@@ -395,6 +573,14 @@ function removeFromRoom(conn) {
   }
   if (room.viewers.get(conn.peerId) === conn) {
     room.viewers.delete(conn.peerId);
+    // If the departing viewer held the guest seat, the seat ends with
+    // them (no re-offer — they are gone); their pending requests die too.
+    if (room.guest?.peerId === conn.peerId) {
+      room.guest = null;
+      room.guestWired = false;
+      broadcastRoom(sessionId, { type: "guest-left", liveSessionId: sessionId, guestPeerId: conn.peerId, removed: false });
+    }
+    dropGuestRequestsFrom(room, conn.peerId);
     if (room.broadcaster) send(room.broadcaster, { type: "viewer-left", peerId: conn.peerId });
     // In a match, the other broadcaster also holds a peer connection to
     // this viewer — tell it to drop the connection too.
@@ -446,14 +632,31 @@ async function handleJoin(conn, sessionId) {
       role,
       viewerCount: room.viewers.size,
       broadcasterPeerId: conn.peerId,
+      guestPeerId: room.guest?.peerId ?? null,
+      guest: room.guest?.user ?? null,
     });
     // Introduce the broadcaster to viewers who were already waiting, and
     // tell the broadcaster about each of them so it can send its offers.
+    // The seated guest is wired separately (full-duplex guest connection).
     for (const viewer of room.viewers.values()) {
       send(viewer, { type: "broadcaster-joined", peerId: conn.peerId });
-      send(conn, { type: "viewer-joined", peerId: viewer.peerId, user: publicUser(viewer.user) });
+      if (room.guest?.peerId !== viewer.peerId) {
+        send(conn, { type: "viewer-joined", peerId: viewer.peerId, user: publicUser(viewer.user) });
+      }
+    }
+    if (room.guest) {
+      const guestConn = room.viewers.get(room.guest.peerId);
+      if (guestConn) wireGuest(room, guestConn);
     }
   } else {
+    // A seat holder who reconnects arrives as a brand-new viewer with a
+    // new peer id — the old seat cannot follow them, so it ends here.
+    if (room.guest && room.guest.user.id === conn.user.id && room.guest.peerId !== conn.peerId) {
+      const stalePeerId = room.guest.peerId;
+      room.guest = null;
+      room.guestWired = false;
+      broadcastRoom(sessionId, { type: "guest-left", liveSessionId: sessionId, guestPeerId: stalePeerId, removed: false });
+    }
     room.viewers.set(conn.peerId, conn);
     send(conn, {
       type: "joined",
@@ -461,9 +664,16 @@ async function handleJoin(conn, sessionId) {
       role,
       viewerCount: room.viewers.size,
       broadcasterPeerId: room.broadcaster?.peerId ?? null,
+      guestPeerId: room.guest?.peerId ?? null,
+      guest: room.guest?.user ?? null,
     });
     if (room.broadcaster) {
       send(room.broadcaster, { type: "viewer-joined", peerId: conn.peerId, user: publicUser(conn.user) });
+    }
+    // Mid-seat joiner: the guest must publish to them as well.
+    if (room.guest && room.guest.peerId !== conn.peerId) {
+      const guestConn = room.viewers.get(room.guest.peerId);
+      if (guestConn) send(guestConn, { type: "viewer-joined", peerId: conn.peerId, user: publicUser(conn.user), guestPublisher: true });
     }
     broadcastViewerCount(sessionId);
     void notePeakViewers(sessionId, room.viewers.size);
@@ -595,6 +805,22 @@ export function attachLiveServer(httpServer, { authenticate }) {
             break;
           case "match-respond":
             await handleMatchRespond(conn, msg.inviteId, msg.accept === true);
+            break;
+          case "guest-request":
+            handleGuestRequest(conn);
+            break;
+          case "guest-respond":
+            handleGuestRespond(conn, msg.requestId, msg.accept === true);
+            break;
+          case "guest-ready":
+            handleGuestReady(conn);
+            break;
+          case "guest-leave":
+          case "guest-abort":
+            handleGuestLeave(conn);
+            break;
+          case "guest-remove":
+            handleGuestRemove(conn);
             break;
           default:
             break;
