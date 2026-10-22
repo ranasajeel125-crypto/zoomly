@@ -3,3 +3,4 @@ client/dist/
 data/
 .env
 *.log
+.env.deploy
