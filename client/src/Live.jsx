@@ -2,12 +2,14 @@
 //
 // Video is WebRTC peer-to-peer: the broadcaster's camera/mic goes directly
 // to each viewer (mesh). The server only relays signaling, chat, viewer
-// counts and gift events over the /ws socket (see live.js). STUN-only, so
-// a few strict networks cannot connect the video — chat still works and
-// the watch screen says so plainly.
+// counts and gift events over the /ws socket (see live.js). Peers use the
+// server-provided ICE list (Google STUN + TURN relays): direct connections
+// are preferred, and a peer whose direct connection fails is retried once
+// through TURN (iceTransportPolicy "relay") — that is what makes live work
+// on carrier-grade NAT / mobile data, where STUN-only cannot connect.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { call } from "./api";
-import { ICE_SERVERS, openLiveSocket } from "./live";
+import { logSelectedCandidatePair, openLiveSocket, peerConnectionConfig, setIceServers } from "./live";
 import { Avatar, Notice } from "./App.jsx";
 
 const ENDED_TEXT = "This live has ended.";
@@ -379,6 +381,8 @@ function GoLiveSetup({ onStart, onCancel }) {
       setError(res.message || "Live start nahi ho saki.");
       return;
     }
+    // Adopt the server's ICE list (STUN + TURN) for all peer connections.
+    setIceServers(res.ice_servers);
     // Ownership of the stream passes to the broadcast room.
     streamRef.current = null;
     onStart(res.session, stream);
@@ -463,28 +467,37 @@ function BroadcastRoom({ me, session, stream, onDone }) {
     },
     onSignal: async (msg) => {
       if (!msg.data) return;
-      const entry = pcsRef.current.get(msg.from);
-      if (entry) {
-        const { pc } = entry;
-        try {
-          if (msg.data.kind === "answer" && msg.data.description) {
-            await pc.setRemoteDescription(msg.data.description);
-            for (const cand of entry.pendingIce.splice(0)) {
-              await pc.addIceCandidate(cand).catch(() => {});
-            }
-          } else if (msg.data.kind === "ice" && msg.data.candidate) {
-            if (pc.remoteDescription) await pc.addIceCandidate(msg.data.candidate).catch(() => {});
-            else entry.pendingIce.push(msg.data.candidate);
-          }
-        } catch {
-          /* peer went away mid-handshake */
+      // A peer whose direct connection failed asks us to re-offer to them
+      // through a TURN relay (their retry path — see onPeerIceFailed).
+      if (msg.data.kind === "renegotiate") {
+        const kind = pcsRef.current.get(msg.from)?.kind ?? (msg.from === matchPeerIdRef.current ? "match-peer" : "viewer");
+        closePeer(msg.from);
+        void connectViewer(msg.from, kind, { relayOnly: true });
+        return;
+      }
+      // Only the PK match peer ever offers to us; answer it. (This also
+      // replaces a failed earlier attempt when they re-offer via relay.)
+      if (msg.data.kind === "offer" && msg.data.description) {
+        if (msg.from === matchPeerIdRef.current) {
+          await answerMatchPeer(msg.from, msg.data.description, { relayOnly: !!msg.data.relay });
         }
         return;
       }
-      // No connection yet: the match peer (other broadcaster) is offering
-      // to us — we are the non-initiating side; answer with our tracks too.
-      if (msg.data.kind === "offer" && msg.data.description && msg.from === matchPeerIdRef.current) {
-        await answerMatchPeer(msg.from, msg.data.description);
+      const entry = pcsRef.current.get(msg.from);
+      if (!entry) return;
+      const { pc } = entry;
+      try {
+        if (msg.data.kind === "answer" && msg.data.description) {
+          await pc.setRemoteDescription(msg.data.description);
+          for (const cand of entry.pendingIce.splice(0)) {
+            await pc.addIceCandidate(cand).catch(() => {});
+          }
+        } else if (msg.data.kind === "ice" && msg.data.candidate) {
+          if (pc.remoteDescription) await pc.addIceCandidate(msg.data.candidate).catch(() => {});
+          else entry.pendingIce.push(msg.data.candidate);
+        }
+      } catch {
+        /* peer went away mid-handshake */
       }
     },
     onMatchInvite: (msg) => setIncomingInvite(msg),
@@ -542,9 +555,19 @@ function BroadcastRoom({ me, session, stream, onDone }) {
     [stream]
   );
 
+  function clearEntryTimers(entry) {
+    for (const key of ["disconnectTimer", "renegoTimer", "giveUpTimer"]) {
+      if (entry[key]) {
+        clearTimeout(entry[key]);
+        entry[key] = null;
+      }
+    }
+  }
+
   function closePeer(peerId) {
     const entry = pcsRef.current.get(peerId);
     if (entry) {
+      clearEntryTimers(entry);
       try {
         entry.pc.close();
       } catch {
@@ -562,9 +585,20 @@ function BroadcastRoom({ me, session, stream, onDone }) {
     if (matchVideoRef.current) matchVideoRef.current.srcObject = null;
   }
 
-  function wirePeer(peerId, kind) {
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    const entry = { pc, pendingIce: [], kind };
+  // Creates a peer connection to a viewer (or the match peer) and wires
+  // its lifecycle. `initiator` peers are ones we offer to; the match peer
+  // we answer is created by answerMatchPeer instead.
+  //
+  // TURN retry: a peer whose ICE connection fails (or stays disconnected)
+  // is retried ONCE with iceTransportPolicy "relay" — the direct path is
+  // preferred, the TURN relay is the fallback that works behind
+  // carrier-grade NAT. Initiators re-offer with relay:true so the
+  // answering side also goes relay-only; answerers ask the other side to
+  // re-offer (the "renegotiate" signal).
+  function wirePeer(peerId, kind, opts = {}) {
+    const { relayOnly = false, retried = false, initiator = true } = opts;
+    const pc = new RTCPeerConnection(peerConnectionConfig(relayOnly));
+    const entry = { pc, pendingIce: [], kind, relayOnly, retried, initiator, disconnectTimer: null, renegoTimer: null, giveUpTimer: null, pairLogged: false };
     pcsRef.current.set(peerId, entry);
     for (const track of stream.getTracks()) pc.addTrack(track, stream);
     pc.ontrack = (e) => {
@@ -575,31 +609,82 @@ function BroadcastRoom({ me, session, stream, onDone }) {
     pc.onicecandidate = (e) => {
       if (e.candidate) sockRef.current?.signal(peerId, { kind: "ice", candidate: e.candidate.toJSON() });
     };
+    pc.oniceconnectionstatechange = () => monitorIce(peerId, entry);
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+      if (pc.connectionState === "connected" && !entry.pairLogged) {
+        entry.pairLogged = true;
+        void logSelectedCandidatePair(pc, `broadcast ${kind}`);
+      }
+      if (pc.connectionState === "closed" && pcsRef.current.get(peerId) === entry) {
+        clearEntryTimers(entry);
         pcsRef.current.delete(peerId);
       }
     };
     return entry;
   }
 
-  async function connectViewer(peerId, kind = "viewer") {
+  function monitorIce(peerId, entry) {
+    if (pcsRef.current.get(peerId) !== entry) return;
+    const st = entry.pc.iceConnectionState;
+    if (st === "connected" || st === "completed") {
+      clearEntryTimers(entry);
+    } else if (st === "disconnected") {
+      clearTimeout(entry.disconnectTimer);
+      entry.disconnectTimer = setTimeout(() => {
+        if (pcsRef.current.get(peerId) === entry && entry.pc.iceConnectionState === "disconnected") onPeerIceFailed(peerId);
+      }, 4000);
+    } else if (st === "failed") {
+      onPeerIceFailed(peerId);
+    }
+  }
+
+  function onPeerIceFailed(peerId) {
+    const entry = pcsRef.current.get(peerId);
+    if (!entry) return;
+    clearEntryTimers(entry);
+    if (entry.retried) {
+      // Already retried via relay and still failing — let it go.
+      closePeer(peerId);
+      return;
+    }
+    entry.retried = true;
+    if (entry.initiator) {
+      const { kind } = entry;
+      closePeer(peerId);
+      room.pushMsg({ kind: "system", text: "🔄 Ek connection direct nahi ban saka — relay (TURN) se dobara koshish ho rahi hai…" });
+      void connectViewer(peerId, kind, { relayOnly: true });
+    } else {
+      // We answered this peer, so we cannot re-offer; ask them to.
+      entry.renegoTimer = setTimeout(() => {
+        if (pcsRef.current.get(peerId) !== entry) return;
+        sockRef.current?.signal(peerId, { kind: "renegotiate", relay: true });
+        entry.giveUpTimer = setTimeout(() => {
+          if (pcsRef.current.get(peerId) === entry) closePeer(peerId);
+        }, 12000);
+      }, 1200);
+    }
+  }
+
+  async function connectViewer(peerId, kind = "viewer", opts = {}) {
     const sock = sockRef.current;
     if (!sock || pcsRef.current.has(peerId)) return;
-    const { pc } = wirePeer(peerId, kind);
+    const { relayOnly = false } = opts;
+    const { pc } = wirePeer(peerId, kind, { relayOnly, retried: relayOnly, initiator: true });
     try {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      sock.signal(peerId, { kind: "offer", description: pc.localDescription });
+      sock.signal(peerId, { kind: "offer", description: pc.localDescription, relay: relayOnly || undefined });
     } catch {
       pcsRef.current.delete(peerId);
     }
   }
 
-  async function answerMatchPeer(peerId, description) {
+  async function answerMatchPeer(peerId, description, opts = {}) {
     const sock = sockRef.current;
-    if (!sock || pcsRef.current.has(peerId)) return;
-    const entry = wirePeer(peerId, "match-peer");
+    if (!sock) return;
+    const { relayOnly = false } = opts;
+    if (pcsRef.current.has(peerId)) closePeer(peerId);
+    const entry = wirePeer(peerId, "match-peer", { relayOnly, retried: relayOnly, initiator: false });
     const { pc } = entry;
     try {
       await pc.setRemoteDescription(description);
@@ -762,6 +847,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [videoError, setVideoError] = useState("");
+  const [videoStatus, setVideoStatus] = useState("");
   const [needsTap, setNeedsTap] = useState(false);
   const [muted, setMuted] = useState(true);
   // PK match state
@@ -780,7 +866,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
       if (!msg.data) return;
       if (msg.data.kind === "offer" && msg.data.description) {
         const kind = msg.from === mainPeerRef.current ? "main" : "match";
-        await answerOffer(msg.from, msg.data.description, kind);
+        await answerOffer(msg.from, msg.data.description, kind, { relayOnly: !!msg.data.relay });
       } else if (msg.data.kind === "ice" && msg.data.candidate) {
         const entry = pcsRef.current.get(msg.from);
         if (entry) {
@@ -810,6 +896,8 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
     if (res.ok) {
       setDetail(res);
       setBalance(res.my_coin_balance);
+      // Adopt the server's ICE list (STUN + TURN) for peer connections.
+      setIceServers(res.ice_servers);
     }
   }, [session.id]);
 
@@ -824,45 +912,74 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
     []
   );
 
-  function closeAllPcs() {
-    for (const { pc } of pcsRef.current.values()) {
-      try {
-        pc.close();
-      } catch {
-        /* ignore */
+  function clearEntryTimers(entry) {
+    for (const key of ["disconnectTimer", "renegoTimer", "giveUpTimer"]) {
+      if (entry[key]) {
+        clearTimeout(entry[key]);
+        entry[key] = null;
       }
     }
+  }
+
+  function closePcEntry(peerId, entry) {
+    clearEntryTimers(entry);
+    try {
+      entry.pc.close();
+    } catch {
+      /* ignore */
+    }
+    if (pcsRef.current.get(peerId) === entry) pcsRef.current.delete(peerId);
+  }
+
+  function closeAllPcs() {
+    for (const [peerId, entry] of [...pcsRef.current.entries()]) closePcEntry(peerId, entry);
     pcsRef.current.clear();
   }
 
   function closeMatchPcs() {
     for (const [peerId, entry] of [...pcsRef.current.entries()]) {
-      if (entry.kind === "match") {
-        try {
-          entry.pc.close();
-        } catch {
-          /* ignore */
-        }
-        pcsRef.current.delete(peerId);
-      }
+      if (entry.kind === "match") closePcEntry(peerId, entry);
     }
     matchPeerRef.current = null;
     if (matchVideoRef.current) matchVideoRef.current.srcObject = null;
   }
 
-  async function answerOffer(fromPeerId, description, kind) {
+  function showVideoFailure(kind) {
+    setVideoStatus("");
+    if (kind === "main") setVideoError("Video connection nahi ban saka — is network par direct (P2P) connection mushkil hai. Chat phir bhi chal raha hai.");
+    else setVideoError("PK wale broadcaster ki video connect nahi ho saki — chat aur score phir bhi chal rahe hain.");
+  }
+
+  // First ICE failure on a publisher connection: ask the publisher to
+  // re-offer through a TURN relay (direct is tried first; relay is the
+  // fallback that works behind carrier-grade NAT). If the publisher's
+  // own retry offer arrives first, it replaces this entry and wins.
+  function onPeerIceFailed(fromPeerId, entry) {
+    if (pcsRef.current.get(fromPeerId) !== entry) return;
+    if (entry.relayOnly) {
+      // This WAS the relay attempt — nothing left to try.
+      showVideoFailure(entry.kind);
+      return;
+    }
+    setVideoError("");
+    setVideoStatus("Video connect ho raha hai… relay (TURN) se dobara koshish ho rahi hai.");
+    entry.renegoTimer = setTimeout(() => {
+      sockRef.current?.signal(fromPeerId, { kind: "renegotiate", relay: true });
+    }, 1200);
+    entry.giveUpTimer = setTimeout(() => {
+      if (pcsRef.current.get(fromPeerId) === entry) showVideoFailure(entry.kind);
+    }, 15000);
+  }
+
+  async function answerOffer(fromPeerId, description, kind, opts = {}) {
     const sock = sockRef.current;
     if (!sock) return;
+    const { relayOnly = false } = opts;
     const existing = pcsRef.current.get(fromPeerId);
-    if (existing) {
-      try {
-        existing.pc.close();
-      } catch {
-        /* ignore */
-      }
-    }
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    const entry = { pc, pendingIce: [], kind };
+    if (existing) closePcEntry(fromPeerId, existing);
+    setVideoStatus("Video connect ho raha hai…");
+    const pc = new RTCPeerConnection(peerConnectionConfig(relayOnly));
+    const entry = { pc, pendingIce: [], kind, relayOnly, disconnectTimer: null, renegoTimer: null, giveUpTimer: null, pairLogged: false };
     pcsRef.current.set(fromPeerId, entry);
     pc.ontrack = (e) => {
       const video = kind === "main" ? videoRef.current : matchVideoRef.current;
@@ -875,12 +992,24 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
     pc.onicecandidate = (e) => {
       if (e.candidate) sock.signal(fromPeerId, { kind: "ice", candidate: e.candidate.toJSON() });
     };
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "failed") {
-        if (kind === "main") setVideoError("Video connection nahi ban saka — is network par direct (P2P) connection mushkil hai. Chat phir bhi chal raha hai.");
-        else setVideoError("PK wale broadcaster ki video connect nahi ho saki — chat aur score phir bhi chal rahe hain.");
-      } else if (pc.connectionState === "connected" && kind === "main") {
-        setVideoError("");
+    pc.oniceconnectionstatechange = () => {
+      if (pcsRef.current.get(fromPeerId) !== entry) return;
+      const st = pc.iceConnectionState;
+      if (st === "connected" || st === "completed") {
+        clearEntryTimers(entry);
+        setVideoStatus("");
+        if (kind === "main") setVideoError("");
+        if (!entry.pairLogged) {
+          entry.pairLogged = true;
+          void logSelectedCandidatePair(pc, `watch ${kind}`);
+        }
+      } else if (st === "disconnected") {
+        clearTimeout(entry.disconnectTimer);
+        entry.disconnectTimer = setTimeout(() => {
+          if (pcsRef.current.get(fromPeerId) === entry && pc.iceConnectionState === "disconnected") onPeerIceFailed(fromPeerId, entry);
+        }, 4000);
+      } else if (st === "failed") {
+        onPeerIceFailed(fromPeerId, entry);
       }
     };
     try {
@@ -975,6 +1104,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
       </div>
       {match && <MatchBar match={match} />}
       <MatchResultBanner result={matchResult} myUserId={me.id} />
+      <Notice text={videoStatus} />
       <Notice text={videoError} bad />
       <Notice text={room.authError} bad />
       <Notice text={error} bad />

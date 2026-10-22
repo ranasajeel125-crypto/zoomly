@@ -115,3 +115,25 @@ export function giftSplit(coins) {
 // seconds). Invites expire after 30 seconds unanswered.
 export const MATCH_DURATION_MS = Math.max(5, Number(process.env.MATCH_DURATION_SECONDS) || 300) * 1000;
 export const MATCH_INVITE_TTL_MS = 30_000;
+
+// ---- WebRTC ICE servers (LIVE) -------------------------------------------------
+// Single source of truth for the peer-connection configuration: startLive
+// and getLive return this list as `ice_servers`, and the client adopts it
+// (client/src/live.js keeps an identical built-in fallback copy) — so TURN
+// credentials can be rotated here, server-side, with no client release.
+//
+// STUN alone cannot connect peers behind carrier-grade NAT — most mobile
+// data in Pakistan — so alongside Google STUN the list carries the free
+// public Metered Open Relay (openrelay.metered.ca) TURN servers. That is a
+// shared community relay (bandwidth-limited, can be congested at peak
+// times); a dedicated TURN account's servers can simply replace these
+// entries here when needed.
+export const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:openrelay.metered.ca:80" },
+  { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turns:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+];

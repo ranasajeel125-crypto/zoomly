@@ -9,6 +9,7 @@ import * as schema from "./schema.mjs";
 import {
   COIN_PACKS,
   GIFT_CATALOG,
+  ICE_SERVERS,
   JAZZCASH,
   LEADERBOARD_LIMIT,
   REFERRAL_INVITER_COINS,
@@ -656,7 +657,7 @@ export const Actions = {
       const inserted = await db.insert(schema.liveSessions).values({ userId: user.id, title: args.title }).returning();
       const session = inserted[0];
       if (!session) return { ok: false, message: "Could not start the live. Please try again." };
-      return { ok: true, message: "You are live!", session: liveSessionDto(session, user) };
+      return { ok: true, message: "You are live!", session: liveSessionDto(session, user), ice_servers: ICE_SERVERS };
     }
   ),
 
@@ -733,6 +734,7 @@ export const Actions = {
         ok: true,
         session: liveSessionDto(session, broadcaster),
         gifts: GIFT_CATALOG,
+        ice_servers: ICE_SERVERS,
         my_coin_balance: user.coinBalance,
         is_mine: session.userId === user.id,
       };

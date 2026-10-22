@@ -14,13 +14,68 @@
 //   sock.close();
 import { getToken } from "./api.js";
 
-// Public Google STUN servers only (no TURN in v1): most home/mobile
-// networks connect fine; some strict NATs will fail — the UI says so and
-// chat keeps working.
-export const ICE_SERVERS = [
+// ICE servers for the WebRTC peer connections. The server is the source
+// of truth (server/config.mjs): startLive/getLive return the list as
+// `ice_servers` and the app adopts it via setIceServers(), so TURN
+// credentials can be rotated server-side without a client release. This
+// built-in copy is only a fallback for peers set up before that response
+// arrives, and must match the server's list.
+//
+// STUN alone cannot connect peers behind carrier-grade NAT (most mobile
+// data), so the list includes TURN relays (Metered Open Relay) next to
+// Google STUN. When a direct connection still fails, Live.jsx retries
+// the peer once with iceTransportPolicy "relay" (TURN-only).
+export const FALLBACK_ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:openrelay.metered.ca:80" },
+  { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turns:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
 ];
+
+let activeIceServers = FALLBACK_ICE_SERVERS;
+
+export function setIceServers(list) {
+  if (Array.isArray(list) && list.length > 0) activeIceServers = list;
+}
+
+export function getIceServers() {
+  return activeIceServers;
+}
+
+// RTCPeerConnection configuration; relayOnly forces all media through a
+// TURN relay (the retry path for networks where direct P2P fails).
+export function peerConnectionConfig(relayOnly = false) {
+  const config = { iceServers: activeIceServers };
+  if (relayOnly) config.iceTransportPolicy = "relay";
+  return config;
+}
+
+// Debug aid: after a peer connects, log which ICE candidate type won
+// (host = same LAN, srflx = direct NAT traversal, relay = via TURN) so
+// connection problems can be diagnosed from the browser console.
+export async function logSelectedCandidatePair(pc, label = "peer") {
+  try {
+    const stats = await pc.getStats();
+    let selectedId = null;
+    stats.forEach((r) => {
+      if (r.type === "transport" && r.selectedCandidatePairId) selectedId = r.selectedCandidatePairId;
+    });
+    let pair = null;
+    stats.forEach((r) => {
+      if (r.type !== "candidate-pair") return;
+      if (selectedId ? r.id === selectedId : r.state === "succeeded" && r.nominated) pair = r;
+    });
+    if (!pair) return;
+    const local = stats.get(pair.localCandidateId);
+    const remote = stats.get(pair.remoteCandidateId);
+    console.info(`[zoomly-live] ${label}: connected via ${local?.candidateType ?? "?"} candidate (remote: ${remote?.candidateType ?? "?"})`);
+  } catch {
+    /* stats are best-effort diagnostics */
+  }
+}
 
 export function openLiveSocket(handlers = {}) {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";

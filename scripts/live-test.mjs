@@ -174,6 +174,35 @@ check(
 );
 check("getLive reports my balance", detail.my_coin_balance === 6010, `bal=${detail.my_coin_balance}`);
 
+// ---- TURN / ICE configuration ------------------------------------------------
+// The fix for live video on carrier-grade NAT (mobile data): the server
+// hands every client its ICE list (STUN + TURN relays) via startLive /
+// getLive, and the client adopts it, preferring direct connections and
+// retrying failed peers once through TURN (iceTransportPolicy "relay").
+// (The headless tests cannot exercise a real TURN media path from here,
+// so these are config/shape checks on the real payloads + client source.)
+const iceList = started.ice_servers;
+check("startLive returns ice_servers", Array.isArray(iceList) && iceList.length >= 5, JSON.stringify(started).slice(0, 200));
+const turnEntries = (iceList ?? []).filter((s) => String(s.urls).startsWith("turn"));
+check(
+  "ice_servers include TURN relays with credentials",
+  turnEntries.length >= 3 && turnEntries.every((s) => typeof s.username === "string" && s.username.length > 0 && typeof s.credential === "string" && s.credential.length > 0),
+  JSON.stringify(iceList)
+);
+check("ice_servers include the Open Relay TURN host", turnEntries.some((s) => String(s.urls).includes("openrelay.metered.ca")));
+check("ice_servers keep Google STUN", (iceList ?? []).some((s) => String(s.urls).includes("stun.l.google.com")));
+check("getLive returns the same ICE list", JSON.stringify(detail.ice_servers) === JSON.stringify(iceList));
+const SRC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "client", "src");
+const liveJsSrc = fs.readFileSync(path.join(SRC_DIR, "live.js"), "utf8");
+const liveJsxSrc = fs.readFileSync(path.join(SRC_DIR, "Live.jsx"), "utf8");
+check("client adopts the server ICE list", liveJsSrc.includes("setIceServers") && liveJsxSrc.includes("setIceServers(res.ice_servers)"));
+check("client fallback list carries TURN", liveJsSrc.includes("openrelay.metered.ca") && liveJsSrc.includes("FALLBACK_ICE_SERVERS"));
+check(
+  "client retries failed peers via relay + renegotiate",
+  liveJsSrc.includes("iceTransportPolicy") && liveJsSrc.includes('"relay"') && liveJsxSrc.includes("renegotiate") && liveJsxSrc.includes("onPeerIceFailed")
+);
+check("client logs the selected candidate pair type", liveJsSrc.includes("logSelectedCandidatePair") && liveJsxSrc.includes("logSelectedCandidatePair"));
+
 // ---- WebSocket: join, presence, signaling relay, chat ---------------------------
 
 const hostSock = await connectSocket(creatorToken);
