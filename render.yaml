@@ -1,0 +1,25 @@
+# Render blueprint for Zoomly (free tier).
+# In Render: New -> Blueprint -> connect the repo containing this file.
+services:
+  - type: web
+    name: zoomly
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: TURSO_DATABASE_URL
+        sync: false # set in Render dashboard, e.g. libsql://your-db.turso.io
+      - key: TURSO_AUTH_TOKEN
+        sync: false # set in Render dashboard (secret)
+      - key: ADMIN_USERNAME
+        sync: false # set in Render dashboard — the owner account's username
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false # set in Render dashboard
+      - key: CLOUDINARY_API_KEY
+        sync: false # set in Render dashboard
+      - key: CLOUDINARY_API_SECRET
+        sync: false # set in Render dashboard (secret)
+      - key: NODE_VERSION
+        value: "20"
