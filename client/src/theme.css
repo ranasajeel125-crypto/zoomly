@@ -185,3 +185,15 @@ select {
   background: var(--accent);
   border-radius: 999px;
 }
+
+/* Live gift bottom-sheet entrance */
+@keyframes zoomly-sheet-up {
+  from {
+    transform: translateY(48px);
+    opacity: 0.3;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}

@@ -1,5 +1,9 @@
 // Zoomly LIVE: browse live broadcasts, go live, watch + chat + gifts.
 //
+// The watch and broadcast rooms are full-screen stages (TikTok-style):
+// the video fills the whole viewport and the chat, controls, gift sheet
+// and PK score bar float over it.
+//
 // Video is WebRTC peer-to-peer: the broadcaster's camera/mic goes directly
 // to each viewer (mesh). The server only relays signaling, chat, viewer
 // counts and gift events over the /ws socket (see live.js). Peers use the
@@ -30,6 +34,90 @@ function LiveBadge() {
     </span>
   );
 }
+
+// ---- full-screen stage (watch + broadcast rooms) ------------------------------
+// TikTok-style: the video fills the whole viewport (the stage is fixed, so
+// it covers the bottom nav too) and every control floats over it — top bar
+// with a fade, notices under it, chat + actions in a bottom gradient, the
+// PK score bar across the middle seam when the stage is split in two.
+const stageStyle = {
+  position: "fixed",
+  inset: 0,
+  zIndex: 60,
+  background: "#000",
+  maxWidth: 860,
+  margin: "0 auto",
+  display: "flex",
+  flexDirection: "column",
+  justifyContent: "space-between",
+  overflow: "hidden",
+};
+const videoFillStyle = { width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000" };
+const topBarStyle = {
+  position: "relative",
+  zIndex: 6,
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  flexWrap: "wrap",
+  padding: "calc(10px + env(safe-area-inset-top)) 12px 30px",
+  background: "linear-gradient(rgba(0,0,0,0.6), rgba(0,0,0,0))",
+};
+const bottomOverlayStyle = {
+  position: "relative",
+  zIndex: 6,
+  padding: "30px 12px calc(10px + env(safe-area-inset-bottom))",
+  background: "linear-gradient(rgba(0,0,0,0), rgba(0,0,0,0.66))",
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
+};
+const bottomBarStyle = { display: "flex", gap: 8, alignItems: "center" };
+const noticeStackStyle = {
+  position: "absolute",
+  top: "calc(118px + env(safe-area-inset-top))",
+  left: 12,
+  right: 12,
+  zIndex: 6,
+  display: "grid",
+  gap: 6,
+  pointerEvents: "none",
+};
+const seamBarStyle = {
+  position: "absolute",
+  top: "50%",
+  left: 0,
+  right: 0,
+  transform: "translateY(-50%)",
+  padding: "0 10px",
+  zIndex: 5,
+  pointerEvents: "none",
+};
+const darkChipStyle = { background: "rgba(0,0,0,0.5)", borderColor: "rgba(255,255,255,0.25)", color: "#fff" };
+const roundBtnStyle = {
+  width: 46,
+  height: 46,
+  borderRadius: "50%",
+  border: "1px solid rgba(255,255,255,0.3)",
+  background: "rgba(20,20,20,0.6)",
+  color: "#fff",
+  fontSize: 20,
+  flexShrink: 0,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  cursor: "pointer",
+};
+const tileLabelStyle = (bg) => ({
+  position: "absolute",
+  left: 10,
+  top: 10,
+  background: bg,
+  borderRadius: 10,
+  padding: "4px 8px",
+  fontSize: 13,
+  color: "#fff",
+});
 
 // ---- shared room hook ---------------------------------------------------------
 // Opens the socket, authenticates, joins the room, and collects the room's
@@ -139,16 +227,57 @@ function useLiveRoom(sessionId, handlers = {}) {
   return { sockRef, messages, pushMsg, viewerCount, ended, connected, authError, sendChat };
 }
 
-// ---- chat / gift feed -----------------------------------------------------------
+// ---- chat / gift feed (overlay versions for the full-screen stage) -------------
 
-function ChatPanel({ messages, onSend, disabled, placeholder }) {
-  const [text, setText] = useState("");
+// The scrolling message list, styled to float over video: no panel box,
+// text carries a shadow so it stays readable on any picture.
+function ChatFeed({ messages }) {
   const listRef = useRef(null);
 
   useEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
+
+  const shadow = { textShadow: "0 1px 4px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.9)" };
+  return (
+    <div
+      ref={listRef}
+      className="no-scrollbar"
+      style={{ overflowY: "auto", maxHeight: "30dvh", width: "min(84%, 450px)", display: "grid", gap: 6, alignContent: "start", padding: "4px 2px" }}
+    >
+      {messages.length === 0 && (
+        <p style={{ color: "rgba(255,255,255,0.75)", fontSize: 14, margin: 0, ...shadow }}>Chat is quiet — say hello! 👋</p>
+      )}
+      {messages.map((m) => {
+        if (m.kind === "gift" && m.gift) {
+          return (
+            <div key={m._id} style={{ background: "rgba(20,40,5,0.55)", border: "1px solid var(--accent-dark)", borderRadius: 10, padding: "6px 9px", fontSize: 14, justifySelf: "start" }}>
+              <span style={{ fontSize: 18 }}>{m.gift.emoji}</span> <strong>@{m.from?.username}</strong> sent <strong>{m.gift.name}</strong> · 🪙 {m.gift.coins}
+            </div>
+          );
+        }
+        if (m.kind === "system") {
+          return (
+            <div key={m._id} style={{ color: "rgba(255,255,255,0.8)", fontSize: 13, ...shadow }}>
+              {m.text}
+            </div>
+          );
+        }
+        return (
+          <div key={m._id} style={{ fontSize: 14.5, lineHeight: 1.35, color: "#fff", ...shadow }}>
+            <strong style={{ color: "var(--accent)" }}>@{m.from?.username}</strong> <span>{m.text}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// The pill-shaped message input that sits in the stage's bottom bar,
+// next to the room's action buttons (gift, sound, End Live…).
+function ChatInput({ onSend, disabled, placeholder }) {
+  const [text, setText] = useState("");
 
   function submit(e) {
     e.preventDefault();
@@ -159,38 +288,20 @@ function ChatPanel({ messages, onSend, disabled, placeholder }) {
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1 }}>
-      <div ref={listRef} style={{ overflowY: "auto", flex: 1, display: "grid", gap: 7, alignContent: "start", padding: "8px 2px" }}>
-        {messages.length === 0 && <p style={{ color: "var(--dim)", fontSize: 14, margin: 0 }}>Chat is quiet — say hello! 👋</p>}
-        {messages.map((m) => {
-          if (m.kind === "gift" && m.gift) {
-            return (
-              <div key={m._id} style={{ background: "rgba(163,230,53,0.10)", border: "1px solid var(--accent-dark)", borderRadius: 10, padding: "6px 9px", fontSize: 14 }}>
-                <span style={{ fontSize: 18 }}>{m.gift.emoji}</span> <strong>@{m.from?.username}</strong> sent <strong>{m.gift.name}</strong> · 🪙 {m.gift.coins}
-              </div>
-            );
-          }
-          if (m.kind === "system") {
-            return (
-              <div key={m._id} style={{ color: "var(--dim)", fontSize: 13 }}>
-                {m.text}
-              </div>
-            );
-          }
-          return (
-            <div key={m._id} style={{ fontSize: 14.5, lineHeight: 1.35 }}>
-              <strong style={{ color: "var(--accent)" }}>@{m.from?.username}</strong> <span>{m.text}</span>
-            </div>
-          );
-        })}
-      </div>
-      <form onSubmit={submit} style={{ display: "flex", gap: 8, paddingTop: 8 }}>
-        <input className="input" placeholder={placeholder || "Write a message…"} value={text} onChange={(e) => setText(e.target.value)} maxLength={500} disabled={disabled} />
-        <button className="btn btn-primary" type="submit" disabled={disabled || !text.trim()}>
-          Send
-        </button>
-      </form>
-    </div>
+    <form onSubmit={submit} style={{ display: "flex", gap: 8, flex: 1, minWidth: 0 }}>
+      <input
+        className="input"
+        placeholder={placeholder || "Write a message…"}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        maxLength={500}
+        disabled={disabled}
+        style={{ background: "rgba(18,18,18,0.68)", borderColor: "rgba(255,255,255,0.28)", color: "#fff", borderRadius: 999, backdropFilter: "blur(3px)" }}
+      />
+      <button className="btn btn-primary" type="submit" disabled={disabled || !text.trim()} style={{ borderRadius: 999, flexShrink: 0 }}>
+        Send
+      </button>
+    </form>
   );
 }
 
@@ -209,7 +320,7 @@ function MatchBar({ match }) {
   const total = match.scoreA + match.scoreB;
   const aPct = total === 0 ? 50 : Math.round((match.scoreA / total) * 100);
   return (
-    <div style={{ marginTop: 10, flexShrink: 0 }}>
+    <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 14, gap: 8 }}>
         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           ⚔️ <strong>@{match.a.user.username}</strong> · 🪙 {match.scoreA}
@@ -269,12 +380,10 @@ function LiveList({ me, onGoLive, onWatch, onOpenProfile }) {
 
   return (
     <div style={{ padding: "14px 14px 20px", maxWidth: 640, margin: "0 auto" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-        <h2 style={{ margin: "2px 0 12px" }}>🔴 Live now</h2>
-        <button className="btn btn-primary" onClick={onGoLive} style={{ marginBottom: 10 }}>
-          📹 Go Live
-        </button>
-      </div>
+      <h2 style={{ margin: "2px 0 12px" }}>🔴 Live now</h2>
+      <button className="btn btn-primary" onClick={onGoLive} style={{ width: "100%", padding: "15px 18px", fontSize: 17.5, fontWeight: 800, borderRadius: 14, marginBottom: 16, boxShadow: "0 6px 18px rgba(224,36,94,0.35)", background: "#e0245e", borderColor: "#e0245e" }}>
+        📹 Go Live — apni live shuru karo
+      </button>
       {loading && <p style={{ color: "var(--dim)" }}>Loading live broadcasts…</p>}
       {!loading && loadError && lives.length === 0 && (
         <div style={{ textAlign: "center", padding: 20 }}>
@@ -761,94 +870,107 @@ function BroadcastRoom({ me, session, stream, onDone }) {
   const opponent = match ? (mySide === "a" ? match.b : match.a) : null;
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column", maxWidth: 640, margin: "0 auto", padding: "12px 14px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <LiveBadge />
-        <strong style={{ flex: 1, minWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.title}</strong>
-        <span className="chip">👀 {room.viewerCount}</span>
-        <span className="chip">⏱ {formatDuration(elapsed)}</span>
-      </div>
-      <div style={{ display: "flex", gap: 8, marginTop: 10, flexShrink: 0 }}>
-        <div style={{ position: "relative", background: "#000", borderRadius: 16, overflow: "hidden", flex: 1, aspectRatio: match ? undefined : "16/10", height: match ? 230 : undefined }}>
-          <video ref={videoRef} autoPlay muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-          <div style={{ position: "absolute", left: 10, bottom: 10, background: "rgba(0,0,0,0.65)", borderRadius: 10, padding: "6px 10px", fontSize: 14 }}>
-            🎁 Gifts earned: <strong>🪙 {earned}</strong> ({giftCount} gift{giftCount === 1 ? "" : "s"})
-          </div>
-          {match && (
-            <div style={{ position: "absolute", left: 10, top: 10, background: "rgba(0,0,0,0.65)", borderRadius: 10, padding: "4px 8px", fontSize: 13 }}>
-              Tum · @{me.username}
-            </div>
-          )}
-          {lastGift && !match && (
-            <div key={`${lastGift.key}-${giftCount}`} style={{ position: "absolute", right: 10, top: 10, fontSize: 44 }}>
+    <div style={stageStyle}>
+      {/* video layer: own camera fills the stage; in a PK match the stage
+          splits into two halves — me on top, the opponent below */}
+      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
+        <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+          <video ref={videoRef} autoPlay muted playsInline style={videoFillStyle} />
+          {match && <div style={tileLabelStyle("rgba(0,0,0,0.65)")}>Tum · @{me.username}</div>}
+          {lastGift && (
+            <div key={`${lastGift.key}-${giftCount}`} style={{ position: "absolute", right: 12, top: "34%", fontSize: 52, filter: "drop-shadow(0 2px 8px rgba(0,0,0,0.6))" }}>
               {lastGift.emoji}
             </div>
           )}
         </div>
         {match && (
-          <div style={{ position: "relative", background: "#000", borderRadius: 16, overflow: "hidden", flex: 1, height: 230 }}>
-            <video ref={matchVideoRef} autoPlay playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            <div style={{ position: "absolute", left: 10, top: 10, background: "rgba(224,36,94,0.8)", borderRadius: 10, padding: "4px 8px", fontSize: 13 }}>
-              ⚔️ @{opponent?.user?.username}
-            </div>
+          <div style={{ position: "relative", flex: 1, minHeight: 0, borderTop: "2px solid rgba(255,255,255,0.18)" }}>
+            <video ref={matchVideoRef} autoPlay playsInline style={videoFillStyle} />
+            <div style={tileLabelStyle("rgba(224,36,94,0.85)")}>⚔️ @{opponent?.user?.username}</div>
           </div>
         )}
       </div>
-      {match && <MatchBar match={match} />}
-      <MatchResultBanner result={matchResult} myUserId={me.id} />
-      <Notice text={room.authError} bad />
 
-      {!match && (
-        <div style={{ marginTop: 10, flexShrink: 0 }}>
-          {incomingInvite ? (
-            <div style={{ background: "rgba(224,36,94,0.12)", border: "1px solid #e0245e", borderRadius: 12, padding: "10px 12px" }}>
-              <div style={{ fontSize: 15 }}>
-                ⚔️ <strong>@{incomingInvite.from?.user?.username}</strong> ne PK Match ka challenge bheja hai!
-              </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                <button className="btn btn-primary btn-small" onClick={() => respondInvite(true)}>
-                  ✓ Accept — match shuru karo
-                </button>
-                <button className="btn btn-danger btn-small" onClick={() => respondInvite(false)}>
-                  ✕ Decline
-                </button>
-              </div>
-            </div>
-          ) : pendingInviteTo ? (
-            <p style={{ color: "var(--dim)", fontSize: 14, margin: 0 }}>⚔️ Challenge bhej diya hai — jawab ka intezar karo…</p>
-          ) : (
-            <>
-              <button className="btn" onClick={toggleChallenge}>
-                ⚔️ PK Match challenge
-              </button>
-              {showChallenge && (
-                <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
-                  {others.length === 0 && <p style={{ color: "var(--dim)", fontSize: 14, margin: 0 }}>Abhi koi aur broadcaster live nahi hai.</p>}
-                  {others.map((l) => (
-                    <div key={l.id} style={{ display: "flex", alignItems: "center", gap: 10, border: "1px solid var(--border)", borderRadius: 12, padding: "8px 10px" }}>
-                      <Avatar user={l.broadcaster} size={34} />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <strong style={{ fontSize: 14 }}>@{l.broadcaster?.username}</strong>
-                        <div style={{ color: "var(--dim)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.title}</div>
-                      </div>
-                      <button className="btn btn-primary btn-small" onClick={() => sendInvite(l)}>
-                        ⚔️ Challenge
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
+      {/* top bar over the video */}
+      <div style={topBarStyle}>
+        <LiveBadge />
+        <strong style={{ flex: 1, minWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#fff", textShadow: "0 1px 4px rgba(0,0,0,0.9)" }}>{session.title}</strong>
+        <span className="chip" style={darkChipStyle}>
+          👀 {room.viewerCount}
+        </span>
+        <span className="chip" style={darkChipStyle}>
+          ⏱ {formatDuration(elapsed)}
+        </span>
+      </div>
+
+      {/* PK score bar across the seam */}
+      {match && (
+        <div style={seamBarStyle}>
+          <div style={{ background: "rgba(0,0,0,0.6)", borderRadius: 14, padding: "8px 12px", backdropFilter: "blur(3px)" }}>
+            <MatchBar match={match} />
+          </div>
         </div>
       )}
 
-      <div style={{ flex: 1, minHeight: 120, display: "flex", flexDirection: "column", marginTop: 6 }}>
-        <ChatPanel messages={room.messages} onSend={room.sendChat} disabled={!room.connected} placeholder="Viewers se baat karo…" />
+      {/* floating status: session earnings + match result + errors */}
+      <div style={noticeStackStyle}>
+        <div style={{ justifySelf: "start", background: "rgba(0,0,0,0.55)", borderRadius: 10, padding: "6px 10px", fontSize: 14, color: "#fff" }}>
+          🎁 Gifts earned: <strong>🪙 {earned}</strong> ({giftCount} gift{giftCount === 1 ? "" : "s"})
+        </div>
+        <MatchResultBanner result={matchResult} myUserId={me.id} />
+        <Notice text={room.authError} bad />
       </div>
-      <button className="btn btn-danger" onClick={endLive} disabled={ending} style={{ marginTop: 10, padding: "12px 16px", fontSize: 16 }}>
-        {ending ? "Ending…" : "⏹ End Live"}
-      </button>
+
+      {/* bottom overlay: challenge panel, chat, controls */}
+      <div style={bottomOverlayStyle}>
+        {!match && incomingInvite && (
+          <div style={{ background: "rgba(60,5,25,0.82)", border: "1px solid #e0245e", borderRadius: 14, padding: "10px 12px", backdropFilter: "blur(3px)" }}>
+            <div style={{ fontSize: 15, color: "#fff" }}>
+              ⚔️ <strong>@{incomingInvite.from?.user?.username}</strong> ne PK Match ka challenge bheja hai!
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button className="btn btn-primary btn-small" onClick={() => respondInvite(true)}>
+                ✓ Accept — match shuru karo
+              </button>
+              <button className="btn btn-danger btn-small" onClick={() => respondInvite(false)}>
+                ✕ Decline
+              </button>
+            </div>
+          </div>
+        )}
+        {!match && !incomingInvite && pendingInviteTo && (
+          <p style={{ color: "#fff", fontSize: 14, margin: 0, textShadow: "0 1px 4px rgba(0,0,0,0.9)" }}>⚔️ Challenge bhej diya hai — jawab ka intezar karo…</p>
+        )}
+        {!match && !incomingInvite && !pendingInviteTo && showChallenge && (
+          <div style={{ background: "rgba(15,15,15,0.85)", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 14, padding: 10, display: "grid", gap: 8, backdropFilter: "blur(3px)", maxHeight: "38dvh", overflowY: "auto" }}>
+            {others.length === 0 && <p style={{ color: "rgba(255,255,255,0.75)", fontSize: 14, margin: 0 }}>Abhi koi aur broadcaster live nahi hai.</p>}
+            {others.map((l) => (
+              <div key={l.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Avatar user={l.broadcaster} size={34} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <strong style={{ fontSize: 14, color: "#fff" }}>@{l.broadcaster?.username}</strong>
+                  <div style={{ color: "rgba(255,255,255,0.65)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.title}</div>
+                </div>
+                <button className="btn btn-primary btn-small" onClick={() => sendInvite(l)}>
+                  ⚔️ Challenge
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <ChatFeed messages={room.messages} />
+        <div style={bottomBarStyle}>
+          <ChatInput onSend={room.sendChat} disabled={!room.connected} placeholder="Viewers se baat karo…" />
+          {!match && (
+            <button type="button" onClick={toggleChallenge} style={roundBtnStyle} aria-label="PK Match challenge" title="PK Match challenge">
+              ⚔️
+            </button>
+          )}
+          <button className="btn btn-danger" onClick={endLive} disabled={ending} style={{ borderRadius: 999, padding: "11px 16px", fontSize: 15, fontWeight: 800, whiteSpace: "nowrap", flexShrink: 0 }}>
+            {ending ? "Ending…" : "⏹ End Live"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -870,6 +992,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
   const [videoStatus, setVideoStatus] = useState("");
   const [needsTap, setNeedsTap] = useState(false);
   const [muted, setMuted] = useState(true);
+  const [showGifts, setShowGifts] = useState(false);
   // PK match state
   const [match, setMatch] = useState(null);
   const [matchResult, setMatchResult] = useState(null);
@@ -1070,27 +1193,14 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
   const matchOpponent = match ? (match.liveSessionA === session.id ? match.b : match.a) : null;
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column", maxWidth: 640, margin: "0 auto", padding: "12px 14px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <button className="btn btn-small" onClick={onBack}>
-          ← Leave
-        </button>
-        <LiveBadge />
-        <strong style={{ flex: 1, minWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.title}</strong>
-        <span className="chip">👀 {room.viewerCount}</span>
-        <span className="chip">🪙 {balance}</span>
-      </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-        <Avatar user={broadcaster} size={30} />
-        <span style={{ fontSize: 14 }}>
-          {broadcaster?.display_name} <span style={{ color: "var(--dim)" }}>@{broadcaster?.username}</span>
-        </span>
-      </div>
-      <div style={{ display: "flex", gap: 8, marginTop: 10, flexShrink: 0 }}>
-        <div style={{ position: "relative", background: "#000", borderRadius: 16, overflow: "hidden", flex: 1, aspectRatio: match ? undefined : "16/10", height: match ? 230 : undefined }}>
-          <video ref={videoRef} autoPlay playsInline muted={muted} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+    <div style={stageStyle}>
+      {/* video layer: the broadcaster fills the stage; in a PK match the
+          stage splits — host on top, opponent below */}
+      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
+        <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+          <video ref={videoRef} autoPlay playsInline muted={muted} style={videoFillStyle} />
           {room.ended ? (
-            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.7)", fontSize: 18, fontWeight: 700 }}>
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.7)", fontSize: 18, fontWeight: 700, color: "#fff" }}>
               📴 {ENDED_TEXT}
             </div>
           ) : needsTap ? (
@@ -1104,58 +1214,125 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
               ▶ Tap to play
             </button>
           ) : null}
-          <button onClick={() => setMuted((m) => !m)} style={{ position: "absolute", right: 10, bottom: 10, background: "rgba(0,0,0,0.6)", border: "none", borderRadius: 10, padding: "6px 10px", fontSize: 16 }} aria-label="Sound">
-            {muted ? "🔇" : "🔊"}
-          </button>
-          {match && (
-            <div style={{ position: "absolute", left: 10, top: 10, background: "rgba(0,0,0,0.65)", borderRadius: 10, padding: "4px 8px", fontSize: 13 }}>
-              @{broadcaster?.username}
-            </div>
-          )}
+          {match && <div style={tileLabelStyle("rgba(0,0,0,0.65)")}>@{broadcaster?.username}</div>}
         </div>
         {match && (
-          <div style={{ position: "relative", background: "#000", borderRadius: 16, overflow: "hidden", flex: 1, height: 230 }}>
-            <video ref={matchVideoRef} autoPlay playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            <div style={{ position: "absolute", left: 10, top: 10, background: "rgba(224,36,94,0.8)", borderRadius: 10, padding: "4px 8px", fontSize: 13 }}>
-              ⚔️ @{matchOpponent?.user?.username}
-            </div>
+          <div style={{ position: "relative", flex: 1, minHeight: 0, borderTop: "2px solid rgba(255,255,255,0.18)" }}>
+            <video ref={matchVideoRef} autoPlay playsInline style={videoFillStyle} />
+            <div style={tileLabelStyle("rgba(224,36,94,0.85)")}>⚔️ @{matchOpponent?.user?.username}</div>
           </div>
         )}
       </div>
-      {match && <MatchBar match={match} />}
-      <MatchResultBanner result={matchResult} myUserId={me.id} />
-      <Notice text={videoStatus} />
-      <Notice text={videoError} bad />
-      <Notice text={room.authError} bad />
-      <Notice text={error} bad />
-      <Notice text={notice} />
 
-      {!room.ended && gifts.length > 0 && (
-        <div style={{ marginTop: 4, flexShrink: 0 }}>
-          <div style={{ fontSize: 13, color: "var(--dim)", marginBottom: 6 }}>
-            🎁 Gift bhejo — aadhe coins broadcaster ko jayenge{match ? ", aur poori value uski PK score me judegi" : ""}. Tumhara balance: <strong style={{ color: "var(--text)" }}>🪙 {balance}</strong>
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-            {gifts.map((gift) => (
-              <button
-                key={gift.key}
-                className="card"
-                onClick={() => sendGift(gift)}
-                disabled={giftBusy === gift.key}
-                style={{ padding: "8px 4px", textAlign: "center", cursor: "pointer", color: "var(--text)", opacity: giftBusy && giftBusy !== gift.key ? 0.6 : 1 }}
-              >
-                <div style={{ fontSize: 24 }}>{gift.emoji}</div>
-                <div style={{ fontSize: 12, fontWeight: 700 }}>{gift.name}</div>
-                <div style={{ fontSize: 12, color: "var(--dim)" }}>🪙 {gift.coins.toLocaleString()}</div>
-              </button>
-            ))}
+      {/* top bar over the video */}
+      <div style={topBarStyle}>
+        <button
+          className="btn btn-small"
+          onClick={onBack}
+          style={{ background: "rgba(20,20,20,0.6)", borderColor: "rgba(255,255,255,0.3)", color: "#fff", backdropFilter: "blur(3px)" }}
+        >
+          ← Leave
+        </button>
+        <LiveBadge />
+        <strong style={{ flex: 1, minWidth: 90, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#fff", textShadow: "0 1px 4px rgba(0,0,0,0.9)" }}>{session.title}</strong>
+        <span className="chip" style={darkChipStyle}>
+          👀 {room.viewerCount}
+        </span>
+        <span className="chip" style={darkChipStyle}>
+          🪙 {balance}
+        </span>
+        <div style={{ flexBasis: "100%", display: "flex", alignItems: "center", gap: 8 }}>
+          <Avatar user={broadcaster} size={30} />
+          <span style={{ fontSize: 14, color: "#fff", textShadow: "0 1px 4px rgba(0,0,0,0.9)" }}>
+            {broadcaster?.display_name} <span style={{ color: "rgba(255,255,255,0.7)" }}>@{broadcaster?.username}</span>
+          </span>
+        </div>
+      </div>
+
+      {/* PK score bar across the seam */}
+      {match && (
+        <div style={seamBarStyle}>
+          <div style={{ background: "rgba(0,0,0,0.6)", borderRadius: 14, padding: "8px 12px", backdropFilter: "blur(3px)" }}>
+            <MatchBar match={match} />
           </div>
         </div>
       )}
 
-      <div style={{ flex: 1, minHeight: 110, display: "flex", flexDirection: "column", marginTop: 6 }}>
-        <ChatPanel messages={room.messages} onSend={room.sendChat} disabled={!room.connected || room.ended} placeholder="Chat me kuch likho…" />
+      {/* floating status: connecting / errors / results */}
+      <div style={noticeStackStyle}>
+        <MatchResultBanner result={matchResult} myUserId={me.id} />
+        <Notice text={videoStatus} />
+        <Notice text={videoError} bad />
+        <Notice text={room.authError} bad />
+        <Notice text={error} bad />
+        <Notice text={notice} />
       </div>
+
+      {/* bottom overlay: chat + actions */}
+      <div style={bottomOverlayStyle}>
+        <ChatFeed messages={room.messages} />
+        <div style={bottomBarStyle}>
+          <ChatInput onSend={room.sendChat} disabled={!room.connected || room.ended} placeholder="Chat me kuch likho…" />
+          <button type="button" onClick={() => setShowGifts(true)} disabled={room.ended || gifts.length === 0} style={{ ...roundBtnStyle, opacity: room.ended || gifts.length === 0 ? 0.5 : 1 }} aria-label="Gifts" title="Gift bhejo">
+            🎁
+          </button>
+          <button type="button" onClick={() => setMuted((m) => !m)} style={roundBtnStyle} aria-label="Sound">
+            {muted ? "🔇" : "🔊"}
+          </button>
+        </div>
+      </div>
+
+      {/* gift bottom sheet over the video */}
+      {showGifts && !room.ended && gifts.length > 0 && (
+        <>
+          <div onClick={() => setShowGifts(false)} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 7 }} />
+          <div
+            style={{
+              position: "absolute",
+              left: 0,
+              right: 0,
+              bottom: 0,
+              zIndex: 8,
+              background: "var(--surface)",
+              borderTop: "1px solid var(--border)",
+              borderRadius: "18px 18px 0 0",
+              padding: "14px 14px calc(14px + env(safe-area-inset-bottom))",
+              animation: "zoomly-sheet-up 0.22s ease-out",
+              maxHeight: "62dvh",
+              overflowY: "auto",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <strong style={{ fontSize: 16, flex: 1 }}>🎁 Gift bhejo</strong>
+              <span className="chip">🪙 {balance}</span>
+              <button type="button" className="btn btn-small" onClick={() => setShowGifts(false)} aria-label="Close gifts">
+                ✕
+              </button>
+            </div>
+            <div style={{ fontSize: 13, color: "var(--dim)", margin: "8px 0 10px" }}>
+              Aadhe coins broadcaster ko jayenge{match ? ", aur poori value uski PK score me judegi" : ""}. Tumhara balance:{" "}
+              <strong style={{ color: "var(--text)" }}>🪙 {balance}</strong>
+            </div>
+            <Notice text={error} bad />
+            <Notice text={notice} />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginTop: 6 }}>
+              {gifts.map((gift) => (
+                <button
+                  key={gift.key}
+                  className="card"
+                  onClick={() => sendGift(gift)}
+                  disabled={giftBusy === gift.key}
+                  style={{ padding: "8px 4px", textAlign: "center", cursor: "pointer", color: "var(--text)", opacity: giftBusy && giftBusy !== gift.key ? 0.6 : 1 }}
+                >
+                  <div style={{ fontSize: 24 }}>{gift.emoji}</div>
+                  <div style={{ fontSize: 12, fontWeight: 700 }}>{gift.name}</div>
+                  <div style={{ fontSize: 12, color: "var(--dim)" }}>🪙 {gift.coins.toLocaleString()}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

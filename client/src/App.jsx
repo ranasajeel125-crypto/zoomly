@@ -1336,12 +1336,14 @@ function RewardsView({ me, refreshMe }) {
 
 // ---------- app shell ------------------------------------------------------------------
 
+// Bottom navigation: 3 + center + 3, with Live as the prominent raised
+// center button (TikTok-style) — it is the app's headline action.
 const NAV = [
   { key: "feed", label: "Home", icon: "🏠" },
   { key: "watch", label: "Watch", icon: "▶️" },
+  { key: "people", label: "People", icon: "👥" },
   { key: "live", label: "Live", icon: "🔴" },
   { key: "upload", label: "Upload", icon: "＋" },
-  { key: "people", label: "People", icon: "👥" },
   { key: "rewards", label: "Rewards", icon: "🏆" },
   { key: "profile", label: "Profile", icon: "👤" },
 ];
@@ -1477,31 +1479,72 @@ export function App() {
           paddingBottom: "env(safe-area-inset-bottom)",
         }}
       >
-        {NAV.map((item) => (
-          <button
-            key={item.key}
-            onClick={() => {
-              if (item.key === "profile") setProfileUserId(null);
-              setTab(item.key);
-            }}
-            style={{
-              flex: 1,
-              background: "none",
-              border: "none",
-              padding: "8px 2px 7px",
-              color: tab === item.key ? "var(--accent)" : "var(--dim)",
-              fontSize: 11,
-              fontWeight: 700,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: 2,
-            }}
-          >
-            <span style={{ fontSize: item.key === "upload" ? 24 : 20, lineHeight: 1 }}>{item.icon}</span>
-            {item.label}
-          </button>
-        ))}
+        {NAV.map((item) =>
+          item.key === "live" ? (
+            <button
+              key={item.key}
+              onClick={() => setTab("live")}
+              aria-label="Live"
+              style={{
+                flex: 1,
+                background: "none",
+                border: "none",
+                padding: "8px 2px 7px",
+                color: tab === "live" ? "#ff7aa8" : "var(--dim)",
+                fontSize: 11,
+                fontWeight: 700,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: 2,
+              }}
+            >
+              <span
+                style={{
+                  width: 54,
+                  height: 54,
+                  borderRadius: "50%",
+                  background: "#e0245e",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 25,
+                  marginTop: -26,
+                  border: `3px solid ${tab === "live" ? "var(--accent)" : "var(--surface)"}`,
+                  boxShadow: "0 6px 18px rgba(224,36,94,0.5)",
+                  flexShrink: 0,
+                }}
+              >
+                🔴
+              </span>
+              {item.label}
+            </button>
+          ) : (
+            <button
+              key={item.key}
+              onClick={() => {
+                if (item.key === "profile") setProfileUserId(null);
+                setTab(item.key);
+              }}
+              style={{
+                flex: 1,
+                background: "none",
+                border: "none",
+                padding: "8px 2px 7px",
+                color: tab === item.key ? "var(--accent)" : "var(--dim)",
+                fontSize: 11,
+                fontWeight: 700,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: 2,
+              }}
+            >
+              <span style={{ fontSize: item.key === "upload" ? 24 : 20, lineHeight: 1 }}>{item.icon}</span>
+              {item.label}
+            </button>
+          )
+        )}
       </nav>
     </div>
   );
