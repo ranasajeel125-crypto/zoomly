@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { call, getToken, isWaking, setToken, subscribeWaking, uploadMedia } from "./api";
 import { LiveView } from "./Live.jsx";
+import { setViewerMuted, viewerMuted } from "./sound.js";
 
 // Shown while the (free-tier) server is waking up and the client is
 // retrying — a slow first load is normal, not an error.
@@ -373,8 +374,21 @@ function CommentsSheet({ post, onClose, onAdded }) {
 function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile }) {
   const videoRef = useRef(null);
   const cardRef = useRef(null);
-  const [muted, setMuted] = useState(true);
+  // Sound is ON by default; `muted` here is only ever the viewer's own
+  // persisted choice — or a temporary browser-forced muted autoplay
+  // (forcedMute), which shows the "🔊 Sound on" overlay and is NOT
+  // persisted as a preference.
+  const [muted, setMuted] = useState(() => viewerMuted());
+  const [forcedMute, setForcedMute] = useState(false);
   const [paused, setPaused] = useState(false);
+  const mutedRef = useRef(muted);
+  mutedRef.current = muted;
+
+  // Keep the element's muted property in lockstep with the state (the
+  // React attribute alone does not reliably flip the property).
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.muted = muted;
+  }, [muted]);
 
   useEffect(() => {
     const el = cardRef.current;
@@ -384,7 +398,23 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile }) {
       (entries) => {
         for (const entry of entries) {
           if (entry.isIntersecting) {
-            video.play().catch(() => {});
+            const wantMuted = mutedRef.current;
+            video.muted = wantMuted;
+            video
+              .play()
+              .then(() => {
+                if (!wantMuted) setForcedMute(false);
+              })
+              .catch(() => {
+                if (!wantMuted) {
+                  // Autoplay-with-sound blocked (no page interaction
+                  // yet): start muted, offer one-tap sound instead.
+                  video.muted = true;
+                  setMuted(true);
+                  setForcedMute(true);
+                  video.play().catch(() => {});
+                }
+              });
             setPaused(false);
           } else {
             video.pause();
@@ -409,6 +439,27 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile }) {
     }
   }
 
+  // The speaker button is the viewer's own control: whatever they pick
+  // becomes the persisted default for every player.
+  function toggleMute() {
+    const next = !muted;
+    setForcedMute(false);
+    setMuted(next);
+    setViewerMuted(next);
+    if (videoRef.current) videoRef.current.muted = next;
+  }
+
+  function soundOn() {
+    setForcedMute(false);
+    setMuted(false);
+    setViewerMuted(false);
+    const video = videoRef.current;
+    if (video) {
+      video.muted = false;
+      video.play().catch(() => {});
+    }
+  }
+
   return (
     <div className="feed-item" ref={cardRef} style={{ background: "#000" }}>
       <video
@@ -428,6 +479,31 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile }) {
           ▶
         </div>
       )}
+      {forcedMute && !paused && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            soundOn();
+          }}
+          style={{
+            position: "absolute",
+            left: "50%",
+            bottom: 168,
+            transform: "translateX(-50%)",
+            background: "rgba(0,0,0,0.72)",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.45)",
+            borderRadius: 999,
+            padding: "9px 18px",
+            fontSize: 15,
+            fontWeight: 700,
+            zIndex: 3,
+            whiteSpace: "nowrap",
+          }}
+        >
+          🔊 Sound on
+        </button>
+      )}
       <div style={{ position: "absolute", right: 10, bottom: 96, display: "flex", flexDirection: "column", gap: 16, alignItems: "center" }}>
         <button onClick={() => onOpenProfile(post.author.id)} style={{ background: "none", border: "none", padding: 0 }} aria-label="Open profile">
           <Avatar user={post.author} size={48} />
@@ -445,7 +521,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile }) {
           💬
           <div style={{ fontSize: 13, fontWeight: 700 }}>{post.comment_count}</div>
         </button>
-        <button onClick={() => setMuted((m) => !m)} style={{ background: "none", border: "none", color: "#fff", fontSize: 24, lineHeight: 1 }} aria-label="Sound">
+        <button onClick={toggleMute} style={{ background: "none", border: "none", color: "#fff", fontSize: 24, lineHeight: 1 }} aria-label="Sound">
           {muted ? "🔇" : "🔊"}
         </button>
       </div>
@@ -611,7 +687,22 @@ function WatchView({ onOpenProfile }) {
               ✕ Close
             </button>
           </div>
-          <video src={playing.video_url} style={{ flex: 1, width: "100%", minHeight: 0, background: "#000" }} controls autoPlay loop playsInline />
+          <video
+            src={playing.video_url}
+            style={{ flex: 1, width: "100%", minHeight: 0, background: "#000" }}
+            controls
+            autoPlay
+            loop
+            playsInline
+            ref={(el) => {
+              // Start from the viewer's sound preference (default: sound
+              // on); the native controls let them change it freely after.
+              if (el && el.dataset.mutedInit !== "1") {
+                el.muted = viewerMuted();
+                el.dataset.mutedInit = "1";
+              }
+            }}
+          />
           <div style={{ padding: "12px 16px calc(14px + env(safe-area-inset-bottom))" }}>
             <div style={{ fontWeight: 700 }}>{playing.title}</div>
             {playing.description && <div style={{ color: "var(--dim)", fontSize: 14 }}>{playing.description}</div>}
@@ -698,7 +789,18 @@ function UploadView({ onPosted }) {
         <label className="card" style={{ textAlign: "center", cursor: "pointer", borderStyle: "dashed" }}>
           <input type="file" accept="video/*" style={{ display: "none" }} onChange={(e) => pickFile(e.target.files?.[0])} />
           {previewUrl ? (
-            <video src={previewUrl} style={{ width: "100%", maxHeight: 320, borderRadius: 12, background: "#000" }} controls muted playsInline />
+            <video
+              src={previewUrl}
+              style={{ width: "100%", maxHeight: 320, borderRadius: 12, background: "#000" }}
+              controls
+              playsInline
+              ref={(el) => {
+                if (el && el.dataset.mutedInit !== "1") {
+                  el.muted = viewerMuted();
+                  el.dataset.mutedInit = "1";
+                }
+              }}
+            />
           ) : (
             <div style={{ padding: "18px 0" }}>
               <div style={{ fontSize: 36 }}>⬆️</div>

@@ -203,6 +203,20 @@ check(
 );
 check("client logs the selected candidate pair type", liveJsSrc.includes("logSelectedCandidatePair") && liveJsxSrc.includes("logSelectedCandidatePair"));
 
+// ---- Sound: ON by default everywhere -------------------------------------------
+// The owner's rule: videos are never muted by default — muting is the
+// viewer's own persisted choice. Browsers can force a muted autoplay,
+// and the players must then show a tappable "🔊 Sound on" overlay.
+const appJsxSrc = fs.readFileSync(path.join(SRC_DIR, "App.jsx"), "utf8");
+const soundJsSrc = fs.readFileSync(path.join(SRC_DIR, "sound.js"), "utf8");
+check("sound preference persists via localStorage", soundJsSrc.includes("zoomly_muted") && soundJsSrc.includes("viewerMuted") && soundJsSrc.includes("setViewerMuted"));
+check(
+  "feed player starts from the preference, no hard-coded mute",
+  appJsxSrc.includes("useState(() => viewerMuted())") && !appJsxSrc.includes("const [muted, setMuted] = useState(true)") && appJsxSrc.includes("setViewerMuted")
+);
+check("live watch starts from the preference too", liveJsxSrc.includes("useState(() => viewerMuted())") && liveJsxSrc.includes("setViewerMuted"));
+check("forced-muted autoplay shows a Sound on overlay (feed + live)", appJsxSrc.includes("Sound on") && appJsxSrc.includes("forcedMute") && liveJsxSrc.includes("Sound on") && liveJsxSrc.includes("forcedMute"));
+
 // ---- WebSocket: join, presence, signaling relay, chat ---------------------------
 
 const hostSock = await connectSocket(creatorToken);

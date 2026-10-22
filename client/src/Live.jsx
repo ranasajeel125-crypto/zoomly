@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { call } from "./api";
 import { logSelectedCandidatePair, openLiveSocket, peerConnectionConfig, setIceServers } from "./live";
+import { setViewerMuted, viewerMuted } from "./sound";
 import { Avatar, Notice } from "./App.jsx";
 
 const ENDED_TEXT = "This live has ended.";
@@ -1085,7 +1086,11 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
   const [videoError, setVideoError] = useState("");
   const [videoStatus, setVideoStatus] = useState("");
   const [needsTap, setNeedsTap] = useState(false);
-  const [muted, setMuted] = useState(true);
+  // Sound ON by default: the only mute that exists is the viewer's own
+  // persisted choice (sound.js), or a temporary browser-forced muted
+  // start (forcedMute) that offers the "🔊 Sound on" overlay.
+  const [muted, setMuted] = useState(() => viewerMuted());
+  const [forcedMute, setForcedMute] = useState(false);
   const [showGifts, setShowGifts] = useState(false);
   // Follow (same toggleFollow RPC as profiles/feed)
   const [following, setFollowing] = useState(false);
@@ -1304,8 +1309,25 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
       const video = kind === "main" ? videoRef.current : secondVideoRef.current;
       if (video && e.streams[0]) {
         video.srcObject = e.streams[0];
-        if (kind === "main") video.play().catch(() => setNeedsTap(true));
-        else video.play().catch(() => {});
+        if (kind === "main") {
+          // Start with sound per the viewer's preference. If the
+          // browser blocks autoplay-with-sound (no interaction yet),
+          // fall back to a muted start + the Sound on overlay.
+          video.muted = viewerMuted();
+          setMuted(video.muted);
+          video.play().catch(() => {
+            if (!video.muted) {
+              video.muted = true;
+              setMuted(true);
+              setForcedMute(true);
+              video.play().catch(() => setNeedsTap(true));
+            } else {
+              setNeedsTap(true);
+            }
+          });
+        } else {
+          video.play().catch(() => {});
+        }
       }
     };
     pc.onicecandidate = (e) => {
@@ -1455,6 +1477,27 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
     if (res.ok) setFollowing(res.following);
   }
 
+  // The speaker button is the viewer's own control — their pick becomes
+  // the persisted default for every player in the app.
+  function toggleMute() {
+    const next = !muted;
+    setForcedMute(false);
+    setMuted(next);
+    setViewerMuted(next);
+    if (videoRef.current) videoRef.current.muted = next;
+  }
+
+  function soundOn() {
+    setForcedMute(false);
+    setMuted(false);
+    setViewerMuted(false);
+    const v = videoRef.current;
+    if (v) {
+      v.muted = false;
+      v.play().catch(() => {});
+    }
+  }
+
   async function sendGift(gift) {
     if (room.ended) {
       setError(ENDED_TEXT);
@@ -1493,7 +1536,13 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
           ) : needsTap ? (
             <button
               onClick={() => {
-                videoRef.current?.play().catch(() => {});
+                const v = videoRef.current;
+                if (v && !viewerMuted()) {
+                  v.muted = false;
+                  setMuted(false);
+                  setForcedMute(false);
+                }
+                v?.play().catch(() => {});
                 setNeedsTap(false);
               }}
               style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.45)", color: "#fff", border: "none", fontSize: 20, fontWeight: 700 }}
@@ -1501,6 +1550,28 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
               ▶ Tap to play
             </button>
           ) : null}
+          {forcedMute && !room.ended && (
+            <button
+              onClick={soundOn}
+              style={{
+                position: "absolute",
+                left: "50%",
+                bottom: 16,
+                transform: "translateX(-50%)",
+                background: "rgba(0,0,0,0.72)",
+                color: "#fff",
+                border: "1px solid rgba(255,255,255,0.45)",
+                borderRadius: 999,
+                padding: "9px 18px",
+                fontSize: 15,
+                fontWeight: 700,
+                whiteSpace: "nowrap",
+                zIndex: 3,
+              }}
+            >
+              🔊 Sound on
+            </button>
+          )}
           {match && <div style={tileLabelStyle("rgba(0,0,0,0.65)")}>@{broadcaster?.username}</div>}
         </div>
         {(match || seatedGuest) && (
@@ -1597,7 +1668,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
           <button type="button" onClick={() => setShowGifts(true)} disabled={room.ended || gifts.length === 0} style={{ ...roundBtnStyle, opacity: room.ended || gifts.length === 0 ? 0.5 : 1 }} aria-label="Gifts" title="Gift bhejo">
             🎁
           </button>
-          <button type="button" onClick={() => setMuted((m) => !m)} style={roundBtnStyle} aria-label="Sound">
+          <button type="button" onClick={toggleMute} style={roundBtnStyle} aria-label="Sound">
             {muted ? "🔇" : "🔊"}
           </button>
         </div>
