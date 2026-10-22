@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { call, getToken, isWaking, setToken, subscribeWaking, uploadMedia } from "./api";
+import { LiveView } from "./Live.jsx";
 
 // Shown while the (free-tier) server is waking up and the client is
 // retrying — a slow first load is normal, not an error.
@@ -89,7 +90,7 @@ function timeAgo(ts) {
   return new Date(ts).toLocaleDateString();
 }
 
-function Notice({ text, bad }) {
+export function Notice({ text, bad }) {
   if (!text) return null;
   return (
     <div
@@ -1024,12 +1025,16 @@ function BoardRow({ row, metric }) {
 
 function AdminSection({ refreshMe }) {
   const [requests, setRequests] = useState([]);
+  const [platformGiftCoins, setPlatformGiftCoins] = useState(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
   const load = useCallback(async () => {
     const res = await call("getAdminCoinRequests", {});
-    if (res.ok) setRequests(res.requests);
+    if (res.ok) {
+      setRequests(res.requests);
+      if (typeof res.platform_gift_coins === "number") setPlatformGiftCoins(res.platform_gift_coins);
+    }
   }, []);
 
   useEffect(() => {
@@ -1058,6 +1063,11 @@ function AdminSection({ refreshMe }) {
       <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>
         Verify the JazzCash payment for each TID in your JazzCash account first — then approve to credit the coins, or reject.
       </p>
+      {typeof platformGiftCoins === "number" && (
+        <p style={{ fontSize: 14, margin: "0 0 10px" }}>
+          🔴 Platform earnings from LIVE gifts (50% cut, recorded): <strong>🪙 {platformGiftCoins.toLocaleString()}</strong>
+        </p>
+      )}
       <Notice text={error} bad />
       <Notice text={notice} />
       {pending.length === 0 && <p style={{ color: "var(--dim)" }}>No pending requests.</p>}
@@ -1329,6 +1339,7 @@ function RewardsView({ me, refreshMe }) {
 const NAV = [
   { key: "feed", label: "Home", icon: "🏠" },
   { key: "watch", label: "Watch", icon: "▶️" },
+  { key: "live", label: "Live", icon: "🔴" },
   { key: "upload", label: "Upload", icon: "＋" },
   { key: "people", label: "People", icon: "👥" },
   { key: "rewards", label: "Rewards", icon: "🏆" },
@@ -1446,6 +1457,7 @@ export function App() {
       <div style={{ flex: 1, minHeight: 0, overflowY: tab === "feed" ? "hidden" : "auto" }} className={tab === "feed" ? "" : "no-scrollbar"}>
         {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} />}
         {tab === "watch" && <WatchView onOpenProfile={openProfile} />}
+        {tab === "live" && <LiveView me={me} refreshMe={refreshMe} onOpenProfile={openProfile} />}
         {tab === "upload" && (
           <UploadView
             onPosted={() => {

@@ -6,9 +6,11 @@
 import express from "express";
 import multer from "multer";
 import crypto from "node:crypto";
+import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Actions, googleCompleteSignup, googleSignIn } from "./actions.mjs";
+import { Actions, authUser, googleCompleteSignup, googleSignIn } from "./actions.mjs";
+import { attachLiveServer } from "./live.mjs";
 import { initDb } from "./db.mjs";
 import { uploadToCloudinary } from "./cloudinary.mjs";
 import { cloudinaryConfig, googleConfig } from "./config.mjs";
@@ -260,7 +262,11 @@ app.get(/^\/(?!api\/).*/, (_req, res) => {
 
 async function main() {
   await initDb();
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = http.createServer(app);
+  // LIVE real-time hub (WebSocket at /ws): WebRTC signaling relay, live
+  // chat, viewer counts and gift broadcasts. Media stays peer-to-peer.
+  attachLiveServer(server, { authenticate: authUser });
+  server.listen(PORT, "0.0.0.0", () => {
     console.log(`[server] Zoomly listening on port ${PORT}`);
     if (!cloudinaryConfig().configured) {
       console.log("[server] WARNING: CLOUDINARY_* env vars are not set — video/photo uploads will fail with a 'not configured' message until they are.");

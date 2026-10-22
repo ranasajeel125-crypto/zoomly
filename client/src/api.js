@@ -23,6 +23,8 @@ const READ_ACTIONS = new Set([
   "getProfile",
   "getRewards",
   "getAdminCoinRequests",
+  "listLive",
+  "getLive",
 ]);
 
 const RETRYABLE_STATUSES = new Set([502, 503, 504]);

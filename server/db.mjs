@@ -88,12 +88,48 @@ export async function initDb() {
       reviewed_at INTEGER,
       created_at INTEGER NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS live_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      peak_viewers INTEGER NOT NULL DEFAULT 0,
+      total_gift_coins INTEGER NOT NULL DEFAULT 0,
+      platform_cut_coins INTEGER NOT NULL DEFAULT 0
+    )`,
+    `CREATE TABLE IF NOT EXISTS gift_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      live_session_id INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+      sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      creator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      gift_key TEXT NOT NULL,
+      coins INTEGER NOT NULL,
+      creator_share INTEGER NOT NULL,
+      platform_share INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS live_matches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      live_session_a INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+      live_session_b INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+      user_a INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      user_b INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      score_a INTEGER NOT NULL DEFAULT 0,
+      score_b INTEGER NOT NULL DEFAULT 0,
+      winner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER
+    )`,
     `CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id)`,
     `CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at)`,
     `CREATE INDEX IF NOT EXISTS idx_likes_post ON likes(post_id)`,
     `CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id)`,
     `CREATE INDEX IF NOT EXISTS idx_follows_followee ON follows(followee_id)`,
     `CREATE INDEX IF NOT EXISTS idx_users_coins ON users(coin_balance)`,
+    `CREATE INDEX IF NOT EXISTS idx_live_user ON live_sessions(user_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_live_active ON live_sessions(ended_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_gifts_session ON gift_events(live_session_id)`,
   ];
   for (const sql of statements) {
     await client.execute(sql);

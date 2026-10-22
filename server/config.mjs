@@ -77,3 +77,41 @@ export function googleConfig() {
 export const REFERRAL_INVITER_COINS = 20;
 export const REFERRAL_WELCOME_COINS = 10;
 export const LEADERBOARD_LIMIT = 50;
+
+// ---- Live gifts -------------------------------------------------------------
+// The gift catalog for LIVE broadcasts. The server is the source of truth:
+// clients render exactly these entries (getLive returns them) and sendGift
+// prices come only from here. Field names are part of the API contract —
+// { key, name, emoji, coins } — keep them in sync with the client.
+// Revenue split: the broadcaster (creator) receives floor(coins / 2) into
+// their normal coin balance; the rest is the platform cut, recorded in the
+// DB (gift_events.platform_share + live_sessions.platform_cut_coins) and
+// credited nowhere.
+export const GIFT_CATALOG = [
+  { key: "rose", name: "Rose", emoji: "🌹", coins: 10 },
+  { key: "chocolate", name: "Chocolate", emoji: "🍫", coins: 25 },
+  { key: "heart", name: "Heart", emoji: "❤️", coins: 50 },
+  { key: "giftbox", name: "Gift Box", emoji: "🎁", coins: 100 },
+  { key: "crown", name: "Crown", emoji: "👑", coins: 250 },
+  { key: "rocket", name: "Rocket", emoji: "🚀", coins: 500 },
+  { key: "diamond", name: "Diamond", emoji: "💎", coins: 1000 },
+  { key: "lion", name: "Lion", emoji: "🦁", coins: 2500 },
+];
+
+export function giftForKey(key) {
+  return GIFT_CATALOG.find((g) => g.key === key) ?? null;
+}
+
+// Splits a gift's price: creator gets floor(half), platform keeps the rest
+// (so an odd price like 25 → creator 12, platform 13).
+export function giftSplit(coins) {
+  const creatorShare = Math.floor(coins / 2);
+  return { creatorShare, platformShare: coins - creatorShare };
+}
+
+// ---- Live PK matches ----------------------------------------------------------
+// A match between two live broadcasters lasts 5 minutes by default
+// (MATCH_DURATION_SECONDS can override it — the headless tests use a few
+// seconds). Invites expire after 30 seconds unanswered.
+export const MATCH_DURATION_MS = Math.max(5, Number(process.env.MATCH_DURATION_SECONDS) || 300) * 1000;
+export const MATCH_INVITE_TTL_MS = 30_000;

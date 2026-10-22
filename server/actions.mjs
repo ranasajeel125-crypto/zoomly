@@ -3,19 +3,23 @@
 // Mirrors the SMM panel's conventions: zod validation, PBKDF2 password
 // hashes, SHA-256-hashed session tokens stored in the DB.
 import { z } from "zod";
-import { and, desc, eq, inArray, like, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, like, or, sql } from "drizzle-orm";
 import { db } from "./db.mjs";
 import * as schema from "./schema.mjs";
 import {
   COIN_PACKS,
+  GIFT_CATALOG,
   JAZZCASH,
   LEADERBOARD_LIMIT,
   REFERRAL_INVITER_COINS,
   REFERRAL_WELCOME_COINS,
+  giftForKey,
+  giftSplit,
   isAdminUser,
   levelFor,
 } from "./config.mjs";
 import { destroyFromCloudinary } from "./cloudinary.mjs";
+import { broadcastGift, endLiveSession, hasBroadcaster, isInMatch, noteGiftForMatch, viewerCountFor } from "./live.mjs";
 
 const encoder = new TextEncoder();
 
@@ -65,7 +69,9 @@ async function createSession(userId) {
   return raw;
 }
 
-async function authUser(token) {
+// Exported so index.mjs can hand it to the live WebSocket hub (live.mjs)
+// for socket authentication — live.mjs must not import this module.
+export async function authUser(token) {
   if (!token) return null;
   const rows = await db
     .select({ user: schema.users, expiresAt: schema.sessions.expiresAt })
@@ -157,6 +163,24 @@ async function postDtos(postRows, viewer) {
     liked_by_me: likedSet.has(p.id),
     author: authorMap.get(p.userId) ? { ...authorDto(authorMap.get(p.userId)), followed_by_me: followSet.has(p.userId), is_me: p.userId === viewer.id } : null,
   }));
+}
+
+function liveSessionDto(session, broadcaster) {
+  return {
+    id: session.id,
+    user_id: session.userId,
+    title: session.title,
+    started_at: session.startedAt.getTime(),
+    ended_at: session.endedAt ? session.endedAt.getTime() : null,
+    is_live: !session.endedAt,
+    in_match: !session.endedAt && isInMatch(session.id),
+    viewer_count: viewerCountFor(session.id),
+    peak_viewers: session.peakViewers,
+    total_gift_coins: session.totalGiftCoins,
+    platform_cut_coins: session.platformCutCoins,
+    creator_earned_coins: session.totalGiftCoins - session.platformCutCoins,
+    broadcaster: broadcaster ? authorDto(broadcaster) : null,
+  };
 }
 
 // ---- Referral -------------------------------------------------------------
@@ -614,6 +638,196 @@ export const Actions = {
     }
   ),
 
+  // ---- LIVE: broadcasts, gifts ---------------------------------------------
+  // Sessions live in the DB (live_sessions); who is connected right now is
+  // tracked by the WebSocket hub (live.mjs) — viewer counts come from there.
+
+  startLive: withValidation(
+    z.object({ token: tokenArg, title: z.string().trim().min(1).max(120) }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      // One live at a time per user: end any previous still-open session.
+      const previous = await db
+        .select({ id: schema.liveSessions.id })
+        .from(schema.liveSessions)
+        .where(and(eq(schema.liveSessions.userId, user.id), isNull(schema.liveSessions.endedAt)));
+      for (const p of previous) await endLiveSession(p.id);
+      const inserted = await db.insert(schema.liveSessions).values({ userId: user.id, title: args.title }).returning();
+      const session = inserted[0];
+      if (!session) return { ok: false, message: "Could not start the live. Please try again." };
+      return { ok: true, message: "You are live!", session: liveSessionDto(session, user) };
+    }
+  ),
+
+  endLive: withValidation(
+    z.object({
+      token: tokenArg,
+      live_session_id: z.number().int().positive().optional(),
+      liveSessionId: z.number().int().positive().optional(),
+    }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      const sessionId = args.live_session_id ?? args.liveSessionId;
+      if (!sessionId) return { ok: false, message: "Invalid request." };
+      const session = (await db.select().from(schema.liveSessions).where(eq(schema.liveSessions.id, sessionId)).limit(1))[0];
+      if (!session) return { ok: false, message: "Live session not found." };
+      if (session.userId !== user.id) return { ok: false, message: "Only the broadcaster can end this live." };
+      await endLiveSession(session.id);
+      const final = (await db.select().from(schema.liveSessions).where(eq(schema.liveSessions.id, session.id)).limit(1))[0] ?? session;
+      return {
+        ok: true,
+        message: "Live ended.",
+        summary: {
+          live_session_id: final.id,
+          duration_seconds: Math.max(0, Math.round(((final.endedAt?.getTime() ?? Date.now()) - final.startedAt.getTime()) / 1000)),
+          peak_viewers: final.peakViewers,
+          total_gift_coins: final.totalGiftCoins,
+          creator_earned_coins: final.totalGiftCoins - final.platformCutCoins,
+          platform_cut_coins: final.platformCutCoins,
+        },
+      };
+    }
+  ),
+
+  listLive: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const rows = await db
+      .select({ session: schema.liveSessions, broadcaster: schema.users })
+      .from(schema.liveSessions)
+      .innerJoin(schema.users, eq(schema.liveSessions.userId, schema.users.id))
+      .where(isNull(schema.liveSessions.endedAt))
+      .orderBy(desc(schema.liveSessions.startedAt))
+      .limit(50);
+    const lives = [];
+    for (const r of rows) {
+      // A session whose broadcaster never connected (or vanished without a
+      // clean disconnect) must not haunt the list forever: once it is a
+      // couple of minutes old with no broadcaster socket, close it out.
+      if (!hasBroadcaster(r.session.id) && Date.now() - r.session.startedAt.getTime() > 120_000) {
+        await endLiveSession(r.session.id, { notify: false });
+        continue;
+      }
+      lives.push(liveSessionDto(r.session, r.broadcaster));
+    }
+    return { ok: true, lives };
+  }),
+
+  getLive: withValidation(
+    z.object({
+      token: tokenArg,
+      live_session_id: z.number().int().positive().optional(),
+      liveSessionId: z.number().int().positive().optional(),
+    }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      const sessionId = args.live_session_id ?? args.liveSessionId;
+      if (!sessionId) return { ok: false, message: "Invalid request." };
+      const session = (await db.select().from(schema.liveSessions).where(eq(schema.liveSessions.id, sessionId)).limit(1))[0];
+      if (!session) return { ok: false, message: "Live session not found." };
+      const broadcaster = (await db.select().from(schema.users).where(eq(schema.users.id, session.userId)).limit(1))[0];
+      return {
+        ok: true,
+        session: liveSessionDto(session, broadcaster),
+        gifts: GIFT_CATALOG,
+        my_coin_balance: user.coinBalance,
+        is_mine: session.userId === user.id,
+      };
+    }
+  ),
+
+  sendGift: withValidation(
+    z.object({
+      token: tokenArg,
+      live_session_id: z.number().int().positive().optional(),
+      liveSessionId: z.number().int().positive().optional(),
+      gift_key: z.string().trim().min(1).max(40).optional(),
+      giftKey: z.string().trim().min(1).max(40).optional(),
+    }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      const sessionId = args.live_session_id ?? args.liveSessionId;
+      const gift = giftForKey(args.gift_key ?? args.giftKey ?? "");
+      if (!sessionId) return { ok: false, message: "Invalid request." };
+      if (!gift) return { ok: false, message: "That gift is not available." };
+      const session = (await db.select().from(schema.liveSessions).where(eq(schema.liveSessions.id, sessionId)).limit(1))[0];
+      if (!session) return { ok: false, message: "Live session not found." };
+      if (session.endedAt) return { ok: false, message: "This live has ended." };
+      if (session.userId === user.id) return { ok: false, message: "You cannot send a gift to your own live." };
+
+      // Atomic, balance-guarded deduct: the WHERE clause makes the spend
+      // fail cleanly instead of overdrawing if the balance moved since the
+      // last read (double-tap, two tabs, ...).
+      const deducted = await db
+        .update(schema.users)
+        .set({ coinBalance: sql`${schema.users.coinBalance} - ${gift.coins}` })
+        .where(and(eq(schema.users.id, user.id), gte(schema.users.coinBalance, gift.coins)))
+        .returning({ coinBalance: schema.users.coinBalance });
+      if (deducted.length === 0) {
+        const fresh = (await db.select({ coinBalance: schema.users.coinBalance }).from(schema.users).where(eq(schema.users.id, user.id)).limit(1))[0];
+        return {
+          ok: false,
+          message: `Not enough coins — this gift costs ${gift.coins} coins and you have ${fresh?.coinBalance ?? 0}. Buy more coins from the Rewards tab.`,
+          my_balance: fresh?.coinBalance ?? 0,
+        };
+      }
+      const myBalance = deducted[0].coinBalance;
+      const { creatorShare, platformShare } = giftSplit(gift.coins);
+      try {
+        await db.batch([
+          db.update(schema.users).set({ coinBalance: sql`${schema.users.coinBalance} + ${creatorShare}` }).where(eq(schema.users.id, session.userId)),
+          db.insert(schema.giftEvents).values({
+            liveSessionId: session.id,
+            senderId: user.id,
+            creatorId: session.userId,
+            giftKey: gift.key,
+            coins: gift.coins,
+            creatorShare,
+            platformShare,
+          }),
+          db
+            .update(schema.liveSessions)
+            .set({
+              totalGiftCoins: sql`${schema.liveSessions.totalGiftCoins} + ${gift.coins}`,
+              platformCutCoins: sql`${schema.liveSessions.platformCutCoins} + ${platformShare}`,
+            })
+            .where(eq(schema.liveSessions.id, session.id)),
+        ]);
+      } catch (err) {
+        // The credit side failed after the deduct — refund the sender so a
+        // failed gift never costs anyone coins.
+        console.error("[api] sendGift credit failed, refunding sender:", err?.message || err);
+        await db.update(schema.users).set({ coinBalance: sql`${schema.users.coinBalance} + ${gift.coins}` }).where(eq(schema.users.id, user.id));
+        return { ok: false, message: "The gift could not be sent. Your coins were not deducted — please try again." };
+      }
+
+      const giftPayload = {
+        key: gift.key,
+        name: gift.name,
+        emoji: gift.emoji,
+        coins: gift.coins,
+        creator_share: creatorShare,
+        platform_share: platformShare,
+      };
+      broadcastGift(session.id, { from: authorDto(user), gift: giftPayload, created_at: Date.now() });
+      // If this live is in a PK match, the gift's full value scores for
+      // the broadcaster's side (balances above already used the 50/50 split).
+      noteGiftForMatch(session.id, gift.coins);
+      return {
+        ok: true,
+        message: `You sent ${gift.emoji} ${gift.name} (${gift.coins} coins)!`,
+        gift: giftPayload,
+        creator_share: creatorShare,
+        platform_share: platformShare,
+        my_balance: myBalance,
+      };
+    }
+  ),
+
   // ---- Admin ----------------------------------------------------------------
 
   getAdminCoinRequests: withValidation(z.object({ token: tokenArg }), async (args) => {
@@ -626,8 +840,14 @@ export const Actions = {
       .innerJoin(schema.users, eq(schema.coinRequests.userId, schema.users.id))
       .orderBy(sql`case when ${schema.coinRequests.status} = 'pending' then 0 else 1 end`, desc(schema.coinRequests.createdAt))
       .limit(100);
+    // Total platform cut from LIVE gifts (recorded in gift_events; the
+    // coins themselves are credited nowhere — this is the owner's tally).
+    const giftTotals = await db
+      .select({ total: sql`coalesce(sum(${schema.giftEvents.platformShare}), 0)`.mapWith(Number) })
+      .from(schema.giftEvents);
     return {
       ok: true,
+      platform_gift_coins: giftTotals[0]?.total ?? 0,
       requests: rows.map((r) => ({
         id: r.request.id,
         pack_coins: r.request.packCoins,

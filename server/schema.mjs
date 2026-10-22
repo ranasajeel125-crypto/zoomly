@@ -69,3 +69,49 @@ export const coinRequests = sqliteTable("coin_requests", {
   reviewedAt: integer("reviewed_at", { mode: "timestamp_ms" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
+
+// A LIVE broadcast. endedAt is null while the broadcast is running.
+// totalGiftCoins = gross gift coins received; platformCutCoins = the
+// platform's 50% share of those gifts (the creator received the rest).
+export const liveSessions = sqliteTable("live_sessions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  endedAt: integer("ended_at", { mode: "timestamp_ms" }),
+  peakViewers: integer("peak_viewers").notNull().default(0),
+  totalGiftCoins: integer("total_gift_coins").notNull().default(0),
+  platformCutCoins: integer("platform_cut_coins").notNull().default(0),
+});
+
+// One row per gift sent during a live broadcast. coins = full gift price
+// (deducted from the sender); creatorShare went to the broadcaster's coin
+// balance; platformShare is the platform cut (recorded, credited nowhere).
+export const giftEvents = sqliteTable("gift_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  liveSessionId: integer("live_session_id").notNull().references(() => liveSessions.id, { onDelete: "cascade" }),
+  senderId: integer("sender_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  creatorId: integer("creator_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  giftKey: text("gift_key").notNull(),
+  coins: integer("coins").notNull(),
+  creatorShare: integer("creator_share").notNull(),
+  platformShare: integer("platform_share").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+// A PK match between two live broadcasts. scoreA/scoreB are the summed
+// gift coin values each side received during the match (balances still use
+// the normal 50/50 gift split). winnerUserId is null for a draw and while
+// the match is running; endedAt is null while running.
+export const liveMatches = sqliteTable("live_matches", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  liveSessionA: integer("live_session_a").notNull().references(() => liveSessions.id, { onDelete: "cascade" }),
+  liveSessionB: integer("live_session_b").notNull().references(() => liveSessions.id, { onDelete: "cascade" }),
+  userA: integer("user_a").notNull().references(() => users.id, { onDelete: "cascade" }),
+  userB: integer("user_b").notNull().references(() => users.id, { onDelete: "cascade" }),
+  scoreA: integer("score_a").notNull().default(0),
+  scoreB: integer("score_b").notNull().default(0),
+  winnerUserId: integer("winner_user_id").references(() => users.id, { onDelete: "set null" }),
+  startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  endedAt: integer("ended_at", { mode: "timestamp_ms" }),
+});
