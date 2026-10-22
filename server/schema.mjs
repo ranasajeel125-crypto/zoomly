@@ -7,6 +7,8 @@ export const users = sqliteTable("users", {
   displayName: text("display_name").notNull(),
   bio: text("bio").notNull().default(""),
   passwordHash: text("password_hash").notNull(),
+  googleId: text("google_id").unique(), // Google account id ("sub") — null for password-only accounts
+  email: text("email"), // from Google sign-in (or null)
   avatarUrl: text("avatar_url"), // profile photo (DP), hosted on Cloudinary
   avatarPublicId: text("avatar_public_id"),
   coinBalance: integer("coin_balance").notNull().default(0),

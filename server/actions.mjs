@@ -176,6 +176,82 @@ async function applyReferral(user, rawCode) {
   return { ok: true, message: `Referral claimed! You got ${REFERRAL_WELCOME_COINS} welcome coins and @${inviter.username} got ${REFERRAL_INVITER_COINS}.` };
 }
 
+// ---- Google sign-in ---------------------------------------------------------
+// Called from the OAuth callback (index.mjs) with the verified Google
+// profile { sub, email, name, picture }.
+// - Known google_id: fill in a missing DP/email, issue a normal session.
+// - New google_id:   { status: "pending" } — the client must still pick a
+//   username via googleCompleteSignup before the account exists.
+export async function googleSignIn(profile) {
+  const rows = await db.select().from(schema.users).where(eq(schema.users.googleId, profile.sub)).limit(1);
+  const user = rows[0];
+  if (!user) return { status: "pending" };
+  const patch = {};
+  if (!user.avatarUrl && profile.picture) patch.avatarUrl = profile.picture;
+  if (!user.email && profile.email) patch.email = profile.email;
+  if (Object.keys(patch).length > 0) {
+    await db.update(schema.users).set(patch).where(eq(schema.users.id, user.id));
+    Object.assign(user, patch);
+  }
+  const token = await createSession(user.id);
+  return { status: "login", token, user: await meDto(user) };
+}
+
+// Finalizes a first-time Google signup once the user has picked a username.
+// Mirrors the password signup: referral code is generated, an optional
+// referral claim credits inviter +20 / new user +10, and the Google profile
+// picture becomes the account's DP.
+export async function googleCompleteSignup(profile, rawArgs) {
+  const parsed = z
+    .object({
+      username: usernameRule,
+      display_name: z.string().trim().min(2).max(60).optional(),
+      referral_code: z.string().trim().max(64).optional(),
+    })
+    .safeParse(rawArgs ?? {});
+  if (!parsed.success) return { ok: false, message: "Please pick a valid username (3–24 letters, numbers or underscores)." };
+  const args = parsed.data;
+  const username = args.username.toLowerCase();
+
+  const linked = await db.select({ id: schema.users.id }).from(schema.users).where(eq(schema.users.googleId, profile.sub)).limit(1);
+  if (linked.length > 0) return { ok: false, message: "This Google account is already linked to a Zoomly account — please log in instead." };
+  const existing = await db.select({ id: schema.users.id }).from(schema.users).where(eq(schema.users.username, username)).limit(1);
+  if (existing.length > 0) return { ok: false, message: "That username is already taken — please pick another." };
+
+  const displayName = (args.display_name?.trim() || profile.name || username).slice(0, 60);
+  const tempCode = `PENDING-${bytesToHex(crypto.getRandomValues(new Uint8Array(8)))}`;
+  const inserted = await db
+    .insert(schema.users)
+    .values({
+      username,
+      displayName,
+      // Google accounts have no password; store a hash of a random secret so
+      // password login simply never matches (and the NOT NULL column holds).
+      passwordHash: await hashPassword(bytesToHex(crypto.getRandomValues(new Uint8Array(32)))),
+      googleId: profile.sub,
+      email: profile.email ?? null,
+      avatarUrl: profile.picture ?? null,
+      referralCode: tempCode,
+    })
+    .returning();
+  const user = inserted[0];
+  if (!user) return { ok: false, message: "Account could not be created." };
+  const referralCode = `ZOOM-${user.id}-${username.toUpperCase()}`;
+  await db.update(schema.users).set({ referralCode }).where(eq(schema.users.id, user.id));
+  user.referralCode = referralCode;
+  let referralMessage = null;
+  if (args.referral_code) {
+    const claim = await applyReferral(user, args.referral_code);
+    referralMessage = claim.message;
+    if (claim.ok) {
+      const fresh = await db.select().from(schema.users).where(eq(schema.users.id, user.id)).limit(1);
+      if (fresh[0]) Object.assign(user, fresh[0]);
+    }
+  }
+  const token = await createSession(user.id);
+  return { ok: true, message: "Account created with Google.", token, user: await meDto(user), referral_message: referralMessage };
+}
+
 // Validates request args with zod; returns { ok:false, message } on bad input.
 function withValidation(shape, handler) {
   return async (rawArgs) => {

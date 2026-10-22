@@ -30,6 +30,8 @@ export async function initDb() {
       display_name TEXT NOT NULL,
       bio TEXT NOT NULL DEFAULT '',
       password_hash TEXT NOT NULL,
+      google_id TEXT,
+      email TEXT,
       avatar_url TEXT,
       avatar_public_id TEXT,
       coin_balance INTEGER NOT NULL DEFAULT 0,
@@ -96,4 +98,12 @@ export async function initDb() {
   for (const sql of statements) {
     await client.execute(sql);
   }
+  // Migrations for databases created before a column existed (SQLite cannot
+  // add a UNIQUE column via ALTER TABLE, so google_id gets a unique index —
+  // multiple NULLs are allowed, matching the nullable-unique requirement).
+  const cols = await client.execute("PRAGMA table_info(users)");
+  const colNames = new Set(cols.rows.map((r) => r.name));
+  if (!colNames.has("google_id")) await client.execute("ALTER TABLE users ADD COLUMN google_id TEXT");
+  if (!colNames.has("email")) await client.execute("ALTER TABLE users ADD COLUMN email TEXT");
+  await client.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id)");
 }

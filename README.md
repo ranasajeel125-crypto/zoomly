@@ -8,7 +8,12 @@ deployable on Render's free tier. Same proven stack as the SMM panel.
 ## Features
 
 - **Accounts** — sign up / log in with username + password (PBKDF2-hashed),
-  30-day sessions, log out.
+  30-day sessions, log out. **Continue with Google** is also supported:
+  existing Google users are signed straight in; first-time Google users
+  pick a Zoomly username (with an optional referral code) and their Google
+  profile photo becomes their DP.
+- **Public pages** — a Privacy Policy at `/privacy` and Terms at `/terms`,
+  served by the server (also used on the Google OAuth consent screen).
 - **Profiles** — display name, bio, and a profile photo (DP) shown as the
   avatar everywhere: feed, comments, People, profiles and leaderboards.
   Falls back to an initial-letter avatar.
@@ -64,6 +69,38 @@ CLOUDINARY_API_SECRET
 Without them, uploads fail with a clear "not configured" message (nothing is
 silently stored locally). Get the keys from the Cloudinary dashboard after a
 free signup at https://cloudinary.com.
+
+## Google sign-in (optional)
+
+"Continue with Google" appears on the log in / sign up screens. Until it is
+configured, clicking it returns a clear "Google login is not configured
+yet" message — nothing breaks.
+
+Setup (one time, in the [Google Cloud Console](https://console.cloud.google.com)):
+
+1. Create (or pick) a project.
+2. **APIs & Services → OAuth consent screen** — set the app name to
+   Zoomly, add the support email, the home page
+   `https://zoomly.onrender.com` and the privacy policy
+   `https://zoomly.onrender.com/privacy` (the app also serves a Terms page
+   at `https://zoomly.onrender.com/terms`).
+3. **APIs & Services → Credentials → Create credentials → OAuth client
+   ID** — type **Web application**. Under **Authorized redirect URIs** add
+   exactly:
+   `https://zoomly.onrender.com/api/auth/google/callback`
+   (for local testing you may also add
+   `http://localhost:3000/api/auth/google/callback`).
+4. Copy the **Client ID** and **Client secret** into the Render
+   dashboard env vars `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
+   (both are already declared in `render.yaml`), then redeploy.
+
+How it works: the server redirects to Google, exchanges the code with
+plain `fetch` calls, and matches accounts by Google account id. New
+Google users choose a unique username first (referral codes work there
+too, with the same +20/+10 crediting); their Google picture becomes
+their DP if they have none. Username+password accounts keep working
+unchanged, and the `ADMIN_USERNAME` owner logic applies to whichever
+account claims that username, Google-created or not.
 
 ## Run locally
 

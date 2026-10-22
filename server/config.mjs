@@ -65,6 +65,15 @@ export function cloudinaryConfig() {
   return { cloudName, apiKey, apiSecret, configured: Boolean(cloudName && apiKey && apiSecret) };
 }
 
+// Google OAuth ("Continue with Google"). Both values come from the Google
+// Cloud Console OAuth client; without them the button still renders but the
+// flow returns a clear "not configured" message.
+export function googleConfig() {
+  const clientId = process.env.GOOGLE_CLIENT_ID || "";
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
+  return { clientId, clientSecret, configured: Boolean(clientId && clientSecret) };
+}
+
 export const REFERRAL_INVITER_COINS = 20;
 export const REFERRAL_WELCOME_COINS = 10;
 export const LEADERBOARD_LIMIT = 50;

@@ -21,5 +21,9 @@ services:
         sync: false # set in Render dashboard
       - key: CLOUDINARY_API_SECRET
         sync: false # set in Render dashboard (secret)
+      - key: GOOGLE_CLIENT_ID
+        sync: false # optional — Google sign-in (see README "Google sign-in")
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false # optional — Google sign-in (secret)
       - key: NODE_VERSION
         value: "20"

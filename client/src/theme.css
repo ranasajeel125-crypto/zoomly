@@ -82,6 +82,19 @@ select {
   color: #131a02;
 }
 
+.btn-google {
+  background: #fff;
+  border-color: #d7ddd9;
+  color: #1f2937;
+  width: 100%;
+  padding: 11px 16px;
+  font-size: 15px;
+  text-decoration: none;
+}
+.btn-google:hover {
+  background: #f3f6f4;
+}
+
 .btn-danger {
   background: transparent;
   border-color: var(--bad);

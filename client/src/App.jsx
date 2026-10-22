@@ -100,6 +100,108 @@ function Notice({ text, bad }) {
 
 // ---------- auth --------------------------------------------------------------
 
+export function GoogleIcon({ size = 20 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 48 48" aria-hidden="true" style={{ flexShrink: 0 }}>
+      <path fill="#FFC107" d="M43.611 20.083H42V20H24v8h11.303c-1.649 4.657-6.08 8-11.303 8-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z" />
+      <path fill="#FF3D00" d="m6.306 14.691 6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 16.318 4 9.656 8.337 6.306 14.691z" />
+      <path fill="#4CAF50" d="M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238A11.91 11.91 0 0 1 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z" />
+      <path fill="#1976D2" d="M43.611 20.083H42V20H24v8h11.303a12.04 12.04 0 0 1-4.087 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z" />
+    </svg>
+  );
+}
+
+export function GoogleButton() {
+  return (
+    <a className="btn btn-google" href="/api/auth/google">
+      <GoogleIcon /> Continue with Google
+    </a>
+  );
+}
+
+// First Google sign-in lands here (server holds the Google profile in a
+// signed cookie): the user picks their Zoomly username before the account
+// is created. A friend's referral code can be entered on the same screen.
+function GoogleSetupView({ onAuthed, onCancel }) {
+  const [profile, setProfile] = useState(null);
+  const [username, setUsername] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [referralCode, setReferralCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      const res = await fetch("/api/auth/google/pending").then((r) => r.json()).catch(() => null);
+      if (!res?.ok) {
+        setError(res?.message || "Your Google sign-in session has expired. Please try again.");
+        return;
+      }
+      setProfile(res);
+      setUsername(res.suggested_username || "");
+      setDisplayName(res.name || "");
+    })();
+  }, []);
+
+  async function submit(e) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    const res = await fetch("/api/auth/google/complete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username, display_name: displayName || undefined, referral_code: referralCode || undefined }),
+    }).then((r) => r.json()).catch(() => null);
+    setBusy(false);
+    if (!res?.ok) {
+      setError(res?.message || "Could not create your account. Please try again.");
+      return;
+    }
+    setToken(res.token);
+    onAuthed(res.user);
+  }
+
+  return (
+    <div style={{ maxWidth: 420, margin: "0 auto", padding: "48px 20px 24px" }}>
+      <div style={{ textAlign: "center", marginBottom: 24 }}>
+        <div style={{ display: "flex", justifyContent: "center" }}>
+          <Logo size={76} />
+        </div>
+        <div style={{ fontSize: 34, fontWeight: 900, letterSpacing: -1, marginTop: 10 }}>
+          Almost there!
+        </div>
+        <p style={{ color: "var(--dim)", marginTop: 4 }}>Pick your Zoomly username to finish signing up with Google.</p>
+      </div>
+      {profile && (
+        <div className="card" style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+          {profile.picture ? (
+            <img src={profile.picture} alt="" style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover" }} />
+          ) : (
+            <Avatar user={{ display_name: profile.name || profile.email || "G" }} size={44} />
+          )}
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 700 }}>{profile.name || "Google user"}</div>
+            <div style={{ color: "var(--dim)", fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{profile.email || ""}</div>
+          </div>
+        </div>
+      )}
+      <form onSubmit={submit} style={{ display: "grid", gap: 10 }}>
+        <input className="input" placeholder="Choose a username" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" required />
+        <input className="input" placeholder="Display name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} autoComplete="name" />
+        <input className="input" placeholder="Referral code (optional) — e.g. ZOOM-1-SAJEEL" value={referralCode} onChange={(e) => setReferralCode(e.target.value)} />
+        <Notice text={error} bad />
+        <button className="btn btn-primary" type="submit" disabled={busy || !profile} style={{ padding: "12px 16px", fontSize: 16 }}>
+          {busy ? "Please wait…" : "Create my account"}
+        </button>
+      </form>
+      <p style={{ color: "var(--dim)", fontSize: 13, marginTop: 12 }}>Your Google profile photo becomes your Zoomly photo (DP) — you can change it later. A friend's referral code gives you 10 welcome coins — and them 20.</p>
+      <button className="btn" onClick={onCancel} style={{ marginTop: 6 }}>
+        ← Back to log in
+      </button>
+    </div>
+  );
+}
+
 function AuthView({ onAuthed }) {
   const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
@@ -109,6 +211,16 @@ function AuthView({ onAuthed }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
+
+  // The Google flow reports failures by redirecting back with
+  // #google-error=<message> — show it once, then clean the URL.
+  useEffect(() => {
+    const hash = window.location.hash || "";
+    if (hash.startsWith("#google-error=")) {
+      setError(decodeURIComponent(hash.slice("#google-error=".length)));
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+  }, []);
 
   async function submit(e) {
     e.preventDefault();
@@ -163,6 +275,12 @@ function AuthView({ onAuthed }) {
           {busy ? "Please wait…" : mode === "signup" ? "Create account" : "Log in"}
         </button>
       </form>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "16px 0 12px", color: "var(--dim)", fontSize: 13 }}>
+        <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
+        or
+        <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
+      </div>
+      <GoogleButton />
       {mode === "signup" && <p style={{ color: "var(--dim)", fontSize: 13, marginTop: 12 }}>Signing up with a friend&apos;s referral code gives you 10 welcome coins — and them 20.</p>}
     </div>
   );
@@ -1180,6 +1298,7 @@ const NAV = [
 export function App() {
   const [me, setMe] = useState(null);
   const [booting, setBooting] = useState(true);
+  const [googleSetup, setGoogleSetup] = useState(false);
   const [tab, setTab] = useState("feed");
   const [profileUserId, setProfileUserId] = useState(null);
   const [feedKey, setFeedKey] = useState(0);
@@ -1192,6 +1311,16 @@ export function App() {
 
   useEffect(() => {
     (async () => {
+      // Google sign-in returns through the URL hash: #google-token=<session>
+      // for existing accounts, #google-setup for first-time username choice.
+      const hash = window.location.hash || "";
+      if (hash.startsWith("#google-token=")) {
+        setToken(decodeURIComponent(hash.slice("#google-token=".length)));
+        window.history.replaceState(null, "", window.location.pathname);
+      } else if (hash.startsWith("#google-setup")) {
+        setGoogleSetup(true);
+        window.history.replaceState(null, "", window.location.pathname);
+      }
       if (getToken()) {
         const res = await call("getMe", {});
         if (res.ok) setMe(res.user);
@@ -1228,6 +1357,18 @@ export function App() {
   }
 
   if (!me) {
+    if (googleSetup) {
+      return (
+        <GoogleSetupView
+          onAuthed={(user) => {
+            setGoogleSetup(false);
+            setMe(user);
+            setTab("feed");
+          }}
+          onCancel={() => setGoogleSetup(false)}
+        />
+      );
+    }
     return (
       <AuthView
         onAuthed={(user) => {
