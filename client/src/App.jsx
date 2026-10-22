@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { call, getToken, setToken, uploadMedia } from "./api";
+import { call, getToken, isWaking, setToken, subscribeWaking, uploadMedia } from "./api";
+
+// Shown while the (free-tier) server is waking up and the client is
+// retrying — a slow first load is normal, not an error.
+const WAKING_TEXT = "Zoomly jag raha hai… pehli dafa khulne me thora waqt lag sakta hai";
+
+function useWaking() {
+  const [waking, setWaking] = useState(isWaking());
+  useEffect(() => subscribeWaking(setWaking), []);
+  return waking;
+}
 
 // ---------- small helpers ---------------------------------------------------
 
@@ -454,12 +464,17 @@ function FeedView({ me, onOpenProfile, refreshMe }) {
   const [stream, setStream] = useState("foryou");
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [commentPost, setCommentPost] = useState(null);
+  const waking = useWaking();
 
   const load = useCallback(async () => {
     setLoading(true);
+    setLoadError(false);
+    // getFeed is a read: retried automatically while the server wakes up.
     const res = await call("getFeed", { stream, limit: 30 });
     if (res.ok) setPosts(res.posts);
+    else if (res.transportError) setLoadError(true);
     setLoading(false);
   }, [stream]);
 
@@ -499,8 +514,17 @@ function FeedView({ me, onOpenProfile, refreshMe }) {
         </span>
       </div>
       <div className="feed-snap" style={{ flex: 1, marginTop: 8 }}>
-        {loading && <p style={{ padding: 20, color: "var(--dim)" }}>Loading videos…</p>}
-        {!loading && posts.length === 0 && (
+        {loading && <p style={{ padding: 20, color: "var(--dim)" }}>{waking ? WAKING_TEXT : "Loading videos…"}</p>}
+        {!loading && loadError && posts.length === 0 && (
+          <div style={{ padding: 28, textAlign: "center", color: "var(--dim)" }}>
+            <p style={{ fontSize: 18, color: "var(--text)", fontWeight: 700 }}>Videos could not load</p>
+            <p>The server may be waking up — please try again.</p>
+            <button className="btn btn-primary" onClick={load}>
+              Try again
+            </button>
+          </div>
+        )}
+        {!loading && !loadError && posts.length === 0 && (
           <div style={{ padding: 28, textAlign: "center", color: "var(--dim)" }}>
             <p style={{ fontSize: 18, color: "var(--text)", fontWeight: 700 }}>No videos here yet</p>
             <p>{stream === "following" ? "Follow some creators and their videos will show up here." : "Be the first to upload a video — tap the + button below."}</p>
@@ -1086,6 +1110,7 @@ function AdminSection({ refreshMe }) {
 
 function RewardsView({ me, refreshMe }) {
   const [data, setData] = useState(null);
+  const [loadError, setLoadError] = useState(false);
   const [board, setBoard] = useState("coins");
   const [claimCode, setClaimCode] = useState("");
   const [packIndex, setPackIndex] = useState(0);
@@ -1093,10 +1118,15 @@ function RewardsView({ me, refreshMe }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const waking = useWaking();
 
   const load = useCallback(async () => {
+    setLoadError(false);
+    // getRewards is a read: the RPC client retries it while the server
+    // wakes up, so data usually just arrives a little late.
     const res = await call("getRewards", {});
     if (res.ok) setData(res);
+    else if (res.transportError) setLoadError(true);
   }, []);
 
   useEffect(() => {
@@ -1164,7 +1194,17 @@ function RewardsView({ me, refreshMe }) {
     load();
   }
 
-  if (!data) return <p style={{ padding: 20, color: "var(--dim)" }}>Loading rewards…</p>;
+  if (!data && loadError) {
+    return (
+      <div style={{ padding: 20, textAlign: "center" }}>
+        <p style={{ color: "var(--dim)" }}>Rewards could not load — the server may be waking up.</p>
+        <button className="btn btn-primary" onClick={load}>
+          Try again
+        </button>
+      </div>
+    );
+  }
+  if (!data) return <p style={{ padding: 20, color: "var(--dim)" }}>{waking ? WAKING_TEXT : "Loading rewards…"}</p>;
   const selectedPack = data.packs[packIndex] || data.packs[0];
 
   return (
@@ -1233,12 +1273,12 @@ function RewardsView({ me, refreshMe }) {
               style={{ padding: 10, textAlign: "center", cursor: "pointer", borderColor: i === packIndex ? "var(--accent)" : "var(--border)", color: "var(--text)" }}
             >
               <div style={{ fontWeight: 900, fontSize: 17 }}>🪙 {pack.coins.toLocaleString()}</div>
-              <div style={{ color: "var(--dim)", fontSize: 13 }}>Rs.{pack.price_pkr.toLocaleString()}</div>
+              <div style={{ color: "var(--dim)", fontSize: 13 }}>Rs.{Number(pack.pricePkr ?? 0).toLocaleString()}</div>
             </button>
           ))}
         </div>
         <form onSubmit={buy} style={{ display: "flex", gap: 8, marginTop: 12 }}>
-          <input className="input" placeholder={`JazzCash TID for the Rs.${selectedPack.price_pkr} payment`} value={tid} onChange={(e) => setTid(e.target.value)} required />
+          <input className="input" placeholder={`JazzCash TID for the Rs.${selectedPack.pricePkr} payment`} value={tid} onChange={(e) => setTid(e.target.value)} required />
           <button className="btn btn-primary" type="submit" disabled={busy}>
             Submit
           </button>
@@ -1298,10 +1338,12 @@ const NAV = [
 export function App() {
   const [me, setMe] = useState(null);
   const [booting, setBooting] = useState(true);
+  const [bootFailed, setBootFailed] = useState(false);
   const [googleSetup, setGoogleSetup] = useState(false);
   const [tab, setTab] = useState("feed");
   const [profileUserId, setProfileUserId] = useState(null);
   const [feedKey, setFeedKey] = useState(0);
+  const waking = useWaking();
 
   const refreshMe = useCallback(async () => {
     if (!getToken()) return;
@@ -1322,8 +1364,13 @@ export function App() {
         window.history.replaceState(null, "", window.location.pathname);
       }
       if (getToken()) {
+        // getMe is a read, so the RPC client retries it while the server
+        // wakes up (up to ~90s). Only a transport failure after all those
+        // retries means the app really could not open; a normal "not signed
+        // in" answer just means the saved session is gone.
         const res = await call("getMe", {});
         if (res.ok) setMe(res.user);
+        else if (res.transportError) setBootFailed(true);
         else setToken("");
       }
       setBooting(false);
@@ -1342,6 +1389,21 @@ export function App() {
     setTab("feed");
   }
 
+  if (bootFailed) {
+    return (
+      <div style={{ padding: 48, textAlign: "center" }}>
+        <div style={{ display: "flex", justifyContent: "center" }}>
+          <Logo size={64} />
+        </div>
+        <h2 style={{ marginTop: 16 }}>Zoomly could not open</h2>
+        <p style={{ color: "var(--dim)" }}>Reload the page to try again.</p>
+        <button className="btn btn-primary" onClick={() => window.location.reload()}>
+          Reload page
+        </button>
+      </div>
+    );
+  }
+
   if (booting) {
     return (
       <div style={{ padding: 48, textAlign: "center" }}>
@@ -1351,7 +1413,7 @@ export function App() {
         <div style={{ fontSize: 36, fontWeight: 900, marginTop: 10 }}>
           Zoom<span style={{ color: "var(--accent)" }}>ly</span>
         </div>
-        <p style={{ color: "var(--dim)" }}>Loading…</p>
+        <p style={{ color: "var(--dim)" }}>{waking ? WAKING_TEXT : "Loading…"}</p>
       </div>
     );
   }
