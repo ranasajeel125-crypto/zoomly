@@ -12,6 +12,7 @@ export const users = sqliteTable("users", {
   avatarUrl: text("avatar_url"), // profile photo (DP), hosted on Cloudinary
   avatarPublicId: text("avatar_public_id"),
   coinBalance: integer("coin_balance").notNull().default(0),
+  liveTitle: text("live_title"), // last-used LIVE title — asked once, then reused by startLive
   referralCode: text("referral_code").notNull().unique(), // e.g. ZOOM-3-ALI
   referredBy: integer("referred_by").references(() => users.id, { onDelete: "set null" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),

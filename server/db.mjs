@@ -35,6 +35,7 @@ export async function initDb() {
       avatar_url TEXT,
       avatar_public_id TEXT,
       coin_balance INTEGER NOT NULL DEFAULT 0,
+      live_title TEXT,
       referral_code TEXT NOT NULL UNIQUE,
       referred_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
       created_at INTEGER NOT NULL
@@ -141,5 +142,6 @@ export async function initDb() {
   const colNames = new Set(cols.rows.map((r) => r.name));
   if (!colNames.has("google_id")) await client.execute("ALTER TABLE users ADD COLUMN google_id TEXT");
   if (!colNames.has("email")) await client.execute("ALTER TABLE users ADD COLUMN email TEXT");
+  if (!colNames.has("live_title")) await client.execute("ALTER TABLE users ADD COLUMN live_title TEXT");
   await client.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id)");
 }

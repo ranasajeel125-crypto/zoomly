@@ -323,8 +323,13 @@ function LiveList({ me, onGoLive, onWatch, onOpenProfile }) {
 
 // ---- go-live setup -----------------------------------------------------------------
 
-function GoLiveSetup({ onStart, onCancel }) {
-  const [title, setTitle] = useState("");
+function GoLiveSetup({ me, onStart, onCancel }) {
+  // The live title is asked once and then remembered on the account:
+  // with a saved title we go straight to the camera/start screen and
+  // only offer a small "change title" edit for those who want it.
+  const savedTitle = me.live_title ?? "";
+  const [title, setTitle] = useState(savedTitle);
+  const [editingTitle, setEditingTitle] = useState(!savedTitle);
   const [stream, setStream] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -369,13 +374,13 @@ function GoLiveSetup({ onStart, onCancel }) {
       setError("Pehle camera on karo.");
       return;
     }
-    if (!title.trim()) {
-      setError("Apni live ko ek title do.");
-      return;
-    }
     setBusy(true);
     setError("");
-    const res = await call("startLive", { title: title.trim() });
+    // Send a title only when the user typed/edited one; otherwise the
+    // server reuses the saved title (or its default) — starting a live
+    // never requires touching the title again.
+    const typed = editingTitle ? title.trim() : "";
+    const res = await call("startLive", typed ? { title: typed } : {});
     setBusy(false);
     if (!res.ok) {
       setError(res.message || "Live start nahi ho saki.");
@@ -411,7 +416,22 @@ function GoLiveSetup({ onStart, onCancel }) {
         )}
       </div>
       <form onSubmit={start} style={{ display: "grid", gap: 10, marginTop: 14 }}>
-        <input className="input" placeholder="Live title — e.g. Sham ki gapshap 🎤" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={120} />
+        {editingTitle ? (
+          <>
+            <input className="input" placeholder="Live title — e.g. Sham ki gapshap 🎤" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={120} autoFocus={!savedTitle} />
+            <p style={{ color: "var(--dim)", fontSize: 12.5, margin: 0 }}>
+              {savedTitle ? "Naya title save ho jayega — agli dafa yehi use hoga." : "Title ek dafa likho — agli dafa app khud yaad rakhega. Khali chhoro to tumhare naam wala title lag jayega."}
+            </p>
+          </>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid var(--border)", borderRadius: 12, padding: "10px 12px" }}>
+            <span style={{ color: "var(--dim)", fontSize: 13 }}>📌 Title:</span>
+            <strong style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 14.5 }}>{savedTitle}</strong>
+            <button type="button" className="btn btn-small" onClick={() => setEditingTitle(true)}>
+              ✏️ Change
+            </button>
+          </div>
+        )}
         <Notice text={error} bad />
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" type="button" onClick={cancel} style={{ flex: 1 }}>
@@ -1180,7 +1200,16 @@ export function LiveView({ me, refreshMe, onOpenProfile }) {
   const [screen, setScreen] = useState({ kind: "list" });
 
   if (screen.kind === "setup") {
-    return <GoLiveSetup onCancel={() => setScreen({ kind: "list" })} onStart={(session, stream) => setScreen({ kind: "broadcast", session, stream })} />;
+    return (
+      <GoLiveSetup
+        me={me}
+        onCancel={() => setScreen({ kind: "list" })}
+        onStart={(session, stream) => {
+          refreshMe?.();
+          setScreen({ kind: "broadcast", session, stream });
+        }}
+      />
+    );
   }
   if (screen.kind === "broadcast") {
     return (

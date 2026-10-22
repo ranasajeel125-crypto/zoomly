@@ -424,6 +424,35 @@ check(
   JSON.stringify(summaryRes).slice(0, 220)
 );
 
+// ---- Live title: asked once, then remembered on the account ---------------------
+// (Every titled startLive saves its title — the most recent one above was
+// "Short second live", so that is what the account must now hold.)
+const meAfterFirst = await api("getMe", { token: creatorToken });
+check("titled startLive saved its title on the account", meAfterFirst.user?.live_title === "Short second live", JSON.stringify(meAfterFirst.user?.live_title));
+
+const titled = await api("startLive", { token: creatorToken, title: "Yaad wala title ✨" });
+check("startLive with a new title ok", titled.ok === true && titled.session?.title === "Yaad wala title ✨", JSON.stringify(titled).slice(0, 200));
+await api("endLive", { token: creatorToken, live_session_id: titled.session.id });
+const meAfterSave = await api("getMe", { token: creatorToken });
+check("new title replaced the saved one", meAfterSave.user?.live_title === "Yaad wala title ✨", JSON.stringify(meAfterSave.user?.live_title));
+
+const reused = await api("startLive", { token: creatorToken });
+check("startLive WITHOUT a title reuses the saved one", reused.ok === true && reused.session?.title === "Yaad wala title ✨", JSON.stringify(reused).slice(0, 200));
+await api("endLive", { token: creatorToken, live_session_id: reused.session.id });
+
+const freshName = `newbie_${suffix}`;
+const fresh = await api("signup", { username: freshName, display_name: "Fresh Face", password: "test-pass-123" });
+check("fresh user signup", fresh.ok === true);
+const defaulted = await api("startLive", { token: fresh.token });
+check(
+  "first-ever live without a title falls back to the default",
+  defaulted.ok === true && defaulted.session?.title === "Fresh Face is live 🔴",
+  JSON.stringify(defaulted).slice(0, 200)
+);
+const freshMe = await api("getMe", { token: fresh.token });
+check("the default title was saved too", freshMe.user?.live_title === "Fresh Face is live 🔴", JSON.stringify(freshMe.user?.live_title));
+await api("endLive", { token: fresh.token, live_session_id: defaulted.session.id });
+
 fan2.close();
 
 console.log(failures === 0 ? "\nLIVE TEST PASSED ✔" : `\nLIVE TEST FAILED — ${failures} check(s) failed ✗`);

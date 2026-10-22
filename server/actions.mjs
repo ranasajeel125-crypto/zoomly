@@ -130,6 +130,7 @@ async function meDto(user) {
     ...publicUserDto(user, counts.get(user.id) ?? 0),
     referral_code: user.referralCode,
     referred_by: user.referredBy ?? null,
+    live_title: user.liveTitle ?? null,
     follower_count: fc.followers,
     following_count: fc.following,
     is_admin: isAdminUser(user),
@@ -643,18 +644,26 @@ export const Actions = {
   // Sessions live in the DB (live_sessions); who is connected right now is
   // tracked by the WebSocket hub (live.mjs) — viewer counts come from there.
 
+  // The title is asked ONCE: whatever title a live is started with is
+  // saved on the account, and later startLive calls may omit it entirely
+  // to reuse the saved one. With neither, a default is used (and saved),
+  // so going live never blocks on typing a title.
   startLive: withValidation(
-    z.object({ token: tokenArg, title: z.string().trim().min(1).max(120) }),
+    z.object({ token: tokenArg, title: z.string().trim().max(120).optional() }),
     async (args) => {
       const user = await authUser(args.token);
       if (!user) return { ok: false, message: "Please sign in." };
+      const title = (args.title ?? "").trim() || user.liveTitle || `${user.displayName} is live 🔴`;
+      if (title !== user.liveTitle) {
+        await db.update(schema.users).set({ liveTitle: title }).where(eq(schema.users.id, user.id));
+      }
       // One live at a time per user: end any previous still-open session.
       const previous = await db
         .select({ id: schema.liveSessions.id })
         .from(schema.liveSessions)
         .where(and(eq(schema.liveSessions.userId, user.id), isNull(schema.liveSessions.endedAt)));
       for (const p of previous) await endLiveSession(p.id);
-      const inserted = await db.insert(schema.liveSessions).values({ userId: user.id, title: args.title }).returning();
+      const inserted = await db.insert(schema.liveSessions).values({ userId: user.id, title }).returning();
       const session = inserted[0];
       if (!session) return { ok: false, message: "Could not start the live. Please try again." };
       return { ok: true, message: "You are live!", session: liveSessionDto(session, user), ice_servers: ICE_SERVERS };
