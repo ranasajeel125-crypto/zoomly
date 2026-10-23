@@ -2252,7 +2252,7 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
       {isMe && data.referrals && (
         <>
           <h3 style={{ margin: "22px 0 10px" }}>My referrals ({data.referrals.length})</h3>
-          {data.referrals.length === 0 && <p style={{ color: "var(--dim)" }}>Nobody has joined with your code yet. Share it from the Rewards tab!</p>}
+          {data.referrals.length === 0 && <p style={{ color: "var(--dim)" }}>Nobody has joined with your code yet. Share it from the Rewards + Monetization tab!</p>}
           <div style={{ display: "grid", gap: 8 }}>
             {data.referrals.map((r) => (
               <button key={r.id} onClick={() => onOpenProfile(r.id)} className="card" style={{ display: "flex", alignItems: "center", gap: 10, padding: 10, textAlign: "left", color: "var(--text)" }}>
@@ -2954,7 +2954,7 @@ function MonetizationPanel({ onClose, refreshMe }) {
             {mon.monetized ? (
               <div className="card" style={{ marginTop: 14, textAlign: "center", borderColor: "var(--accent)" }} data-monetization-state="approved">
                 <div style={{ fontSize: 19, fontWeight: 900, color: "var(--accent)" }}>✅ Aap monetized hain — withdrawal khula hai</div>
-                <p style={{ color: "var(--dim)", fontSize: 14, margin: "8px 0 0" }}>Mubarak ho! Ab aap apne coins Rewards tab se apne JazzCash pe withdraw kar sakte hain.</p>
+                <p style={{ color: "var(--dim)", fontSize: 14, margin: "8px 0 0" }}>Mubarak ho! Ab aap apne coins Rewards + Monetization tab se apne JazzCash pe withdraw kar sakte hain.</p>
               </div>
             ) : app?.status === "pending" ? (
               <div className="card" style={{ marginTop: 14, textAlign: "center" }} data-monetization-state="pending">
@@ -3143,7 +3143,7 @@ function RewardsView({ me, refreshMe }) {
   if (!data && loadError) {
     return (
       <div style={{ padding: 20, textAlign: "center" }}>
-        <p style={{ color: "var(--dim)" }}>Rewards could not load — the server may be waking up.</p>
+        <p style={{ color: "var(--dim)" }}>Rewards + Monetization could not load — the server may be waking up.</p>
         <button className="btn btn-primary" onClick={load}>
           Try again
         </button>
@@ -3162,7 +3162,7 @@ function RewardsView({ me, refreshMe }) {
 
   return (
     <div style={{ padding: "14px 14px 20px", maxWidth: 640, margin: "0 auto" }}>
-      <h2 style={{ margin: "2px 0 12px" }}>Rewards</h2>
+      <h2 style={{ margin: "2px 0 12px" }}>Rewards + Monetization</h2>
       <Notice text={error} bad />
       <Notice text={notice} />
 
@@ -3474,7 +3474,7 @@ const NAV = [
   { key: "people", label: "People", icon: "👥" },
   { key: "live", label: "Live", icon: "🔴" },
   { key: "upload", label: "Upload", icon: "＋" },
-  { key: "rewards", label: "Rewards", icon: "🏆" },
+  { key: "rewards", label: "Rewards + Monetization", icon: "🏆" },
   { key: "profile", label: "Profile", icon: "👤" },
 ];
 

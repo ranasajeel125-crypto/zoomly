@@ -163,7 +163,7 @@ const { document } = dom.window;
 const bodyText = () => document.body?.textContent || "";
 try {
   dom.window.eval(bundle);
-  await waitFor("app boot", () => bodyText().includes("Rewards") || bodyText().includes("could not open"));
+  await waitFor("app boot", () => bodyText().includes("Monetization") || bodyText().includes("could not open"));
   check("app boots to the shell (no crash)", !bodyText().includes("could not open"));
 
   // ---- caption clamp: long captions collapse, short ones don't -------------
@@ -306,8 +306,9 @@ try {
     [...document.querySelectorAll("button")].some((b) => (b.getAttribute("aria-label") || "") === "Your story"),
   );
 
-  const btn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("Rewards"));
-  check("Rewards nav button found", Boolean(btn));
+  const btn = [...document.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("Monetization"));
+  check("Rewards + Monetization nav button found", Boolean(btn));
+  check("nav tab carries the combined 'Rewards + Monetization' label", (btn?.textContent || "").includes("Rewards + Monetization"), btn?.textContent);
   btn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
   await sleep(3000);
 
@@ -630,8 +631,8 @@ try {
   const click7 = (win, el) => el?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }));
   const goRewards = async (d, label) => {
     const doc = d.window.document;
-    await waitFor(`shell (${label})`, () => [...doc.querySelectorAll("nav button")].some((b) => (b.textContent || "").includes("Rewards")) || crashed(doc));
-    click7(d.window, [...doc.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("Rewards")));
+    await waitFor(`shell (${label})`, () => [...doc.querySelectorAll("nav button")].some((b) => (b.textContent || "").includes("Monetization")) || crashed(doc));
+    click7(d.window, [...doc.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("Monetization")));
   };
 
   const monUser = await api("signup", { username: `monok_${suffix}`, display_name: "Monetized Render", password: "test-pass-123" });

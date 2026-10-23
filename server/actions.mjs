@@ -1456,7 +1456,7 @@ export const Actions = {
         const fresh = (await db.select({ coinBalance: schema.users.coinBalance }).from(schema.users).where(eq(schema.users.id, user.id)).limit(1))[0];
         return {
           ok: false,
-          message: `Not enough coins — this gift costs ${gift.coins} coins and you have ${fresh?.coinBalance ?? 0}. Buy more coins from the Rewards tab.`,
+          message: `Not enough coins — this gift costs ${gift.coins} coins and you have ${fresh?.coinBalance ?? 0}. Buy more coins from the Rewards + Monetization tab.`,
           my_balance: fresh?.coinBalance ?? 0,
         };
       }
