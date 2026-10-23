@@ -692,7 +692,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock }
   );
 }
 
-function FeedView({ me, onOpenProfile, refreshMe, onGoLive }) {
+function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications }) {
   const [stream, setStream] = useState("foryou");
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -760,6 +760,14 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive }) {
           }}
         >
           🔴 LIVE
+        </button>
+        <button onClick={onOpenNotifications} aria-label="Notifications" title="Notifications" style={{ position: "relative", background: "none", border: "none", fontSize: 21, cursor: "pointer", padding: 2, flexShrink: 0 }}>
+          🔔
+          {(me?.unread_notifications ?? 0) > 0 && (
+            <span style={{ position: "absolute", top: -3, right: -5, background: "#e0245e", color: "#fff", borderRadius: 999, fontSize: 10, fontWeight: 800, padding: "1px 5px" }}>
+              {me.unread_notifications > 99 ? "99+" : me.unread_notifications}
+            </span>
+          )}
         </button>
         <span className="chip" title="Your coin balance">
           🪙 {me?.coin_balance ?? 0}
@@ -2017,6 +2025,83 @@ function RewardsView({ me, refreshMe }) {
   );
 }
 
+// ---------- notifications inbox -------------------------------------------------
+// Full-screen in-app inbox (no push). Opening it fetches the latest
+// notifications and marks them all read; rows keep the read state they
+// arrived with so unread ones stand out during this visit.
+const NOTIF_ICONS = { like: "❤️", comment: "💬", follow: "👥", gift: "🎁", referral: "🎉", coin_request: "🪙", withdrawal: "💸", live: "🔴", story: "⭕", dm: "✉️" };
+
+function NotificationsPanel({ onClose, refreshMe, onGoLive }) {
+  const [items, setItems] = useState(null);
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const res = await call("getNotifications", {});
+      if (res.ok) {
+        setItems(res.notifications);
+        await call("markNotificationsRead", {});
+        refreshMe?.();
+      } else if (res.transportError) {
+        setLoadError(true);
+      } else {
+        setItems([]);
+      }
+    })();
+  }, [refreshMe]);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "var(--bg)", zIndex: 70, display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
+        <strong style={{ fontSize: 18, flex: 1 }}>🔔 Notifications</strong>
+        <button className="btn btn-small" onClick={onClose}>
+          ✕ Close
+        </button>
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", padding: "10px 14px", maxWidth: 640, width: "100%", margin: "0 auto" }}>
+        {items === null && !loadError && <p style={{ color: "var(--dim)" }}>Loading…</p>}
+        {loadError && <p style={{ color: "var(--dim)" }}>Notifications could not load — the server may be waking up. Close and try again.</p>}
+        {items !== null && items.length === 0 && <p style={{ color: "var(--dim)" }}>No notifications yet — likes, comments, follows, gifts and owner decisions will show up here.</p>}
+        {items?.map((n) => (
+          <div
+            key={n.id}
+            onClick={() => {
+              if (n.live_session_id) {
+                onClose();
+                onGoLive?.();
+              }
+            }}
+            style={{
+              display: "flex",
+              gap: 10,
+              alignItems: "flex-start",
+              padding: "10px 8px",
+              borderBottom: "1px solid var(--border)",
+              background: n.read ? "transparent" : "var(--surface-2)",
+              borderRadius: 10,
+              cursor: n.live_session_id ? "pointer" : "default",
+            }}
+          >
+            {n.actor ? (
+              <Avatar user={n.actor} size={38} />
+            ) : (
+              <div style={{ width: 38, height: 38, borderRadius: "50%", background: "var(--surface)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, flexShrink: 0 }}>{NOTIF_ICONS[n.type] || "🔔"}</div>
+            )}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14.5 }}>{n.text}</div>
+              <div style={{ color: "var(--dim)", fontSize: 12.5, marginTop: 2 }}>
+                {timeAgo(n.created_at)}
+                {!n.read ? " · new" : ""}
+              </div>
+            </div>
+            {!n.read && <span style={{ width: 9, height: 9, borderRadius: "50%", background: "#e0245e", marginTop: 6, flexShrink: 0 }} />}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ---------- app shell ------------------------------------------------------------------
 
 // Bottom navigation: 3 + center + 3, with Live as the prominent raised
@@ -2037,6 +2122,7 @@ export function App() {
   const [bootFailed, setBootFailed] = useState(false);
   const [googleSetup, setGoogleSetup] = useState(false);
   const [tab, setTab] = useState("feed");
+  const [showNotifs, setShowNotifs] = useState(false);
   const [profileUserId, setProfileUserId] = useState(null);
   const [feedKey, setFeedKey] = useState(0);
   const waking = useWaking();
@@ -2143,7 +2229,7 @@ export function App() {
   return (
     <div style={{ height: "100dvh", display: "flex", flexDirection: "column", maxWidth: 860, margin: "0 auto" }}>
       <div style={{ flex: 1, minHeight: 0, overflowY: tab === "feed" ? "hidden" : "auto" }} className={tab === "feed" ? "" : "no-scrollbar"}>
-        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} />}
+        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} onOpenNotifications={() => setShowNotifs(true)} />}
         {tab === "watch" && <WatchView onOpenProfile={openProfile} />}
         {tab === "live" && <LiveView me={me} refreshMe={refreshMe} onOpenProfile={openProfile} />}
         {tab === "upload" && (
@@ -2157,6 +2243,13 @@ export function App() {
         {tab === "rewards" && <RewardsView me={me} refreshMe={refreshMe} />}
         {tab === "profile" && <ProfileView me={me} userId={profileUserId} onOpenProfile={openProfile} refreshMe={refreshMe} onLogout={logout} />}
       </div>
+      {showNotifs && (
+        <NotificationsPanel
+          onClose={() => setShowNotifs(false)}
+          refreshMe={refreshMe}
+          onGoLive={() => setTab("live")}
+        />
+      )}
       <nav
         style={{
           display: "flex",
