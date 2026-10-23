@@ -595,6 +595,9 @@ function LiveList({ me, onGoLive, onWatch, onOpenProfile }) {
     return () => clearInterval(t);
   }, [load]);
 
+  const videoLives = lives.filter((l) => (l.kind || "video") !== "broad");
+  const broadLives = lives.filter((l) => l.kind === "broad");
+
   return (
     <div style={{ padding: "14px 14px 20px", maxWidth: 640, margin: "0 auto" }}>
       <h2 style={{ margin: "2px 0 12px" }}>🔴 Live now</h2>
@@ -610,41 +613,54 @@ function LiveList({ me, onGoLive, onWatch, onOpenProfile }) {
           </button>
         </div>
       )}
-      {!loading && !loadError && lives.length === 0 && (
-        <div className="card" style={{ textAlign: "center", padding: 26 }}>
-          <div style={{ fontSize: 36 }}>📡</div>
-          <p style={{ fontWeight: 700, fontSize: 17, margin: "8px 0 4px" }}>No one is live right now</p>
-          <p style={{ color: "var(--dim)", margin: 0 }}>Be the first — tap “Go Live” and your viewers can watch, chat and send you gifts.</p>
-        </div>
+      {!loading && !loadError && (
+        <>
+          {/* Two separate sections (owner's layout): video lives on top,
+              broad (voice) rooms below. A section with no rooms keeps its
+              heading plus a quiet line, so the structure is always
+              visible — the same way Stories sit in Watch. */}
+          {[
+            { key: "video", heading: "🔴 Live", empty: "Abhi koi live nahi hai.", rows: videoLives },
+            { key: "broad", heading: "🎙️ Broad", empty: "Abhi koi broad nahi hai.", rows: broadLives },
+          ].map((section) => (
+            <section key={section.key} data-live-section={section.key} style={{ marginBottom: 18 }}>
+              <h3 style={{ margin: "0 0 10px", fontSize: 17 }}>{section.heading}</h3>
+              {section.rows.length === 0 ? (
+                <p style={{ color: "var(--dim)", margin: 0, fontSize: 14 }}>{section.empty}</p>
+              ) : (
+                <div style={{ display: "grid", gap: 10 }}>
+                  {section.rows.map((live) => (
+                    <div key={live.id} className="card" data-live-kind={live.kind || "video"} style={{ display: "flex", alignItems: "center", gap: 12, padding: 12 }}>
+                      <button onClick={() => live.broadcaster && onOpenProfile(live.broadcaster.id)} style={{ background: "none", border: "none", padding: 0 }} aria-label="Broadcaster profile">
+                        <Avatar user={live.broadcaster} size={52} />
+                      </button>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <LiveBadge />
+                          <strong style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{live.title}</strong>
+                        </div>
+                        <div style={{ color: "var(--dim)", fontSize: 13, marginTop: 3 }}>
+                          {live.broadcaster?.display_name} <OwnerBadge user={live.broadcaster} /> (@{live.broadcaster?.username}) · 👀 {live.viewer_count} {live.kind === "broad" ? "listening" : "watching"}
+                          {live.kind === "broad" ? " · 🎙️ Broad" : ""}
+                          {live.in_match ? " · ⚔️ PK Match chal raha hai" : ""}
+                          {live.hidden ? " · ⏳ review me hai (sirf tumhe dikh raha hai)" : ""}
+                        </div>
+                      </div>
+                      {live.broadcaster?.id === me.id ? (
+                        <span className="chip">Your live</span>
+                      ) : (
+                        <button className="btn btn-primary btn-small" onClick={() => onWatch(live)}>
+                          {live.kind === "broad" ? "🎙️ Sunno" : "Watch"}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          ))}
+        </>
       )}
-      <div style={{ display: "grid", gap: 10 }}>
-        {lives.map((live) => (
-          <div key={live.id} className="card" data-live-kind={live.kind || "video"} style={{ display: "flex", alignItems: "center", gap: 12, padding: 12 }}>
-            <button onClick={() => live.broadcaster && onOpenProfile(live.broadcaster.id)} style={{ background: "none", border: "none", padding: 0 }} aria-label="Broadcaster profile">
-              <Avatar user={live.broadcaster} size={52} />
-            </button>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                <LiveBadge />
-                <strong style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{live.title}</strong>
-              </div>
-              <div style={{ color: "var(--dim)", fontSize: 13, marginTop: 3 }}>
-                {live.broadcaster?.display_name} <OwnerBadge user={live.broadcaster} /> (@{live.broadcaster?.username}) · 👀 {live.viewer_count} {live.kind === "broad" ? "listening" : "watching"}
-                {live.kind === "broad" ? " · 🎙️ Broad" : ""}
-                {live.in_match ? " · ⚔️ PK Match chal raha hai" : ""}
-                {live.hidden ? " · ⏳ review me hai (sirf tumhe dikh raha hai)" : ""}
-              </div>
-            </div>
-            {live.broadcaster?.id === me.id ? (
-              <span className="chip">Your live</span>
-            ) : (
-              <button className="btn btn-primary btn-small" onClick={() => onWatch(live)}>
-                {live.kind === "broad" ? "🎙️ Sunno" : "Watch"}
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
     </div>
   );
 }

@@ -644,7 +644,7 @@ try {
   const bundleName = fs.readdirSync(path.join(DIST_DIR, "assets")).find((f) => f.endsWith(".js"));
   check("built bundle exists", Boolean(bundleName), "run `npm run build` first");
   const bundle = fs.readFileSync(path.join(DIST_DIR, "assets", bundleName), "utf8");
-  check("bundle contains Live UI", bundle.includes("Go Live") && bundle.includes("No one is live right now"));
+  check("bundle contains Live UI", bundle.includes("Go Live") && bundle.includes("Abhi koi live nahi hai.") && bundle.includes("Abhi koi broad nahi hai."));
 
   const dom = new JSDOM(indexHtml, {
     url: `${BASE}/`,
@@ -724,6 +724,14 @@ try {
   check("Live tab did NOT crash the app", !t.includes("could not open"));
   check("running broadcast listed in Live tab", t.includes("Live test show"), t.slice(0, 300));
   check("Go Live button rendered", t.includes("Go Live"));
+  // Two-section list (owner's layout): video rooms under "🔴 Live",
+  // broad rooms under "🎙️ Broad", each section always present.
+  const videoSection = document.querySelector('[data-live-section="video"]');
+  const broadSection = document.querySelector('[data-live-section="broad"]');
+  check("Live list renders BOTH sections (🔴 Live + 🎙️ Broad)", Boolean(videoSection) && Boolean(broadSection) && (videoSection.textContent || "").includes("🔴 Live") && (broadSection.textContent || "").includes("🎙️ Broad"));
+  const videoCardEl = [...document.querySelectorAll('[data-live-kind="video"]')].find((c) => (c.textContent || "").includes("Live test show"));
+  check("video broadcast sits inside the 🔴 Live section (not Broad)", Boolean(videoCardEl) && Boolean(videoSection?.contains(videoCardEl)) && !broadSection?.contains(videoCardEl));
+  check("empty Broad section shows its quiet line", (broadSection?.textContent || "").includes("Abhi koi broad nahi hai."), (broadSection?.textContent || "").slice(0, 120));
   // Enter the watch screen: the Follow and Join Live (guest) buttons must
   // render there (render-level check for both).
   const watchBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Watch");
@@ -1452,6 +1460,9 @@ try {
     await waitFor("broad listed in the Live list", () => Boolean(document.querySelector('[data-live-kind="broad"]')) || bodyText().includes("could not open"));
     const broadCard = [...document.querySelectorAll('[data-live-kind="broad"]')].find((c) => (c.textContent || "").includes("Broad Gapshap"));
     check("Live list shows the broad with its 🎙️ Broad badge", Boolean(broadCard) && (broadCard.textContent || "").includes("🎙️ Broad"), (broadCard?.textContent || "").slice(0, 140));
+    const broadSectionEl = document.querySelector('[data-live-section="broad"]');
+    const videoSectionEl = document.querySelector('[data-live-section="video"]');
+    check("broad room sits inside the 🎙️ Broad section (not 🔴 Live)", Boolean(broadCard) && Boolean(broadSectionEl?.contains(broadCard)) && !videoSectionEl?.contains(broadCard));
     const sunnoBtn = [...broadCard.querySelectorAll("button")].find((b) => (b.textContent || "").includes("Sunno"));
     check("broad card's join button says 🎙️ Sunno", Boolean(sunnoBtn));
     click(sunnoBtn);
