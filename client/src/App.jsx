@@ -301,6 +301,17 @@ export async function shareUrl({ url, text }) {
   }
 }
 
+// ---------- video views --------------------------------------------------------
+// A view counts once per viewer per post (the server enforces it via
+// post_views); this set just avoids re-sending within one app session.
+// Own videos are skipped here too — the server ignores them anyway.
+const countedViewPostIds = new Set();
+export function notePostView(post) {
+  if (!post?.id || post.author?.is_me || countedViewPostIds.has(post.id)) return;
+  countedViewPostIds.add(post.id);
+  call("recordPostView", { post_id: post.id }).catch(() => {});
+}
+
 // ---------- auth --------------------------------------------------------------
 
 export function GoogleIcon({ size = 20 }) {
@@ -886,6 +897,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
         playsInline
         preload="metadata"
         onClick={handleVideoTap}
+        onPlay={() => notePostView(post)}
       />
       {(flash || paused) && (
         <div
@@ -1490,6 +1502,7 @@ function WatchView({ me, onOpenProfile }) {
             autoPlay
             loop
             playsInline
+            onPlay={() => notePostView(playing)}
             ref={(el) => {
               // Start from the viewer's sound preference (default: sound
               // on); the native controls let them change it freely after.
@@ -1896,7 +1909,7 @@ export function InstallAppButton() {
   return null;
 }
 
-function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage }) {
+function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage, onGoMonetization }) {
   const isMe = !userId || userId === me.id;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -2080,6 +2093,9 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
           </button>
           <button className="btn" onClick={() => setPwOpen((v) => !v)}>
             🔑 Change password
+          </button>
+          <button className="btn" data-start-monetization="" onClick={() => onGoMonetization?.()}>
+            💰 Start Monetization
           </button>
           <InstallAppButton />
           {profile.avatar_url && (
@@ -2339,6 +2355,7 @@ function BoardRow({ row, metric }) {
 function AdminSection({ refreshMe }) {
   const [requests, setRequests] = useState([]);
   const [withdrawals, setWithdrawals] = useState([]);
+  const [monApps, setMonApps] = useState([]);
   const [platformGiftCoins, setPlatformGiftCoins] = useState(null);
   const [platformEvents, setPlatformEvents] = useState([]);
   const [notice, setNotice] = useState("");
@@ -2354,6 +2371,8 @@ function AdminSection({ refreshMe }) {
       if (Array.isArray(res.platform_gift_events)) setPlatformEvents(res.platform_gift_events);
       if (typeof res.platform_gift_coins === "number") setPlatformGiftCoins(res.platform_gift_coins);
     }
+    const monRes = await call("getAdminMonetizationApplications", {});
+    if (monRes.ok && Array.isArray(monRes.applications)) setMonApps(monRes.applications);
   }, []);
 
   useEffect(() => {
@@ -2386,10 +2405,25 @@ function AdminSection({ refreshMe }) {
     load();
   }
 
+  async function reviewMonApp(app, decision) {
+    setError("");
+    setNotice("");
+    const res = await call("reviewMonetizationApplication", { application_id: app.id, decision });
+    if (!res.ok) {
+      setError(res.message || "Could not review the application.");
+      return;
+    }
+    setNotice(res.message);
+    refreshMe?.();
+    load();
+  }
+
   const pending = requests.filter((r) => r.status === "pending");
   const reviewed = requests.filter((r) => r.status !== "pending");
   const pendingWd = withdrawals.filter((w) => w.status === "pending");
   const reviewedWd = withdrawals.filter((w) => w.status !== "pending");
+  const pendingMon = monApps.filter((a) => a.status === "pending");
+  const reviewedMon = monApps.filter((a) => a.status !== "pending");
 
   return (
     <div className="card" style={{ marginTop: 16 }}>
@@ -2503,6 +2537,61 @@ function AdminSection({ refreshMe }) {
                   🪙 {w.coins} · Rs.{w.amount_pkr} · @{w.requester.username} · {w.jazzcash_number}
                 </span>
                 <strong style={{ color: w.status === "approved" ? "var(--accent)" : "var(--bad)" }}>{w.status}</strong>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <h4 style={{ margin: "20px 0 6px" }}>💰 Monetization applications</h4>
+      <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>
+        Creators ki monetization applications. Form ki maloomat aur un ke <strong style={{ color: "var(--text)" }}>abhi ke</strong> followers/views check karke faisla karein — <strong style={{ color: "var(--text)" }}>Approve</strong> karte hi creator monetized ho jata hai aur us ke liye withdrawal khul jata hai.
+      </p>
+      {pendingMon.length === 0 && <p style={{ color: "var(--dim)" }}>No pending monetization applications.</p>}
+      <div style={{ display: "grid", gap: 10 }}>
+        {pendingMon.map((a) => (
+          <div key={a.id} style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 10 }} data-monetization-application="">
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <Avatar user={a.applicant} size={36} />
+              <div style={{ flex: 1 }}>
+                <strong>
+                  {a.applicant.display_name} (@{a.applicant.username}) · ID #{a.applicant.id}
+                </strong>
+                <div style={{ color: "var(--dim)", fontSize: 13 }}>{timeAgo(a.created_at)} apply kiya</div>
+                <div style={{ fontSize: 13.5, marginTop: 2 }}>
+                  Full name: <strong>{a.full_name}</strong> · DOB: {a.dob}
+                  {typeof a.age === "number" ? ` (${a.age} saal)` : ""} · JazzCash: <code>{a.jazzcash_number}</code>
+                </div>
+                <div style={{ fontSize: 13.5 }}>
+                  Abhi: 👥 {a.current_followers.toLocaleString()} followers · 👀 {a.current_views.toLocaleString()} views
+                  <span style={{ color: "var(--dim)" }}>
+                    {" "}
+                    (apply time: 👥 {a.followers_snapshot.toLocaleString()} · 👀 {a.views_snapshot.toLocaleString()})
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button className="btn btn-primary btn-small" onClick={() => reviewMonApp(a, "approved")}>
+                ✓ Approve — monetized karo
+              </button>
+              <button className="btn btn-danger btn-small" onClick={() => reviewMonApp(a, "rejected")}>
+                ✕ Reject
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+      {reviewedMon.length > 0 && (
+        <>
+          <h4 style={{ margin: "16px 0 6px", color: "var(--dim)" }}>Monetization applications reviewed</h4>
+          <div style={{ display: "grid", gap: 6 }}>
+            {reviewedMon.slice(0, 10).map((a) => (
+              <div key={a.id} style={{ fontSize: 14, color: "var(--dim)", display: "flex", justifyContent: "space-between" }}>
+                <span>
+                  @{a.applicant.username} · {a.full_name} · JazzCash {a.jazzcash_number}
+                </span>
+                <strong style={{ color: a.status === "approved" ? "var(--accent)" : "var(--bad)" }}>{a.status}</strong>
               </div>
             ))}
           </div>
@@ -2695,6 +2784,209 @@ function GiftEarningsCard() {
   );
 }
 
+// ---------- monetization program ----------------------------------------------
+// Dedicated full-screen view opened via "💰 Start Monetization" (Rewards
+// tab, or the own-profile shortcut). Hero + the three criteria with live
+// progress bars, then the state machine: apply form -> pending -> owner
+// approves (monetized) or rejects (apply again). Every number and state
+// comes from the server (getMonetization); the DOB age shown while typing
+// is only a preview — the server recomputes it at submit.
+function agePreviewFromInput(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return null;
+  const now = new Date();
+  let age = now.getFullYear() - y;
+  const md = now.getMonth() - (mo - 1);
+  if (md < 0 || (md === 0 && now.getDate() < d)) age -= 1;
+  return age;
+}
+
+function CriteriaRow({ icon, label, current, required, met, display }) {
+  const pct = required > 0 ? Math.min(100, Math.round((((current ?? 0) / required) * 100))) : 0;
+  return (
+    <div style={{ padding: "11px 0", borderBottom: "1px solid var(--border)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 15, gap: 8 }}>
+        <span>
+          {icon} {label} {met && <span style={{ color: "var(--accent)", fontWeight: 900 }}>✓</span>}
+        </span>
+        <strong style={{ color: met ? "var(--accent)" : "var(--text)", whiteSpace: "nowrap" }}>{display}</strong>
+      </div>
+      <div className="progress-track" style={{ marginTop: 7 }}>
+        <div className="progress-fill" style={{ width: `${met ? 100 : pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function MonetizationPanel({ onClose, refreshMe }) {
+  const [mon, setMon] = useState(null);
+  const [loadError, setLoadError] = useState(false);
+  const [fullName, setFullName] = useState("");
+  const [dob, setDob] = useState("");
+  const [jcNumber, setJcNumber] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const waking = useWaking();
+
+  const load = useCallback(async () => {
+    const res = await call("getMonetization", {});
+    if (res.ok) {
+      setMon(res.monetization);
+      setLoadError(false);
+      // Re-applying after a rejection starts from the last submitted data.
+      const app = res.monetization?.application;
+      if (app && app.status === "rejected") {
+        setFullName((v) => v || app.full_name || "");
+        setDob((v) => v || app.dob || "");
+        setJcNumber((v) => v || app.jazzcash_number || "");
+      }
+    } else if (res.transportError) {
+      setLoadError(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function apply(e) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    setNotice("");
+    const res = await call("applyForMonetization", { full_name: fullName.trim(), dob, jazzcash_number: jcNumber.trim() });
+    setBusy(false);
+    if (!res.ok) {
+      setError(res.message || "Application could not be sent.");
+      return;
+    }
+    setNotice(res.message);
+    if (res.monetization) setMon(res.monetization);
+    else load();
+    refreshMe?.();
+  }
+
+  const crit = mon?.criteria;
+  const app = mon?.application;
+  const localAge = agePreviewFromInput(dob);
+  const under18 = dob && localAge !== null && crit ? localAge < crit.age.required : false;
+  const formReady =
+    Boolean(crit) &&
+    crit.followers.met &&
+    crit.views.met &&
+    fullName.trim().length >= 3 &&
+    Boolean(dob) &&
+    localAge !== null &&
+    crit &&
+    localAge >= crit.age.required &&
+    /^0\d{10}$/.test(jcNumber.trim());
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "var(--bg)", zIndex: 70, display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
+        <strong style={{ fontSize: 18, flex: 1 }}>💰 Monetization</strong>
+        <button className="btn btn-small" onClick={onClose}>
+          ✕ Close
+        </button>
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", padding: "14px 14px calc(20px + env(safe-area-inset-bottom))", maxWidth: 640, width: "100%", margin: "0 auto" }}>
+        <div
+          style={{
+            background: "linear-gradient(135deg, color-mix(in srgb, var(--accent) 22%, var(--surface)), var(--surface))",
+            border: "1px solid var(--accent)",
+            borderRadius: 16,
+            padding: "16px 16px 13px",
+          }}
+        >
+          <div style={{ fontSize: 21, fontWeight: 900 }}>💰 Zoomly Monetization Program</div>
+          <p style={{ fontSize: 14.5, margin: "8px 0 0", lineHeight: 1.55 }}>
+            Videos aur LIVE gifts se kamao — har gift ka <strong>70% hissa creator ko</strong> milta hai.
+            <br />
+            Kamaye hue coins withdraw <strong>seedha apne JazzCash</strong> pe — <strong>1 coin = Rs.1</strong>.
+            <br />
+            Neeche wala criteria pura karo, application bhejo — owner ki approval milte hi withdrawal khul jayega.
+          </p>
+        </div>
+
+        {mon === null && !loadError && <p style={{ color: "var(--dim)", marginTop: 16 }}>{waking ? WAKING_TEXT : "Loading…"}</p>}
+        {loadError && (
+          <p style={{ color: "var(--dim)", marginTop: 16 }}>
+            Monetization load nahi ho saki — server jaag raha ho ga.{" "}
+            <button className="btn btn-small" onClick={load}>
+              Try again
+            </button>
+          </p>
+        )}
+
+        {mon && crit && (
+          <>
+            <div className="card" style={{ marginTop: 14, paddingTop: 4, paddingBottom: 6 }} data-monetization-criteria="">
+              <CriteriaRow
+                icon="🎂"
+                label="Age 18+"
+                current={crit.age.current}
+                required={crit.age.required}
+                met={crit.age.met || (Boolean(dob) && localAge !== null && localAge >= crit.age.required)}
+                display={crit.age.current !== null && crit.age.current !== undefined ? `${crit.age.current} / ${crit.age.required} saal` : dob && localAge !== null ? `${localAge} / ${crit.age.required} saal` : "Date of birth neeche likhein"}
+              />
+              <CriteriaRow icon="👥" label="Followers" current={crit.followers.current} required={crit.followers.required} met={crit.followers.met} display={`${(crit.followers.current ?? 0).toLocaleString()} / ${crit.followers.required.toLocaleString()}`} />
+              <CriteriaRow icon="👀" label="Total video views" current={crit.views.current} required={crit.views.required} met={crit.views.met} display={`${(crit.views.current ?? 0).toLocaleString()} / ${crit.views.required.toLocaleString()}`} />
+            </div>
+
+            <Notice text={error} bad />
+            <Notice text={notice} />
+
+            {mon.monetized ? (
+              <div className="card" style={{ marginTop: 14, textAlign: "center", borderColor: "var(--accent)" }} data-monetization-state="approved">
+                <div style={{ fontSize: 19, fontWeight: 900, color: "var(--accent)" }}>✅ Aap monetized hain — withdrawal khula hai</div>
+                <p style={{ color: "var(--dim)", fontSize: 14, margin: "8px 0 0" }}>Mubarak ho! Ab aap apne coins Rewards tab se apne JazzCash pe withdraw kar sakte hain.</p>
+              </div>
+            ) : app?.status === "pending" ? (
+              <div className="card" style={{ marginTop: 14, textAlign: "center" }} data-monetization-state="pending">
+                <div style={{ fontSize: 17, fontWeight: 800 }}>Application bheji hui hai — review ka intezar karein ⏳</div>
+                <p style={{ color: "var(--dim)", fontSize: 14, margin: "8px 0 0" }}>
+                  {app.full_name} · JazzCash {app.jazzcash_number}
+                  <br />
+                  Owner review karke faisla notification me batayega.
+                </p>
+              </div>
+            ) : (
+              <div className="card" style={{ marginTop: 14 }} data-monetization-state={app?.status === "rejected" ? "rejected" : "form"}>
+                <h3 style={{ margin: "0 0 4px" }}>📝 Monetization application</h3>
+                {app?.status === "rejected" && (
+                  <p style={{ color: "var(--bad)", fontSize: 14, margin: "0 0 8px" }}>Tumhari pichli application reject ho gayi thi — maloomat check karke dobara apply kar sakte ho.</p>
+                )}
+                <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>Apni asal maloomat likhein — owner yehi check karke approve karega. Date of birth ghalat likha to application reject ho sakti hai.</p>
+                <form onSubmit={apply} style={{ display: "grid", gap: 8 }}>
+                  <input className="input" placeholder="Full real name (e.g. Ahmed Raza)" value={fullName} onChange={(e) => setFullName(e.target.value)} required />
+                  <label style={{ fontSize: 13, color: "var(--dim)" }}>
+                    Date of birth
+                    <input className="input" type="date" value={dob} onChange={(e) => setDob(e.target.value)} required style={{ marginTop: 4 }} />
+                  </label>
+                  {under18 && <div style={{ color: "var(--bad)", fontSize: 14 }}>18 saal se kam umar monetization ke liye eligible nahi hai.</div>}
+                  <input className="input" placeholder="JazzCash number (03xxxxxxxxx) — payouts is pe ayenge" value={jcNumber} onChange={(e) => setJcNumber(e.target.value)} required />
+                  <button className="btn btn-primary" type="submit" disabled={busy || !formReady} data-apply-monetization="">
+                    {busy ? "Bhej rahe hain…" : "💰 Apply for Monetization"}
+                  </button>
+                  {!crit.followers.met || !crit.views.met ? (
+                    <p style={{ color: "var(--dim)", fontSize: 13.5, margin: 0 }}>
+                      Apply tab khulega jab: 👥 Followers {crit.followers.current.toLocaleString()}/{crit.followers.required.toLocaleString()} · 👀 Views {crit.views.current.toLocaleString()}/{crit.views.required.toLocaleString()} — jo baqi hai pehle wo pura karein.
+                    </p>
+                  ) : null}
+                </form>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function RewardsView({ me, refreshMe }) {
   const [data, setData] = useState(null);
   const [loadError, setLoadError] = useState(false);
@@ -2710,7 +3002,21 @@ function RewardsView({ me, refreshMe }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [showMonetization, setShowMonetization] = useState(false);
   const waking = useWaking();
+
+  // Own-profile shortcut: Profile's "💰 Start Monetization" jumps to this
+  // tab with a session flag — open the panel straight away, once.
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem("zoomly_open_monetization") === "1") {
+        sessionStorage.removeItem("zoomly_open_monetization");
+        setShowMonetization(true);
+      }
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setLoadError(false);
@@ -2838,6 +3144,10 @@ function RewardsView({ me, refreshMe }) {
   const customCoinsNum = Math.max(0, Math.floor(Number(customCoins) || 0));
   const wdCoinsNum = Math.max(0, Math.floor(Number(wdCoins) || 0));
   const payAmount = buyMode === "custom" ? customCoinsNum : selectedPack.pricePkr;
+  // Cash-out is for monetized creators (owner-approved) — the owner/admin
+  // is exempt. The server enforces the same gate; this is just so nobody
+  // is surprised at submit time.
+  const monGate = Boolean(data.monetization) && !data.monetization.monetized && !me?.is_admin;
 
   return (
     <div style={{ padding: "14px 14px 20px", maxWidth: 640, margin: "0 auto" }}>
@@ -2862,6 +3172,13 @@ function RewardsView({ me, refreshMe }) {
         </div>
         <div style={{ color: "var(--dim)", fontSize: 13, marginTop: 8 }}>Levels: Starter → Bronze (100) → Silver (500) → Golden (1,500) → Platinum (5,000) → Diamond (14,000)</div>
       </div>
+
+      <button className="btn btn-primary" data-start-monetization="" onClick={() => setShowMonetization(true)} style={{ width: "100%", marginTop: 14, padding: "14px", fontSize: 16.5, fontWeight: 800, borderRadius: 14 }}>
+        {data.monetization?.monetized ? "💰 Monetization — Active ✅" : "💰 Start Monetization"}
+      </button>
+      <p style={{ color: "var(--dim)", fontSize: 13.5, margin: "7px 2px 0", textAlign: "center" }}>
+        {data.monetization?.monetized ? "Aap monetized creator hain — withdrawal aap ke liye khula hai." : "Creator ho? Criteria pura karo, apply karo — owner ki approval ke baad withdrawal khul jata hai."}
+      </p>
 
       <div className="card" style={{ marginTop: 14 }}>
         <h3 style={{ margin: "0 0 4px" }}>🔗 Your referral code & invite link</h3>
@@ -2993,9 +3310,17 @@ function RewardsView({ me, refreshMe }) {
           )}
           <input className="input" placeholder="Your JazzCash number (03xxxxxxxxx)" value={wdNumber} onChange={(e) => setWdNumber(e.target.value)} required />
           <input className="input" placeholder="Account title / name (optional)" value={wdTitle} onChange={(e) => setWdTitle(e.target.value)} />
-          <button className="btn btn-primary" type="submit" disabled={busy}>
+          <button className="btn btn-primary" type="submit" disabled={busy || monGate}>
             Request withdrawal
           </button>
+          {monGate && (
+            <div style={{ fontSize: 14, color: "var(--dim)" }} data-withdraw-monetization-hint="">
+              Withdrawal sirf monetized creators ke liye hai — pehle monetization criteria pura karke apply karein:{" "}
+              <button type="button" onClick={() => setShowMonetization(true)} style={{ background: "none", border: "none", color: "var(--accent)", fontWeight: 800, cursor: "pointer", padding: 0, fontSize: 14 }}>
+                💰 Start Monetization
+              </button>
+            </div>
+          )}
         </form>
         {data.my_withdrawals?.length > 0 && (
           <>
@@ -3035,6 +3360,16 @@ function RewardsView({ me, refreshMe }) {
         </div>
       </div>
 
+      {showMonetization && (
+        <MonetizationPanel
+          onClose={() => {
+            setShowMonetization(false);
+            load();
+          }}
+          refreshMe={refreshMe}
+        />
+      )}
+
       {me?.is_admin && <AdminSection refreshMe={refreshMe} />}
       {me?.is_admin && <ModerationSection />}
     </div>
@@ -3045,7 +3380,7 @@ function RewardsView({ me, refreshMe }) {
 // Full-screen in-app inbox (no push). Opening it fetches the latest
 // notifications and marks them all read; rows keep the read state they
 // arrived with so unread ones stand out during this visit.
-const NOTIF_ICONS = { like: "❤️", comment: "💬", follow: "👥", gift: "🎁", referral: "🎉", coin_request: "🪙", withdrawal: "💸", live: "🔴", story: "⭕", dm: "✉️" };
+const NOTIF_ICONS = { like: "❤️", comment: "💬", follow: "👥", gift: "🎁", referral: "🎉", coin_request: "🪙", withdrawal: "💸", monetization: "💰", live: "🔴", story: "⭕", dm: "✉️" };
 
 function NotificationsPanel({ onClose, refreshMe, onGoLive }) {
   const [items, setItems] = useState(null);
@@ -3305,7 +3640,24 @@ export function App() {
         )}
         {tab === "people" && <PeopleView me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onMessage={(u) => setChatPeer(u)} onOpenInbox={() => setInboxOpen(true)} />}
         {tab === "rewards" && <RewardsView me={me} refreshMe={refreshMe} />}
-        {tab === "profile" && <ProfileView me={me} userId={profileUserId} onOpenProfile={openProfile} refreshMe={refreshMe} onLogout={logout} onMessage={(u) => setChatPeer(u)} />}
+        {tab === "profile" && (
+          <ProfileView
+            me={me}
+            userId={profileUserId}
+            onOpenProfile={openProfile}
+            refreshMe={refreshMe}
+            onLogout={logout}
+            onMessage={(u) => setChatPeer(u)}
+            onGoMonetization={() => {
+              try {
+                sessionStorage.setItem("zoomly_open_monetization", "1");
+              } catch {
+                /* storage unavailable — the Rewards button still works */
+              }
+              setTab("rewards");
+            }}
+          />
+        )}
       </div>
       {showNotifs && (
         <NotificationsPanel

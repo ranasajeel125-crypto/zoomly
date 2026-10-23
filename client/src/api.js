@@ -22,7 +22,9 @@ const READ_ACTIONS = new Set([
   "getPeople",
   "getProfile",
   "getRewards",
+  "getMonetization",
   "getAdminCoinRequests",
+  "getAdminMonetizationApplications",
   "listLive",
   "getLive",
 ]);
