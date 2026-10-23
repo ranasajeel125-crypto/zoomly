@@ -13,6 +13,9 @@ export const users = sqliteTable("users", {
   avatarPublicId: text("avatar_public_id"),
   coinBalance: integer("coin_balance").notNull().default(0),
   liveTitle: text("live_title"), // last-used LIVE title — asked once, then reused by startLive
+  banned: integer("banned").notNull().default(0), // 1 = banned by the owner (moderation)
+  banReason: text("ban_reason"),
+  hiddenCount: integer("hidden_count").notNull().default(0), // how many times this user's content was auto-hidden
   referralCode: text("referral_code").notNull().unique(), // e.g. ZOOM-3-ALI
   referredBy: integer("referred_by").references(() => users.id, { onDelete: "set null" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
@@ -34,6 +37,7 @@ export const posts = sqliteTable("posts", {
   thumbnailUrl: text("thumbnail_url"),
   title: text("title").notNull(),
   description: text("description").notNull().default(""),
+  hidden: integer("hidden").notNull().default(0), // 1 = auto-hidden by reports / owner moderation (owner still sees it)
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
@@ -100,6 +104,7 @@ export const liveSessions = sqliteTable("live_sessions", {
   title: text("title").notNull(),
   startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
   endedAt: integer("ended_at", { mode: "timestamp_ms" }),
+  hidden: integer("hidden").notNull().default(0), // 1 = auto-hidden by reports / owner moderation
   peakViewers: integer("peak_viewers").notNull().default(0),
   totalGiftCoins: integer("total_gift_coins").notNull().default(0),
   platformCutCoins: integer("platform_cut_coins").notNull().default(0),
@@ -135,4 +140,34 @@ export const liveMatches = sqliteTable("live_matches", {
   winnerUserId: integer("winner_user_id").references(() => users.id, { onDelete: "set null" }),
   startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
   endedAt: integer("ended_at", { mode: "timestamp_ms" }),
+});
+
+// A community report against a video (post), live, comment or user. One
+// row per (reporter, target): re-reporting UPDATES the row instead of
+// stacking. status: pending -> dismissed | actioned (the moderation log
+// lives on the row: actionTaken / actionBy / actionAt).
+export const reports = sqliteTable("reports", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  reporterId: integer("reporter_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  targetType: text("target_type", { enum: ["post", "live", "comment", "user"] }).notNull(),
+  targetId: integer("target_id").notNull(),
+  targetOwnerId: integer("target_owner_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  reason: text("reason", { enum: ["spam", "abuse", "nudity", "violence", "other"] }).notNull(),
+  details: text("details").notNull().default(""),
+  status: text("status", { enum: ["pending", "dismissed", "actioned"] }).notNull().default("pending"),
+  actionTaken: text("action_taken"),
+  actionBy: integer("action_by").references(() => users.id),
+  actionAt: integer("action_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+// A block: userId has blocked blockedId. Blocked users' content is hidden
+// from the blocker, they cannot comment on the blocker's videos, join the
+// blocker's live as guest, or DM the blocker; follows between them are
+// removed when the block is placed.
+export const blocks = sqliteTable("blocks", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  blockedId: integer("blocked_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });

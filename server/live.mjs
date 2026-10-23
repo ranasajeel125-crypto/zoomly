@@ -63,10 +63,10 @@
 // broadcasters peer-connect to each other.
 import { WebSocketServer } from "ws";
 import crypto from "node:crypto";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, or, sql } from "drizzle-orm";
 import { db } from "./db.mjs";
 import * as schema from "./schema.mjs";
-import { MATCH_DURATION_MS, MATCH_INVITE_TTL_MS } from "./config.mjs";
+import { MATCH_DURATION_MS, MATCH_INVITE_TTL_MS, findBannedContent } from "./config.mjs";
 
 const AUTH_TIMEOUT_MS = 10_000;
 const MAX_CHAT_CHARS = 500;
@@ -461,7 +461,7 @@ function unseatGuest(room, { removed = false } = {}) {
   }
 }
 
-function handleGuestRequest(conn) {
+async function handleGuestRequest(conn) {
   if (!conn.sessionId || conn.role !== "viewer") {
     send(conn, { type: "error", message: "Sirf viewers hi live me bethne ki request bhej sakte hain." });
     return;
@@ -469,6 +469,21 @@ function handleGuestRequest(conn) {
   const room = rooms.get(conn.sessionId);
   if (!room?.broadcaster) {
     send(conn, { type: "error", message: "Broadcaster ab live nahi hai." });
+    return;
+  }
+  // A block in either direction means no guest seat on this stage.
+  const blockRows = await db
+    .select({ id: schema.blocks.id })
+    .from(schema.blocks)
+    .where(
+      or(
+        and(eq(schema.blocks.userId, conn.user.id), eq(schema.blocks.blockedId, room.broadcaster.user.id)),
+        and(eq(schema.blocks.userId, room.broadcaster.user.id), eq(schema.blocks.blockedId, conn.user.id)),
+      ),
+    )
+    .limit(1);
+  if (blockRows.length > 0) {
+    send(conn, { type: "error", message: "Tum is live me guest nahi ban sakte." });
     return;
   }
   if (isInMatch(conn.sessionId)) {
@@ -772,6 +787,12 @@ export function attachLiveServer(httpServer, { authenticate }) {
             if (!conn.sessionId) return;
             const text = String(msg.text ?? "").trim().slice(0, MAX_CHAT_CHARS);
             if (!text) return;
+            // Word/spam filter: a tripping message is rejected to the
+            // sender only — it never reaches the room.
+            if (findBannedContent(text)) {
+              send(conn, { type: "error", message: "Message me aisi language ya link allowed nahi hai — message nahi bheja gaya." });
+              return;
+            }
             broadcastRoom(conn.sessionId, {
               type: "chat",
               liveSessionId: conn.sessionId,
@@ -807,7 +828,7 @@ export function attachLiveServer(httpServer, { authenticate }) {
             await handleMatchRespond(conn, msg.inviteId, msg.accept === true);
             break;
           case "guest-request":
-            handleGuestRequest(conn);
+            await handleGuestRequest(conn);
             break;
           case "guest-respond":
             handleGuestRespond(conn, msg.requestId, msg.accept === true);

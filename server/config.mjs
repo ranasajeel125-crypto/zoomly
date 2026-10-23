@@ -148,3 +148,53 @@ export const ICE_SERVERS = [
   { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
   { urls: "turns:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
 ];
+
+// ---- Content safety: word filter + report auto-hide ---------------------------
+// Auto-catch layer 1: this text filter, applied to comments, live chat,
+// video titles/captions, live titles and display names. Matching text is
+// rejected with a clear notice. Layer 2 is community reports: a video or
+// live with REPORT_AUTOHIDE_THRESHOLD distinct reporters is auto-hidden
+// until the owner reviews it (see actions.mjs reportContent). NOTE: this
+// is a text filter only — it does NOT scan video frames (that needs a paid
+// external AI moderation service).
+//
+// Extend BANNED_WORDS freely: entries are matched case-insensitively on
+// word boundaries, so keep them distinctive to avoid tripping innocent
+// words. Roman Urdu abuse terms are included alongside English ones.
+export const BANNED_WORDS = [
+  // English profanity / sexual / slurs
+  "fuck", "fucking", "motherfucker", "shit", "bullshit", "bitch", "bitches",
+  "bastard", "asshole", "whore", "slut", "dick", "cock", "pussy", "cunt",
+  "porn", "porno", "nude", "nudes", "rape", "rapist", "nigger", "nigga",
+  "faggot", "penis", "vagina", "boobs", "sex", "sexy", "xxx",
+  // Roman Urdu profanity / abuse
+  "bhenchod", "madarchod", "chutiya", "gandu", "randi", "harami",
+  "haramzada", "haramzadi", "kanjar", "kutta", "kutti", "kuttey", "kaminay",
+  "lanati", "bhadwa", "chod", "lund", "phudi", "gaand",
+];
+
+// Spam patterns: external links and phone-number spam (comments/chat).
+const SPAM_PATTERNS = [
+  /https?:\/\//i,
+  /www\.[a-z0-9-]+\.[a-z]{2,}/i,
+  /\b[a-z0-9-]+\.(com|net|org|io|xyz|top|site|online|pk|info|biz)\b/i,
+  /\b\d{10,}\b/,
+  /\b\d{4}[- ]\d{7}\b/,
+];
+
+const BANNED_WORDS_RE = new RegExp(`\\b(?:${BANNED_WORDS.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\b`, "i");
+
+// Returns a short label ("word" | "spam") when the text trips the filter,
+// or null when it is clean. The specific match is never shown to users.
+export function findBannedContent(text) {
+  const value = String(text ?? "");
+  if (!value) return null;
+  if (BANNED_WORDS_RE.test(value)) return "word";
+  for (const pattern of SPAM_PATTERNS) {
+    if (pattern.test(value)) return "spam";
+  }
+  return null;
+}
+
+// A video or live is auto-hidden once this many DISTINCT users report it.
+export const REPORT_AUTOHIDE_THRESHOLD = 3;

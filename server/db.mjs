@@ -36,6 +36,9 @@ export async function initDb() {
       avatar_public_id TEXT,
       coin_balance INTEGER NOT NULL DEFAULT 0,
       live_title TEXT,
+      banned INTEGER NOT NULL DEFAULT 0,
+      ban_reason TEXT,
+      hidden_count INTEGER NOT NULL DEFAULT 0,
       referral_code TEXT NOT NULL UNIQUE,
       referred_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
       created_at INTEGER NOT NULL
@@ -55,6 +58,7 @@ export async function initDb() {
       thumbnail_url TEXT,
       title TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
+      hidden INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS likes (
@@ -102,12 +106,35 @@ export async function initDb() {
       decided_at INTEGER,
       created_at INTEGER NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reporter_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      target_type TEXT NOT NULL,
+      target_id INTEGER NOT NULL,
+      target_owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      reason TEXT NOT NULL,
+      details TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      action_taken TEXT,
+      action_by INTEGER REFERENCES users(id),
+      action_at INTEGER,
+      created_at INTEGER NOT NULL,
+      UNIQUE(reporter_id, target_type, target_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS blocks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      blocked_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL,
+      UNIQUE(user_id, blocked_id)
+    )`,
     `CREATE TABLE IF NOT EXISTS live_sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       title TEXT NOT NULL,
       started_at INTEGER NOT NULL,
       ended_at INTEGER,
+      hidden INTEGER NOT NULL DEFAULT 0,
       peak_viewers INTEGER NOT NULL DEFAULT 0,
       total_gift_coins INTEGER NOT NULL DEFAULT 0,
       platform_cut_coins INTEGER NOT NULL DEFAULT 0
@@ -160,4 +187,15 @@ export async function initDb() {
   const crCols = await client.execute("PRAGMA table_info(coin_requests)");
   const crColNames = new Set(crCols.rows.map((r) => r.name));
   if (!crColNames.has("is_custom")) await client.execute("ALTER TABLE coin_requests ADD COLUMN is_custom INTEGER NOT NULL DEFAULT 0");
+  // Moderation columns (Phase 2): ban state on users, hidden flags on
+  // posts / live_sessions — same add-if-missing pattern.
+  if (!colNames.has("banned")) await client.execute("ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0");
+  if (!colNames.has("ban_reason")) await client.execute("ALTER TABLE users ADD COLUMN ban_reason TEXT");
+  if (!colNames.has("hidden_count")) await client.execute("ALTER TABLE users ADD COLUMN hidden_count INTEGER NOT NULL DEFAULT 0");
+  const postCols = await client.execute("PRAGMA table_info(posts)");
+  const postColNames = new Set(postCols.rows.map((r) => r.name));
+  if (!postColNames.has("hidden")) await client.execute("ALTER TABLE posts ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0");
+  const liveCols = await client.execute("PRAGMA table_info(live_sessions)");
+  const liveColNames = new Set(liveCols.rows.map((r) => r.name));
+  if (!liveColNames.has("hidden")) await client.execute("ALTER TABLE live_sessions ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0");
 }

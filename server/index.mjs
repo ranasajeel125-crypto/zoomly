@@ -205,6 +205,9 @@ app.get("/api/auth/google/callback", async (req, res) => {
   if (!profile?.sub) return fail("We could not read your Google profile. Please try again.");
   try {
     const result = await googleSignIn(profile);
+    if (result.status === "banned") {
+      return fail(`Your Zoomly account has been banned by the owner.${result.reason ? ` Reason: ${result.reason}` : ""}`);
+    }
     if (result.status === "login") {
       return res.redirect(`/#google-token=${encodeURIComponent(result.token)}`);
     }
