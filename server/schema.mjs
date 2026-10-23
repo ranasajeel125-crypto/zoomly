@@ -171,3 +171,19 @@ export const blocks = sqliteTable("blocks", {
   blockedId: integer("blocked_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
+
+// An in-app notification for userId (no push infrastructure). `text` is a
+// snapshot written at creation time; actorId/postId/liveSessionId give the
+// client something to render/link. read flips to 1 via markNotificationsRead.
+export const notifications = sqliteTable("notifications", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  type: text("type").notNull(), // like | comment | follow | gift | referral | coin_request | withdrawal | live | story | dm
+  actorId: integer("actor_id").references(() => users.id, { onDelete: "set null" }),
+  postId: integer("post_id").references(() => posts.id, { onDelete: "set null" }),
+  liveSessionId: integer("live_session_id").references(() => liveSessions.id, { onDelete: "set null" }),
+  text: text("text").notNull(),
+  coins: integer("coins"),
+  read: integer("read").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});

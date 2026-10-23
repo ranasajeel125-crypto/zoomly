@@ -128,6 +128,18 @@ export async function initDb() {
       created_at INTEGER NOT NULL,
       UNIQUE(user_id, blocked_id)
     )`,
+    `CREATE TABLE IF NOT EXISTS notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      post_id INTEGER REFERENCES posts(id) ON DELETE SET NULL,
+      live_session_id INTEGER REFERENCES live_sessions(id) ON DELETE SET NULL,
+      text TEXT NOT NULL,
+      coins INTEGER,
+      read INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    )`,
     `CREATE TABLE IF NOT EXISTS live_sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

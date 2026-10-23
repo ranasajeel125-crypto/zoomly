@@ -132,6 +132,17 @@ async function referralCounts() {
   return new Map(rows.map((r) => [r.referredBy, r.count]));
 }
 
+// Best-effort in-app notification write: a notification failure must never
+// fail the action that triggered it, so errors are logged and swallowed.
+async function notify({ userId, type, actorId = null, postId = null, liveSessionId = null, text, coins = null }) {
+  if (!userId || !text) return;
+  try {
+    await db.insert(schema.notifications).values({ userId, type, actorId, postId, liveSessionId, text, coins });
+  } catch (err) {
+    console.error("[notify] insert failed:", err?.message || err);
+  }
+}
+
 // ---- Moderation helpers -------------------------------------------------------
 // Every user id that has a block relationship with `userId`, in EITHER
 // direction (people they blocked + people who blocked them). Content from
@@ -215,6 +226,10 @@ async function followCounts(userId) {
 async function meDto(user) {
   const counts = await referralCounts();
   const fc = await followCounts(user.id);
+  const unreadRows = await db
+    .select({ count: sql`count(*)`.mapWith(Number) })
+    .from(schema.notifications)
+    .where(and(eq(schema.notifications.userId, user.id), eq(schema.notifications.read, 0)));
   return {
     ...publicUserDto(user, counts.get(user.id) ?? 0),
     referral_code: user.referralCode,
@@ -223,6 +238,7 @@ async function meDto(user) {
     follower_count: fc.followers,
     following_count: fc.following,
     is_admin: isAdminUser(user),
+    unread_notifications: unreadRows[0]?.count ?? 0,
   };
 }
 
@@ -289,6 +305,7 @@ async function applyReferral(user, rawCode) {
   if (!inviter) return { ok: false, message: "That referral code was not found." };
   if (inviter.id === user.id) return { ok: false, message: "You cannot use your own referral code." };
   await db.update(schema.users).set({ referredBy: inviter.id }).where(eq(schema.users.id, user.id));
+  await notify({ userId: inviter.id, type: "referral", actorId: user.id, text: `@${user.username} joined Zoomly with your referral code 🎉` });
   return { ok: true, message: `Referral claimed! @${inviter.username} is now counted as your referrer.` };
 }
 
@@ -579,7 +596,7 @@ export const Actions = {
   toggleLike: withValidation(z.object({ token: tokenArg, post_id: z.number().int().positive() }), async (args) => {
     const user = await authUser(args.token);
     if (!user) return { ok: false, message: "Please sign in." };
-    const post = (await db.select({ id: schema.posts.id }).from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
+    const post = (await db.select({ id: schema.posts.id, userId: schema.posts.userId }).from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
     if (!post) return { ok: false, message: "Video not found." };
     const existing = await db.select({ id: schema.likes.id }).from(schema.likes).where(and(eq(schema.likes.userId, user.id), eq(schema.likes.postId, args.post_id))).limit(1);
     let liked;
@@ -589,6 +606,9 @@ export const Actions = {
     } else {
       await db.insert(schema.likes).values({ userId: user.id, postId: args.post_id });
       liked = true;
+      if (post.userId !== user.id) {
+        await notify({ userId: post.userId, type: "like", actorId: user.id, postId: post.id, text: `@${user.username} liked your video ❤️` });
+      }
     }
     const countRows = await db.select({ count: sql`count(*)`.mapWith(Number) }).from(schema.likes).where(eq(schema.likes.postId, args.post_id));
     return { ok: true, liked, like_count: countRows[0]?.count ?? 0 };
@@ -627,6 +647,9 @@ export const Actions = {
     const inserted = await db.insert(schema.comments).values({ userId: user.id, postId: args.post_id, body: args.body }).returning();
     const comment = inserted[0];
     if (!comment) return { ok: false, message: "Comment could not be posted." };
+    if (post.userId !== user.id) {
+      await notify({ userId: post.userId, type: "comment", actorId: user.id, postId: post.id, text: `@${user.username} commented: “${args.body.slice(0, 80)}”` });
+    }
     return { ok: true, message: "Comment posted.", comment: { id: comment.id, body: comment.body, created_at: comment.createdAt.getTime(), author: authorDto(user) } };
   }),
 
@@ -645,6 +668,7 @@ export const Actions = {
     } else {
       await db.insert(schema.follows).values({ followerId: user.id, followeeId: args.user_id });
       following = true;
+      await notify({ userId: args.user_id, type: "follow", actorId: user.id, text: `@${user.username} started following you 👥` });
     }
     const countRows = await db.select({ count: sql`count(*)`.mapWith(Number) }).from(schema.follows).where(eq(schema.follows.followeeId, args.user_id));
     return { ok: true, following, follower_count: countRows[0]?.count ?? 0 };
@@ -885,6 +909,23 @@ export const Actions = {
       const inserted = await db.insert(schema.liveSessions).values({ userId: user.id, title }).returning();
       const session = inserted[0];
       if (!session) return { ok: false, message: "Could not start the live. Please try again." };
+      // Tell every follower the broadcaster went live (in-app only).
+      try {
+        const followerRows = await db.select({ followerId: schema.follows.followerId }).from(schema.follows).where(eq(schema.follows.followeeId, user.id));
+        if (followerRows.length > 0) {
+          await db.insert(schema.notifications).values(
+            followerRows.map((f) => ({
+              userId: f.followerId,
+              type: "live",
+              actorId: user.id,
+              liveSessionId: session.id,
+              text: `@${user.username} is live now 🔴 — “${title}”`,
+            })),
+          );
+        }
+      } catch (err) {
+        console.error("[notify] live-started fanout failed:", err?.message || err);
+      }
       return { ok: true, message: "You are live!", session: liveSessionDto(session, user), ice_servers: ICE_SERVERS };
     }
   ),
@@ -1058,6 +1099,14 @@ export const Actions = {
         platform_share: platformShare,
       };
       broadcastGift(session.id, { from: authorDto(user), gift: giftPayload, created_at: Date.now() });
+      await notify({
+        userId: session.userId,
+        type: "gift",
+        actorId: user.id,
+        liveSessionId: session.id,
+        coins: creatorShare,
+        text: `@${user.username} sent you ${gift.emoji} ${gift.name} — you received ${creatorShare} coins 🎁`,
+      });
       // If this live is in a PK match, the gift's full value scores for
       // the broadcaster's side (balances above used the 70/30 split).
       noteGiftForMatch(session.id, gift.coins);
@@ -1131,6 +1180,14 @@ export const Actions = {
         statements.push(db.update(schema.users).set({ coinBalance: sql`${schema.users.coinBalance} + ${request.packCoins}` }).where(eq(schema.users.id, request.userId)));
       }
       await db.batch(statements);
+      await notify({
+        userId: request.userId,
+        type: "coin_request",
+        text:
+          args.decision === "approved"
+            ? `Your coin request was approved — ${request.packCoins} coins added to your balance 🪙`
+            : "Your coin request was rejected by the owner. Koi masla ho to owner se rabta karein.",
+      });
       return { ok: true, message: args.decision === "approved" ? `Approved — ${request.packCoins} coins credited.` : "Request rejected." };
     }
   ),
@@ -1156,6 +1213,15 @@ export const Actions = {
         statements.push(db.update(schema.users).set({ coinBalance: sql`${schema.users.coinBalance} + ${wd.coins}` }).where(eq(schema.users.id, wd.userId)));
       }
       await db.batch(statements);
+      await notify({
+        userId: wd.userId,
+        type: "withdrawal",
+        coins: wd.coins,
+        text:
+          args.decision === "approved"
+            ? `Your withdrawal of ${wd.coins} coins (Rs.${wd.amountPkr}) was approved — paise tumhare JazzCash ${wd.jazzcashNumber} par bheje jayenge 💸`
+            : `Your withdrawal of ${wd.coins} coins was rejected — held coins wapas tumhare balance me aa gaye hain.`,
+      });
       return {
         ok: true,
         message:
@@ -1260,6 +1326,47 @@ export const Actions = {
       .where(eq(schema.blocks.userId, user.id))
       .orderBy(desc(schema.blocks.createdAt));
     return { ok: true, blocked: rows.map((r) => authorDto(r.blocked)) };
+  }),
+
+  // ---- Notifications (in-app inbox) ------------------------------------------
+  getNotifications: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const rows = await db
+      .select()
+      .from(schema.notifications)
+      .where(eq(schema.notifications.userId, user.id))
+      .orderBy(desc(schema.notifications.createdAt))
+      .limit(50);
+    const actorIds = [...new Set(rows.map((r) => r.actorId).filter(Boolean))];
+    const actors = actorIds.length ? await db.select().from(schema.users).where(inArray(schema.users.id, actorIds)) : [];
+    const actorMap = new Map(actors.map((a) => [a.id, a]));
+    const unreadRows = await db
+      .select({ count: sql`count(*)`.mapWith(Number) })
+      .from(schema.notifications)
+      .where(and(eq(schema.notifications.userId, user.id), eq(schema.notifications.read, 0)));
+    return {
+      ok: true,
+      unread_count: unreadRows[0]?.count ?? 0,
+      notifications: rows.map((r) => ({
+        id: r.id,
+        type: r.type,
+        text: r.text,
+        coins: r.coins ?? null,
+        post_id: r.postId ?? null,
+        live_session_id: r.liveSessionId ?? null,
+        read: Boolean(r.read),
+        created_at: r.createdAt.getTime(),
+        actor: r.actorId && actorMap.has(r.actorId) ? authorDto(actorMap.get(r.actorId)) : null,
+      })),
+    };
+  }),
+
+  markNotificationsRead: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    await db.update(schema.notifications).set({ read: 1 }).where(and(eq(schema.notifications.userId, user.id), eq(schema.notifications.read, 0)));
+    return { ok: true, message: "All notifications marked as read.", unread_count: 0 };
   }),
 
   // Owner moderation queue: reports grouped by target, with the reported
