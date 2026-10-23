@@ -1044,9 +1044,9 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
         </button>
         <button onClick={onOpenNotifications} aria-label="Notifications" title="Notifications" style={{ position: "relative", background: "none", border: "none", fontSize: 21, cursor: "pointer", padding: 2, flexShrink: 0 }}>
           🔔
-          {(me?.unread_notifications ?? 0) > 0 && (
+          {(me?.unread_notifications ?? 0) + (me?.unread_messages ?? 0) > 0 && (
             <span style={{ position: "absolute", top: -3, right: -5, background: "#e0245e", color: "#fff", borderRadius: 999, fontSize: 10, fontWeight: 800, padding: "1px 5px" }}>
-              {me.unread_notifications > 99 ? "99+" : me.unread_notifications}
+              {(me?.unread_notifications ?? 0) + (me?.unread_messages ?? 0) > 99 ? "99+" : (me?.unread_notifications ?? 0) + (me?.unread_messages ?? 0)}
             </span>
           )}
         </button>
@@ -1320,7 +1320,150 @@ function UploadView({ onPosted }) {
 
 // ---------- people -----------------------------------------------------------------
 
-function PeopleView({ onOpenProfile, refreshMe }) {
+// ---------- direct messages ---------------------------------------------------------
+// A 1-to-1 chat thread. Delivery is by polling getMessages every few
+// seconds (the server documents why: the WS hub is broadcast-room based).
+export function ChatScreen({ me, peer, onClose, refreshMe }) {
+  const [messages, setMessages] = useState([]);
+  const [body, setBody] = useState("");
+  const [note, setNote] = useState("");
+  const bottomRef = useRef(null);
+
+  const load = useCallback(async () => {
+    const res = await call("getMessages", { user_id: peer.id });
+    if (res.ok) setMessages(res.messages);
+  }, [peer.id]);
+
+  useEffect(() => {
+    load();
+    refreshMe?.(); // opening the thread marked messages read server-side
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [load]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
+
+  async function send(e) {
+    e.preventDefault();
+    const text = body.trim();
+    if (!text) return;
+    setBody("");
+    const res = await call("sendMessage", { user_id: peer.id, body: text });
+    if (res.ok) {
+      setNote("");
+      load();
+    } else setNote(res.message || "Message could not be sent.");
+  }
+
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="panel" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 560, width: "100%", height: "92dvh", display: "flex", flexDirection: "column", padding: 0, overflow: "hidden" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
+          <Avatar user={peer} size={36} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <strong>{peer.display_name}</strong>{" "}
+            <span style={{ color: "var(--dim)", fontSize: 13 }}>@{peer.username}</span>
+          </div>
+          <button className="btn btn-small" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <div style={{ flex: 1, overflowY: "auto", padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
+          {messages.length === 0 && <p style={{ color: "var(--dim)", textAlign: "center", marginTop: 30 }}>Abhi koi message nahi — pehla message bhejo 👋</p>}
+          {messages.map((m) => (
+            <div key={m.id} style={{ alignSelf: m.is_mine ? "flex-end" : "flex-start", maxWidth: "78%" }}>
+              <div
+                style={{
+                  background: m.is_mine ? "var(--accent)" : "var(--card2)",
+                  color: m.is_mine ? "#06280f" : "var(--text)",
+                  borderRadius: 16,
+                  padding: "8px 12px",
+                  fontSize: 14.5,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              >
+                {m.body}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 2, textAlign: m.is_mine ? "right" : "left" }}>
+                {timeAgo(m.created_at)}
+                {m.is_mine ? (m.read ? " · ✓✓ Seen" : " · ✓ Sent") : ""}
+              </div>
+            </div>
+          ))}
+          <div ref={bottomRef} />
+        </div>
+        {note && (
+          <div className="banner-error" style={{ margin: "0 14px 8px" }}>
+            {note}
+          </div>
+        )}
+        <form onSubmit={send} style={{ display: "flex", gap: 8, padding: "10px 14px calc(10px + env(safe-area-inset-bottom))", borderTop: "1px solid var(--border)" }}>
+          <input className="input" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Message likho…" maxLength={1000} style={{ flex: 1 }} />
+          <button className="btn btn-primary" type="submit" disabled={!body.trim()}>
+            Send
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// The inbox: one row per conversation (latest message + unread count).
+export function ConversationsScreen({ me, onClose, onOpenChat }) {
+  const [convs, setConvs] = useState(null);
+  useEffect(() => {
+    (async () => {
+      const res = await call("getConversations", {});
+      if (res.ok) setConvs(res.conversations);
+    })();
+  }, []);
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="panel" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 560, width: "100%", maxHeight: "88dvh", display: "flex", flexDirection: "column", padding: 0, overflow: "hidden" }}>
+        <div style={{ display: "flex", alignItems: "center", padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
+          <strong style={{ flex: 1, fontSize: 17 }}>💬 Messages</strong>
+          <button className="btn btn-small" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <div style={{ overflowY: "auto", padding: "8px 10px" }}>
+          {convs === null && <p style={{ color: "var(--dim)", padding: 12 }}>Loading…</p>}
+          {convs?.length === 0 && <p style={{ color: "var(--dim)", padding: 12 }}>Abhi koi chat nahi. Kisi ki profile ya People list se ✉️ Message dabao.</p>}
+          {(convs || []).map((c) => (
+            <button
+              key={c.user.id}
+              onClick={() => onOpenChat(c.user)}
+              style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", background: "none", border: "none", padding: "9px 8px", borderRadius: 12, cursor: "pointer", color: "var(--text)" }}
+            >
+              <Avatar user={c.user} size={44} />
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: "block", fontWeight: 700, fontSize: 15 }}>
+                  {c.user.display_name} <span style={{ color: "var(--dim)", fontWeight: 400, fontSize: 13 }}>@{c.user.username}</span>
+                </span>
+                <span style={{ display: "block", color: c.unread > 0 ? "var(--text)" : "var(--dim)", fontWeight: c.unread > 0 ? 700 : 400, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {c.latest.is_mine ? "You: " : ""}
+                  {c.latest.body}
+                </span>
+              </span>
+              <span style={{ color: "var(--dim)", fontSize: 11.5, flexShrink: 0 }}>{timeAgo(c.latest.created_at)}</span>
+              {c.unread > 0 && (
+                <span style={{ background: "var(--accent)", color: "#06280f", borderRadius: 999, minWidth: 20, height: 20, padding: "0 6px", fontSize: 12, fontWeight: 800, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  {c.unread}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PeopleView({ me, onOpenProfile, refreshMe, onMessage, onOpenInbox }) {
   const [query, setQuery] = useState("");
   const [people, setPeople] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1347,7 +1490,17 @@ function PeopleView({ onOpenProfile, refreshMe }) {
 
   return (
     <div style={{ padding: "14px 14px 20px", maxWidth: 640, margin: "0 auto" }}>
-      <h2 style={{ margin: "2px 0 12px" }}>People</h2>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "2px 0 12px" }}>
+        <h2 style={{ margin: 0, flex: 1 }}>People</h2>
+        <button className="btn btn-small" onClick={() => onOpenInbox?.()} style={{ position: "relative" }}>
+          💬 Messages
+          {(me?.unread_messages ?? 0) > 0 && (
+            <span style={{ position: "absolute", top: -6, right: -6, background: "var(--danger)", color: "#fff", borderRadius: 999, minWidth: 18, height: 18, padding: "0 5px", fontSize: 11, fontWeight: 800, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+              {me.unread_messages}
+            </span>
+          )}
+        </button>
+      </div>
       <input className="input" placeholder="Search people…" value={query} onChange={(e) => setQuery(e.target.value)} />
       {loading && <p style={{ color: "var(--dim)", marginTop: 14 }}>Loading…</p>}
       {!loading && people.length === 0 && <p style={{ color: "var(--dim)", marginTop: 14 }}>No people found.</p>}
@@ -1366,9 +1519,14 @@ function PeopleView({ onOpenProfile, refreshMe }) {
               </span>
             </button>
             {!person.is_me && (
-              <button className={`btn btn-small ${person.followed_by_me ? "" : "btn-primary"}`} onClick={() => handleFollow(person)}>
-                {person.followed_by_me ? "Following" : "Follow"}
-              </button>
+              <>
+                <button className={`btn btn-small ${person.followed_by_me ? "" : "btn-primary"}`} onClick={() => handleFollow(person)}>
+                  {person.followed_by_me ? "Following" : "Follow"}
+                </button>
+                <button className="btn btn-small" onClick={() => onMessage?.(person)} title="Message bhejo">
+                  ✉️
+                </button>
+              </>
             )}
             {person.is_me && <span className="chip">You</span>}
           </div>
@@ -1380,7 +1538,7 @@ function PeopleView({ onOpenProfile, refreshMe }) {
 
 // ---------- profile ------------------------------------------------------------------
 
-function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout }) {
+function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage }) {
   const isMe = !userId || userId === me.id;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1564,6 +1722,14 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout }) {
           <button className={`btn ${profile.followed_by_me ? "" : "btn-primary"}`} onClick={handleFollow}>
             {profile.followed_by_me ? "Following" : "Follow"}
           </button>
+          {!profile.blocked_by_me && (
+            <button
+              className="btn"
+              onClick={() => onMessage?.({ id: profile.id, username: profile.username, display_name: profile.display_name, avatar_url: profile.avatar_url })}
+            >
+              ✉️ Message
+            </button>
+          )}
           <button className="btn" onClick={() => setReportOpen(true)}>
             🚩 Report
           </button>
@@ -2513,6 +2679,8 @@ export function App() {
   const [googleSetup, setGoogleSetup] = useState(false);
   const [tab, setTab] = useState("feed");
   const [showNotifs, setShowNotifs] = useState(false);
+  const [chatPeer, setChatPeer] = useState(null);
+  const [inboxOpen, setInboxOpen] = useState(false);
   const [sharedPostId, setSharedPostId] = useState(null);
   const [sharedUsername, setSharedUsername] = useState(null);
   const [profileUserId, setProfileUserId] = useState(null);
@@ -2658,9 +2826,9 @@ export function App() {
             }}
           />
         )}
-        {tab === "people" && <PeopleView onOpenProfile={openProfile} refreshMe={refreshMe} />}
+        {tab === "people" && <PeopleView me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onMessage={(u) => setChatPeer(u)} onOpenInbox={() => setInboxOpen(true)} />}
         {tab === "rewards" && <RewardsView me={me} refreshMe={refreshMe} />}
-        {tab === "profile" && <ProfileView me={me} userId={profileUserId} onOpenProfile={openProfile} refreshMe={refreshMe} onLogout={logout} />}
+        {tab === "profile" && <ProfileView me={me} userId={profileUserId} onOpenProfile={openProfile} refreshMe={refreshMe} onLogout={logout} onMessage={(u) => setChatPeer(u)} />}
       </div>
       {showNotifs && (
         <NotificationsPanel
@@ -2669,6 +2837,17 @@ export function App() {
           onGoLive={() => setTab("live")}
         />
       )}
+      {inboxOpen && (
+        <ConversationsScreen
+          me={me}
+          onClose={() => setInboxOpen(false)}
+          onOpenChat={(u) => {
+            setInboxOpen(false);
+            setChatPeer(u);
+          }}
+        />
+      )}
+      {chatPeer && <ChatScreen me={me} peer={chatPeer} onClose={() => setChatPeer(null)} refreshMe={refreshMe} />}
       <nav
         style={{
           display: "flex",
