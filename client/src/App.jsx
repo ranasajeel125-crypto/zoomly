@@ -637,6 +637,85 @@ export function ReportDialog({ targetType, targetId, label, onClose }) {
   );
 }
 
+// ---- caption (title + description/hashtags) --------------------------------------
+// Long captions used to cover the whole video. This block renders the
+// title (bold) and description as ONE flowing caption clamped to 2
+// lines; when the text overflows, a "… more" toggle expands it in
+// place (capped at ~55% of the card, scrollable beyond that) and
+// "bandh karo" collapses it again. Short captions render plainly —
+// no toggle. Tapping the caption text itself also toggles; the block
+// is not part of the <video> element, so this never fights the
+// play/pause tap on the video.
+function CaptionBlock({ title, description }) {
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const textRef = useRef(null);
+  const combined = `${title ?? ""} ${description ?? ""}`.trim();
+
+  // Decide overflow once per caption, measured on the clamped render.
+  useEffect(() => {
+    setExpanded(false);
+    const el = textRef.current;
+    if (!el) return;
+    if (el.clientHeight === 0 && el.scrollHeight === 0) {
+      // No layout engine (headless render tests): estimate by length —
+      // at feed caption widths, >90 chars cannot fit the 2-line clamp.
+      setOverflowing(combined.length > 90);
+    } else {
+      setOverflowing(el.scrollHeight > el.clientHeight + 2);
+    }
+  }, [combined]);
+
+  return (
+    <div style={{ position: "relative", marginTop: 2 }}>
+      <div
+        ref={textRef}
+        data-caption-text=""
+        data-expanded={expanded ? "true" : "false"}
+        onClick={() => {
+          if (overflowing) setExpanded((v) => !v);
+        }}
+        style={
+          expanded
+            ? { maxHeight: "48dvh", overflowY: "auto", fontSize: 15, cursor: overflowing ? "pointer" : undefined }
+            : { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", fontSize: 15, cursor: overflowing ? "pointer" : undefined }
+        }
+      >
+        <span style={{ fontWeight: 700 }}>{title}</span>
+        {description ? <span style={{ fontSize: 14, opacity: 0.9 }}> {description}</span> : null}
+      </div>
+      {overflowing && !expanded && (
+        <button
+          type="button"
+          data-caption-toggle=""
+          aria-label="Show full caption"
+          onClick={(e) => {
+            e.stopPropagation();
+            setExpanded(true);
+          }}
+          style={{ position: "absolute", right: 0, bottom: 0, background: "rgba(0,0,0,0.45)", color: "#fff", border: "none", borderRadius: 6, padding: "1px 7px", fontSize: 13.5, fontWeight: 700, textShadow: "none", cursor: "pointer" }}
+        >
+          … more
+        </button>
+      )}
+      {overflowing && expanded && (
+        <button
+          type="button"
+          data-caption-toggle=""
+          aria-label="Hide full caption"
+          onClick={(e) => {
+            e.stopPropagation();
+            setExpanded(false);
+          }}
+          style={{ background: "none", border: "none", color: "inherit", padding: "2px 0 0", fontSize: 13.5, fontWeight: 700, opacity: 0.85, cursor: "pointer", textShadow: "none" }}
+        >
+          bandh karo ▲
+        </button>
+      )}
+    </div>
+  );
+}
+
 function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, badge }) {
   const videoRef = useRef(null);
   const cardRef = useRef(null);
@@ -853,8 +932,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
           @{post.author?.username}
         </button>{" "}
         <OwnerBadge user={post.author} />
-        <div style={{ fontWeight: 700, marginTop: 2 }}>{post.title}</div>
-        {post.description && <div style={{ fontSize: 14, opacity: 0.9 }}>{post.description}</div>}
+        <CaptionBlock title={post.title} description={post.description} />
         <div style={{ fontSize: 12, opacity: 0.75, marginTop: 2 }}>{timeAgo(post.created_at)}</div>
       </div>
       {reportOpen && <ReportDialog targetType="post" targetId={post.id} label="video" onClose={() => setReportOpen(false)} />}
@@ -1322,8 +1400,7 @@ function WatchView({ me, onOpenProfile }) {
             }}
           />
           <div style={{ padding: "12px 16px calc(14px + env(safe-area-inset-bottom))" }}>
-            <div style={{ fontWeight: 700 }}>{playing.title}</div>
-            {playing.description && <div style={{ color: "var(--dim)", fontSize: 14 }}>{playing.description}</div>}
+            <CaptionBlock title={playing.title} description={playing.description} />
             <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
               <button className="btn" onClick={() => handleLike(playing)} style={{ color: playing.liked_by_me ? "var(--accent)" : "var(--text)" }}>
                 ♥ {playing.like_count}

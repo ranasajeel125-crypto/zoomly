@@ -70,6 +70,26 @@ const signup = await api("signup", { username, display_name: "Render Check", pas
 check("signup ok", signup.ok === true, JSON.stringify(signup).slice(0, 200));
 const token = signup.token;
 
+// Two feed posts for the caption-clamp render checks in section 2: one
+// with a very long title + hashtag-heavy description (the kind that
+// used to cover the whole For You screen), one short and plain.
+const longPost = await api("createPost", {
+  token,
+  title: "LONGCAP Yeh meri sab se lambi caption wali video hai jo pehle poori screen cover kar leti thi ab bilkul nahi karegi tum bas dekhte jao",
+  description: "aur yeh hain hashtags #fun #video #zoomly #live #pk #gifts #earn #daily #viral #trending #music #dance #comedy #family #friends #zoomlyendtag",
+  video_url: "https://example.com/longcap.mp4",
+  thumbnail_url: "https://example.com/longcap.jpg",
+});
+check("long-caption post created", longPost.ok === true, JSON.stringify(longPost).slice(0, 160));
+const shortPost = await api("createPost", {
+  token,
+  title: "Short caption post",
+  description: "tiny",
+  video_url: "https://example.com/shortcap.mp4",
+  thumbnail_url: "https://example.com/shortcap.jpg",
+});
+check("short-caption post created", shortPost.ok === true, JSON.stringify(shortPost).slice(0, 160));
+
 const rewards = await api("getRewards", { token });
 check("getRewards ok", rewards.ok === true);
 check("payload has my_code", typeof rewards.my_code === "string" && rewards.my_code.startsWith("ZOOM-"));
@@ -124,6 +144,45 @@ try {
   dom.window.eval(bundle);
   await waitFor("app boot", () => bodyText().includes("Rewards") || bodyText().includes("could not open"));
   check("app boots to the shell (no crash)", !bodyText().includes("could not open"));
+
+  // ---- caption clamp: long captions collapse, short ones don't -------------
+  // Owner fix 2026-10-23: a post with a huge title + hashtags covered the
+  // whole For You screen. The caption must start clamped (2 lines) with a
+  // "… more" toggle, expand in place on tap, and collapse back — while a
+  // short caption renders with NO toggle at all.
+  await waitFor("feed shows both caption posts", () => bodyText().includes("LONGCAP") && bodyText().includes("Short caption post"));
+  const clickEl = (el) => el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  const cards = [...document.querySelectorAll(".feed-item")];
+  const longCard = cards.find((c) => (c.textContent || "").includes("LONGCAP"));
+  const shortCard = cards.find((c) => (c.textContent || "").includes("Short caption post"));
+  check("long + short caption cards both render in the feed", Boolean(longCard) && Boolean(shortCard));
+  const longText = longCard?.querySelector("[data-caption-text]");
+  const longToggle = () => longCard?.querySelector("button[data-caption-toggle]");
+  check("long caption starts collapsed (data-expanded=false)", longText?.getAttribute("data-expanded") === "false");
+  check("long caption shows the '… more' toggle", longToggle()?.textContent.includes("… more") ?? false);
+  check("short caption has NO toggle", !shortCard?.querySelector("button[data-caption-toggle]"));
+  // Expand via the toggle: full text reachable in a capped scroll area.
+  clickEl(longToggle());
+  await waitFor("caption expands", () => longText?.getAttribute("data-expanded") === "true");
+  check("expanded caption shows the 'bandh karo' collapse control", longToggle()?.textContent.includes("bandh karo") ?? false);
+  check("expanded caption is height-capped + scrollable", longText?.style.maxHeight === "48dvh" && longText?.style.overflowY === "auto", `maxHeight=${longText?.style.maxHeight} overflowY=${longText?.style.overflowY}`);
+  check("expanded caption contains the FULL text (end hashtag reachable)", (longText?.textContent || "").includes("#zoomlyendtag"));
+  // Collapse again via the toggle.
+  clickEl(longToggle());
+  await waitFor("caption collapses", () => longText?.getAttribute("data-expanded") === "false");
+  check("caption collapses back to the '… more' state", longToggle()?.textContent.includes("… more") ?? false);
+  // Tapping the caption text itself toggles too (and never touches the video).
+  clickEl(longText);
+  await waitFor("caption expands via text tap", () => longText?.getAttribute("data-expanded") === "true");
+  check("tapping the caption text expands it", longText?.getAttribute("data-expanded") === "true");
+  clickEl(longText);
+  await waitFor("caption collapses via text tap", () => longText?.getAttribute("data-expanded") === "false");
+  check("tapping the caption text again collapses it", longText?.getAttribute("data-expanded") === "false");
+  // The short caption's text is inert: no toggle appears after tapping.
+  const shortText = shortCard?.querySelector("[data-caption-text]");
+  clickEl(shortText);
+  await sleep(300);
+  check("short caption stays plain after a tap (no toggle, not expanded)", !shortCard?.querySelector("button[data-caption-toggle]") && shortText?.getAttribute("data-expanded") === "false");
 
   // ---- stories placement: strip is OUT of the feed, in a Watch section -----
   // Owner fix 2026-10-23: the story strip at the top of the feed ate vertical
