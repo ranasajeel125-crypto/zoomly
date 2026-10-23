@@ -110,6 +110,47 @@ export function Notice({ text, bad }) {
   );
 }
 
+// ---------- referral invite links ----------------------------------------------
+// A shared invite link looks like https://zoomly.onrender.com/?ref=ZOOM-1-X.
+// Opening the app with ?ref=CODE stores the code so BOTH signup flows can
+// pre-fill and apply it with no typing; the manual code fields stay as a
+// backup. The stored code is cleared after a successful signup.
+const REF_STORAGE_KEY = "zoomly_ref";
+
+export function captureInviteRef() {
+  try {
+    const ref = new URLSearchParams(window.location.search).get("ref");
+    if (ref && ref.trim()) {
+      localStorage.setItem(REF_STORAGE_KEY, ref.trim().toUpperCase());
+      const url = new URL(window.location.href);
+      url.searchParams.delete("ref");
+      window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+    }
+  } catch {
+    /* storage or URL unavailable — manual code entry still works */
+  }
+}
+
+export function storedInviteRef() {
+  try {
+    return localStorage.getItem(REF_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function clearInviteRef() {
+  try {
+    localStorage.removeItem(REF_STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function inviteLinkFor(code) {
+  return `${window.location.origin}/?ref=${encodeURIComponent(code || "")}`;
+}
+
 // ---------- auth --------------------------------------------------------------
 
 export function GoogleIcon({ size = 20 }) {
@@ -138,7 +179,7 @@ function GoogleSetupView({ onAuthed, onCancel }) {
   const [profile, setProfile] = useState(null);
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
-  const [referralCode, setReferralCode] = useState("");
+  const [referralCode, setReferralCode] = useState(() => storedInviteRef());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -169,6 +210,7 @@ function GoogleSetupView({ onAuthed, onCancel }) {
       setError(res?.message || "Could not create your account. Please try again.");
       return;
     }
+    clearInviteRef();
     setToken(res.token);
     onAuthed(res.user);
   }
@@ -219,7 +261,7 @@ function AuthView({ onAuthed }) {
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
-  const [referralCode, setReferralCode] = useState("");
+  const [referralCode, setReferralCode] = useState(() => storedInviteRef());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
@@ -248,6 +290,7 @@ function AuthView({ onAuthed }) {
       setError(res.message || "Something went wrong.");
       return;
     }
+    if (mode === "signup") clearInviteRef();
     setToken(res.token);
     if (res.referral_message) setNote(res.referral_message);
     onAuthed(res.user);
@@ -1255,11 +1298,22 @@ function RewardsView({ me, refreshMe }) {
     }
   }
 
+  async function copyLink() {
+    const link = inviteLinkFor(data?.my_code);
+    try {
+      await navigator.clipboard.writeText(link);
+      setNotice("Your invite link was copied.");
+    } catch {
+      setNotice(`Your invite link: ${link}`);
+    }
+  }
+
   async function shareCode() {
-    const text = `Join me on Zoomly! Use my referral code ${data?.my_code} when you sign up and we both climb the referral board.`;
+    const link = inviteLinkFor(data?.my_code);
+    const text = `Join me on Zoomly! Sign up with my invite link ${link} — or use my referral code ${data?.my_code} when you sign up.`;
     if (navigator.share) {
       try {
-        await navigator.share({ title: "Zoomly", text });
+        await navigator.share({ title: "Zoomly", text, url: link });
         return;
       } catch {
         /* user cancelled */
@@ -1344,14 +1398,20 @@ function RewardsView({ me, refreshMe }) {
       </div>
 
       <div className="card" style={{ marginTop: 14 }}>
-        <h3 style={{ margin: "0 0 4px" }}>🔗 Your referral code</h3>
+        <h3 style={{ margin: "0 0 4px" }}>🔗 Your referral code & invite link</h3>
         <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>
-          Share your code — every friend who joins with it counts as your referral and climbs you up the Top Referrals board. You have {data.referral_count} referral{data.referral_count === 1 ? "" : "s"} so far.
+          Share your code or your invite link — every friend who joins with it counts as your referral and climbs you up the Top Referrals board. Friends who open your link get the code applied automatically when they sign up. You have {data.referral_count} referral{data.referral_count === 1 ? "" : "s"} so far.
         </p>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <code style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, padding: "9px 12px", fontWeight: 700, fontSize: 15 }}>{data.my_code}</code>
           <button className="btn" onClick={copyCode}>
             Copy code
+          </button>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 10 }}>
+          <code style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, padding: "9px 12px", fontWeight: 600, fontSize: 13, wordBreak: "break-all" }}>{inviteLinkFor(data.my_code)}</code>
+          <button className="btn" onClick={copyLink}>
+            Copy link
           </button>
           <button className="btn btn-primary" onClick={shareCode}>
             Share invite
@@ -1468,6 +1528,9 @@ export function App() {
 
   useEffect(() => {
     (async () => {
+      // An invite link (?ref=CODE) may have brought the visitor here:
+      // stash the code first so the signup flows can apply it.
+      captureInviteRef();
       // Google sign-in returns through the URL hash: #google-token=<session>
       // for existing accounts, #google-setup for first-time username choice.
       const hash = window.location.hash || "";

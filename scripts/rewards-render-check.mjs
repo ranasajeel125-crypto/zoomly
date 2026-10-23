@@ -119,6 +119,8 @@ try {
   const t = bodyText();
   check("Rewards view did NOT crash the app", !t.includes("could not open"));
   check("referral code rendered", t.includes(rewards.my_code));
+  check("invite link rendered with ?ref=<code>", t.includes(`/?ref=${rewards.my_code}`));
+  check("Copy link button rendered", [...document.querySelectorAll("button")].some((b) => (b.textContent || "").includes("Copy link")));
   check("coin balance + level rendered", t.includes("Your coin balance") && t.includes(rewards.level));
   check("all 5 pack prices rendered", rewards.packs.every((p) => t.includes(`Rs.${p.pricePkr.toLocaleString()}`)));
   check("no 'Rs.undefined' anywhere", !t.includes("Rs.undefined"));
@@ -136,6 +138,45 @@ try {
   check(`render flow completed (${err.message})`, false);
 } finally {
   dom.window.close();
+}
+
+// ---- 3. invite link: opening /?ref=CODE stores the code and pre-fills signup --
+try {
+  const dom2 = new JSDOM(indexHtml, {
+    url: `${BASE}/?ref=${rewards.my_code}`,
+    runScripts: "dangerously",
+    pretendToBeVisual: true,
+    beforeParse(window) {
+      window.fetch = (u, o = {}) => {
+        const { signal, ...rest } = o;
+        return fetch(new URL(u, BASE), rest);
+      };
+      window.IntersectionObserver = class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      };
+      window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+      window.HTMLMediaElement.prototype.pause = () => {};
+      window.HTMLMediaElement.prototype.load = () => {};
+      window.scrollTo = () => {};
+    },
+  });
+  const doc2 = dom2.window.document;
+  const text2 = () => doc2.body?.textContent || "";
+  dom2.window.eval(bundle);
+  await waitFor("auth view at ?ref=", () => text2().includes("Log in") || text2().includes("could not open"));
+  check("logged-out app at invite link did NOT crash", !text2().includes("could not open"));
+  check("invite code captured from ?ref= into storage", dom2.window.localStorage.getItem("zoomly_ref") === rewards.my_code, `stored=${dom2.window.localStorage.getItem("zoomly_ref")}`);
+  const signUpTab = [...doc2.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Sign up");
+  check("Sign up tab found", Boolean(signUpTab));
+  signUpTab.dispatchEvent(new dom2.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await sleep(400);
+  const refInput = [...doc2.querySelectorAll("input")].find((i) => (i.placeholder || "").includes("Referral code"));
+  check("signup form pre-fills the referral code from the link", Boolean(refInput) && refInput.value === rewards.my_code, `value=${refInput?.value}`);
+  dom2.window.close();
+} catch (err) {
+  check(`invite-link flow completed (${err.message})`, false);
 }
 
 if (failures > 0 || jsdomError) {

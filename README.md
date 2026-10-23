@@ -23,7 +23,9 @@ deployable on Render's free tier. Same proven stack as the SMM panel.
   comments, follow/unfollow, People directory, profile pages with stats
   and a video grid, delete your own videos.
 - **Referral system** — every user gets a personal code (`ZOOM-<id>-<USERNAME>`)
-  to copy/share from the Rewards tab. A new user can enter a code at signup
+  to copy/share from the Rewards tab, plus a personal invite link
+  (`/?ref=<code>`): opening it stores the code so both signup flows
+  (password and Google) apply it automatically. A new user can enter a code at signup
   or claim one later: the signup is linked as the inviter's referral
   (count only — referrals mint no coins). Profiles show referral count
   and "my referrals".
