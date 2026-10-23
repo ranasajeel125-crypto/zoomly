@@ -343,9 +343,10 @@ const badGift = await api("sendGift", { token: viewerToken, live_session_id: sid
 check("unknown gift rejected", badGift.ok === false);
 
 // ---- Held coins (pending withdrawal) can be neither gifted nor re-withdrawn --
-// The viewer holds 5,900 coins in a withdrawal request: the spendable
-// balance drops to 0, so a 100-coin gift and a second withdrawal both fail.
-const hold = await api("requestWithdrawal", { token: viewerToken, coins: 5900, jazzcash_number: "03001234567" });
+// The viewer holds all 5,875 remaining coins in a withdrawal request: the
+// spendable balance drops to 0, so a 100-coin gift and a second withdrawal
+// both fail.
+const hold = await api("requestWithdrawal", { token: viewerToken, coins: 5875, jazzcash_number: "03001234567" });
 check("viewer withdrawal hold placed (balance 0)", hold.ok === true && hold.my_balance === 0, JSON.stringify(hold));
 const heldGift = await api("sendGift", { token: viewerToken, live_session_id: sid, gift_key: "giftbox" });
 check("held coins cannot be gifted", heldGift.ok === false, JSON.stringify(heldGift));
@@ -355,7 +356,7 @@ check("held coins cannot be withdrawn twice", heldWd.ok === false);
 const holdReject = await api("reviewWithdrawal", { token: creatorToken, withdrawal_id: hold.withdrawal.id, decision: "rejected" });
 check("admin rejects the hold", holdReject.ok === true, JSON.stringify(holdReject));
 const viewerAfterRefund = (await api("getMe", { token: viewerToken })).user.coin_balance;
-check("hold refunded after rejection (5900)", viewerAfterRefund === 5900, `bal=${viewerAfterRefund}`);
+check("hold refunded after rejection (5875)", viewerAfterRefund === 5875, `bal=${viewerAfterRefund}`);
 
 // ---- Follow state for the watch screen (getLive.broadcaster_followed) ------------
 
