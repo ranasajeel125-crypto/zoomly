@@ -139,6 +139,40 @@ check("admin approve custom ok", reviewCustom.ok === true, JSON.stringify(review
 const bAfterCustom = (await api("getMe", { token: bToken })).user;
 check("custom coins credited after approve (137)", bAfterCustom.coin_balance === 137, `balance=${bAfterCustom.coin_balance}`);
 
+// ---- Withdrawals: hold at request, reject refunds, approve finalizes ---------
+// B has 137 coins. Withdraw 100 -> held immediately (balance 37).
+const wd1 = await api("requestWithdrawal", { token: bToken, coins: 100, jazzcash_number: "03001234567", account_title: "Test Fan" });
+check("withdrawal request ok", wd1.ok === true, JSON.stringify(wd1));
+check("hold deducted at request (balance 37)", wd1.my_balance === 37, `my_balance=${wd1.my_balance}`);
+check("withdrawal amount_pkr equals coins", wd1.withdrawal?.amount_pkr === 100 && wd1.withdrawal?.status === "pending", JSON.stringify(wd1.withdrawal));
+const wdOver = await api("requestWithdrawal", { token: bToken, coins: 50, jazzcash_number: "03001234567" });
+check("over-balance withdrawal rejected (held coins not double-spendable)", wdOver.ok === false, JSON.stringify(wdOver));
+const wdSmall = await api("requestWithdrawal", { token: bToken, coins: 5, jazzcash_number: "03001234567" });
+check("withdrawal under 10 coins rejected", wdSmall.ok === false);
+const wdBadNumber = await api("requestWithdrawal", { token: bToken, coins: 10, jazzcash_number: "12345678901" });
+check("withdrawal with invalid JazzCash number rejected", wdBadNumber.ok === false);
+const wdNonAdmin = await api("reviewWithdrawal", { token: bToken, withdrawal_id: wd1.withdrawal.id, decision: "approved" });
+check("non-admin cannot review withdrawals", wdNonAdmin.ok === false);
+const adminWdView = await api("getAdminCoinRequests", { token: adminToken });
+const myWd = adminWdView.withdrawals?.find((w) => w.id === wd1.withdrawal.id);
+check("admin sees pending withdrawal with JazzCash number", Boolean(myWd) && myWd.jazzcash_number === "03001234567" && myWd.coins === 100 && myWd.requester?.username === userB, JSON.stringify(myWd));
+// Reject -> the 100 held coins are refunded (balance back to 137).
+const wdReject = await api("reviewWithdrawal", { token: adminToken, withdrawal_id: wd1.withdrawal.id, decision: "rejected" });
+check("admin reject ok", wdReject.ok === true, JSON.stringify(wdReject));
+const bAfterReject = (await api("getMe", { token: bToken })).user;
+check("reject refunds held coins (137)", bAfterReject.coin_balance === 137, `balance=${bAfterReject.coin_balance}`);
+// Withdraw 30 again -> approve -> coins stay deducted (balance 107).
+const wd2 = await api("requestWithdrawal", { token: bToken, coins: 30, jazzcash_number: "03001234567" });
+check("second withdrawal ok (balance 107 on hold)", wd2.ok === true && wd2.my_balance === 107, JSON.stringify(wd2));
+const wdApprove = await api("reviewWithdrawal", { token: adminToken, withdrawal_id: wd2.withdrawal.id, decision: "approved" });
+check("admin approve withdrawal ok", wdApprove.ok === true, JSON.stringify(wdApprove));
+const bAfterApprove = (await api("getMe", { token: bToken })).user;
+check("approve keeps coins deducted (107)", bAfterApprove.coin_balance === 107, `balance=${bAfterApprove.coin_balance}`);
+const wdDouble = await api("reviewWithdrawal", { token: adminToken, withdrawal_id: wd2.withdrawal.id, decision: "approved" });
+check("double review of withdrawal rejected", wdDouble.ok === false);
+const rewardsAfterWd = await api("getRewards", { token: bToken });
+check("my withdrawals listed with final statuses", Array.isArray(rewardsAfterWd.my_withdrawals) && rewardsAfterWd.my_withdrawals.some((w) => w.id === wd2.withdrawal.id && w.status === "approved") && rewardsAfterWd.my_withdrawals.some((w) => w.id === wd1.withdrawal.id && w.status === "rejected"));
+
 // Rewards + leaderboards shape
 const rewards = await api("getRewards", { token: bToken });
 check("rewards ok", rewards.ok === true, JSON.stringify(rewards).slice(0, 200));

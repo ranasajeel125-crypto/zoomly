@@ -90,6 +90,18 @@ export async function initDb() {
       reviewed_at INTEGER,
       created_at INTEGER NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS withdrawal_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      coins INTEGER NOT NULL,
+      amount_pkr INTEGER NOT NULL,
+      jazzcash_number TEXT NOT NULL,
+      account_title TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      reviewed_by INTEGER REFERENCES users(id),
+      decided_at INTEGER,
+      created_at INTEGER NOT NULL
+    )`,
     `CREATE TABLE IF NOT EXISTS live_sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

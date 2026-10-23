@@ -1190,6 +1190,7 @@ function BoardRow({ row, metric }) {
 
 function AdminSection({ refreshMe }) {
   const [requests, setRequests] = useState([]);
+  const [withdrawals, setWithdrawals] = useState([]);
   const [platformGiftCoins, setPlatformGiftCoins] = useState(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -1198,6 +1199,7 @@ function AdminSection({ refreshMe }) {
     const res = await call("getAdminCoinRequests", {});
     if (res.ok) {
       setRequests(res.requests);
+      if (Array.isArray(res.withdrawals)) setWithdrawals(res.withdrawals);
       if (typeof res.platform_gift_coins === "number") setPlatformGiftCoins(res.platform_gift_coins);
     }
   }, []);
@@ -1219,8 +1221,23 @@ function AdminSection({ refreshMe }) {
     load();
   }
 
+  async function reviewWd(wd, decision) {
+    setError("");
+    setNotice("");
+    const res = await call("reviewWithdrawal", { withdrawal_id: wd.id, decision });
+    if (!res.ok) {
+      setError(res.message || "Could not review the withdrawal.");
+      return;
+    }
+    setNotice(res.message);
+    refreshMe?.();
+    load();
+  }
+
   const pending = requests.filter((r) => r.status === "pending");
   const reviewed = requests.filter((r) => r.status !== "pending");
+  const pendingWd = withdrawals.filter((w) => w.status === "pending");
+  const reviewedWd = withdrawals.filter((w) => w.status !== "pending");
 
   return (
     <div className="card" style={{ marginTop: 16 }}>
@@ -1280,6 +1297,56 @@ function AdminSection({ refreshMe }) {
           </div>
         </>
       )}
+
+      <h4 style={{ margin: "20px 0 6px" }}>💸 Withdrawals (cash-out)</h4>
+      <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>
+        Coins pehle se user ke balance se hold hain. <strong style={{ color: "var(--text)" }}>Approve</strong> = tum pehle JazzCash se paise bhejo, phir yahan approve mark karo. <strong style={{ color: "var(--text)" }}>Reject</strong> = held coins user ko auto-refund.
+      </p>
+      {pendingWd.length === 0 && <p style={{ color: "var(--dim)" }}>No pending withdrawals.</p>}
+      <div style={{ display: "grid", gap: 10 }}>
+        {pendingWd.map((w) => (
+          <div key={w.id} style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <Avatar user={w.requester} size={36} />
+              <div style={{ flex: 1 }}>
+                <strong>
+                  🪙 {w.coins.toLocaleString()} · Rs.{w.amount_pkr.toLocaleString()}
+                </strong>
+                <div style={{ color: "var(--dim)", fontSize: 13 }}>
+                  {w.requester.display_name} (@{w.requester.username}) · ID #{w.requester.id} · {timeAgo(w.created_at)}
+                </div>
+                <div style={{ fontSize: 13 }}>
+                  JazzCash: <code>{w.jazzcash_number}</code>
+                  {w.account_title ? ` · ${w.account_title}` : ""}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button className="btn btn-primary btn-small" onClick={() => reviewWd(w, "approved")}>
+                ✓ Approve — Rs.{w.amount_pkr} bhej diye
+              </button>
+              <button className="btn btn-danger btn-small" onClick={() => reviewWd(w, "rejected")}>
+                ✕ Reject — refund coins
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+      {reviewedWd.length > 0 && (
+        <>
+          <h4 style={{ margin: "16px 0 6px", color: "var(--dim)" }}>Withdrawals reviewed</h4>
+          <div style={{ display: "grid", gap: 6 }}>
+            {reviewedWd.slice(0, 10).map((w) => (
+              <div key={w.id} style={{ fontSize: 14, color: "var(--dim)", display: "flex", justifyContent: "space-between" }}>
+                <span>
+                  🪙 {w.coins} · Rs.{w.amount_pkr} · @{w.requester.username} · {w.jazzcash_number}
+                </span>
+                <strong style={{ color: w.status === "approved" ? "var(--accent)" : "var(--bad)" }}>{w.status}</strong>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1292,6 +1359,9 @@ function RewardsView({ me, refreshMe }) {
   const [packIndex, setPackIndex] = useState(0);
   const [buyMode, setBuyMode] = useState("pack");
   const [customCoins, setCustomCoins] = useState("");
+  const [wdCoins, setWdCoins] = useState("");
+  const [wdNumber, setWdNumber] = useState("");
+  const [wdTitle, setWdTitle] = useState("");
   const [tid, setTid] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -1386,6 +1456,29 @@ function RewardsView({ me, refreshMe }) {
     load();
   }
 
+  async function withdraw(e) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    setNotice("");
+    const res = await call("requestWithdrawal", {
+      coins: Math.floor(Number(wdCoins) || 0),
+      jazzcash_number: wdNumber.trim(),
+      account_title: wdTitle.trim(),
+    });
+    setBusy(false);
+    if (!res.ok) {
+      setError(res.message || "Withdrawal could not be sent.");
+      return;
+    }
+    setNotice(res.message);
+    setWdCoins("");
+    setWdNumber("");
+    setWdTitle("");
+    refreshMe?.();
+    load();
+  }
+
   if (!data && loadError) {
     return (
       <div style={{ padding: 20, textAlign: "center" }}>
@@ -1399,6 +1492,7 @@ function RewardsView({ me, refreshMe }) {
   if (!data) return <p style={{ padding: 20, color: "var(--dim)" }}>{waking ? WAKING_TEXT : "Loading rewards…"}</p>;
   const selectedPack = data.packs[packIndex] || data.packs[0];
   const customCoinsNum = Math.max(0, Math.floor(Number(customCoins) || 0));
+  const wdCoinsNum = Math.max(0, Math.floor(Number(wdCoins) || 0));
   const payAmount = buyMode === "custom" ? customCoinsNum : selectedPack.pricePkr;
 
   return (
@@ -1515,6 +1609,41 @@ function RewardsView({ me, refreshMe }) {
                     🪙 {r.pack_coins} · Rs.{r.price_pkr}{r.is_custom ? " · custom" : ""} · TID {r.tid}
                   </span>
                   <strong style={{ color: r.status === "approved" ? "var(--accent)" : r.status === "rejected" ? "var(--bad)" : "var(--dim)" }}>{r.status}</strong>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="card" style={{ marginTop: 14 }}>
+        <h3 style={{ margin: "0 0 4px" }}>💸 Withdraw coins (cash out)</h3>
+        <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>
+          1 coin = Rs.1. Request bhejte hi coins tumhare balance se <strong style={{ color: "var(--text)" }}>hold</strong> ho jate hain — hold wale coins na gift ho sakte hain, na dobara withdraw. Owner approve karega to tumhare JazzCash number par paise milenge; agar reject ho jaye to coins auto wapas balance me aa jate hain. Kam az kam 10 coins.
+        </p>
+        <form onSubmit={withdraw} style={{ display: "grid", gap: 8 }}>
+          <input className="input" type="number" min="10" step="1" placeholder={`Coins to withdraw (your balance: ${data.coin_balance})`} value={wdCoins} onChange={(e) => setWdCoins(e.target.value)} required />
+          {wdCoinsNum > 0 && (
+            <div style={{ fontSize: 14 }}>
+              You will receive: <strong>Rs.{wdCoinsNum.toLocaleString()}</strong>
+            </div>
+          )}
+          <input className="input" placeholder="Your JazzCash number (03xxxxxxxxx)" value={wdNumber} onChange={(e) => setWdNumber(e.target.value)} required />
+          <input className="input" placeholder="Account title / name (optional)" value={wdTitle} onChange={(e) => setWdTitle(e.target.value)} />
+          <button className="btn btn-primary" type="submit" disabled={busy}>
+            Request withdrawal
+          </button>
+        </form>
+        {data.my_withdrawals?.length > 0 && (
+          <>
+            <h4 style={{ margin: "16px 0 6px", color: "var(--dim)" }}>My withdrawals</h4>
+            <div style={{ display: "grid", gap: 6 }}>
+              {data.my_withdrawals.map((w) => (
+                <div key={w.id} style={{ fontSize: 14, display: "flex", justifyContent: "space-between" }}>
+                  <span>
+                    🪙 {w.coins} · Rs.{w.amount_pkr} · {w.jazzcash_number}
+                  </span>
+                  <strong style={{ color: w.status === "approved" ? "var(--accent)" : w.status === "rejected" ? "var(--bad)" : "var(--dim)" }}>{w.status}</strong>
                 </div>
               ))}
             </div>

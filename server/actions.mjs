@@ -9,6 +9,7 @@ import * as schema from "./schema.mjs";
 import {
   COIN_PACKS,
   CUSTOM_BUY_MIN_COINS,
+  WITHDRAW_MIN_COINS,
   GIFT_CATALOG,
   ICE_SERVERS,
   JAZZCASH,
@@ -92,6 +93,19 @@ function authorDto(user) {
     username: user.username,
     display_name: user.displayName,
     avatar_url: user.avatarUrl ?? null,
+  };
+}
+
+function withdrawalDto(r) {
+  return {
+    id: r.id,
+    coins: r.coins,
+    amount_pkr: r.amountPkr,
+    jazzcash_number: r.jazzcashNumber,
+    account_title: r.accountTitle,
+    status: r.status,
+    created_at: r.createdAt.getTime(),
+    decided_at: r.decidedAt ? r.decidedAt.getTime() : null,
   };
 }
 
@@ -603,6 +617,7 @@ export const Actions = {
     const byCoins = [...allUsers].sort((a, b) => b.coinBalance - a.coinBalance || (counts.get(b.id) ?? 0) - (counts.get(a.id) ?? 0) || a.id - b.id);
     const byReferrals = [...allUsers].sort((a, b) => (counts.get(b.id) ?? 0) - (counts.get(a.id) ?? 0) || b.coinBalance - a.coinBalance || a.id - b.id);
     const myRequests = await db.select().from(schema.coinRequests).where(eq(schema.coinRequests.userId, user.id)).orderBy(desc(schema.coinRequests.createdAt)).limit(20);
+    const myWithdrawals = await db.select().from(schema.withdrawalRequests).where(eq(schema.withdrawalRequests.userId, user.id)).orderBy(desc(schema.withdrawalRequests.createdAt)).limit(20);
     return {
       ok: true,
       my_code: user.referralCode,
@@ -613,6 +628,7 @@ export const Actions = {
       packs: COIN_PACKS,
       jazzcash: JAZZCASH,
       my_requests: myRequests.map((r) => ({ id: r.id, pack_coins: r.packCoins, price_pkr: r.pricePkr, is_custom: Boolean(r.isCustom), tid: r.tid, status: r.status, created_at: r.createdAt.getTime() })),
+      my_withdrawals: myWithdrawals.map(withdrawalDto),
       leaderboards: {
         top_coins: byCoins.slice(0, LEADERBOARD_LIMIT).map((u, i) => ({ rank: i + 1, ...boardRow(u) })),
         top_referrals: byReferrals.slice(0, LEADERBOARD_LIMIT).map((u, i) => ({ rank: i + 1, ...boardRow(u) })),
@@ -660,6 +676,55 @@ export const Actions = {
         return { ok: false, message: "This TID was already submitted. Each JazzCash transaction can only be used once." };
       }
       return { ok: true, message: `Request sent: ${args.coins} coins for Rs.${args.coins}. The owner will verify your JazzCash payment and approve it.` };
+    }
+  ),
+
+  // Withdrawal (cash-out) at 1 coin = Rs.1. HOLD MODEL: the coins are
+  // deducted at submission with the same atomic balance-guarded UPDATE
+  // sendGift uses, so held coins can never be gifted or withdrawn a second
+  // time. On owner REJECT the hold is refunded (see reviewWithdrawal); on
+  // APPROVE the coins stay deducted and the owner pays the user manually
+  // via JazzCash outside the app — the app never sends money itself.
+  requestWithdrawal: withValidation(
+    z.object({
+      token: tokenArg,
+      coins: z.number().int().min(1).max(1000000),
+      jazzcash_number: z.string().trim().min(10).max(15),
+      account_title: z.string().trim().max(80).optional(),
+    }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      if (args.coins < WITHDRAW_MIN_COINS) return { ok: false, message: `Kam az kam ${WITHDRAW_MIN_COINS} coins withdraw kar sakte hain.` };
+      if (!/^0\d{10}$/.test(args.jazzcash_number)) return { ok: false, message: "Sahi JazzCash number likhein (11 digits, 03 se shuru)." };
+      const deducted = await db
+        .update(schema.users)
+        .set({ coinBalance: sql`${schema.users.coinBalance} - ${args.coins}` })
+        .where(and(eq(schema.users.id, user.id), gte(schema.users.coinBalance, args.coins)))
+        .returning({ coinBalance: schema.users.coinBalance });
+      if (deducted.length === 0) {
+        const fresh = (await db.select({ coinBalance: schema.users.coinBalance }).from(schema.users).where(eq(schema.users.id, user.id)).limit(1))[0];
+        return { ok: false, message: `Not enough coins — withdrawal ke liye ${args.coins} chahiye aur tumhare paas ${fresh?.coinBalance ?? 0} hain.`, my_balance: fresh?.coinBalance ?? 0 };
+      }
+      try {
+        const inserted = await db
+          .insert(schema.withdrawalRequests)
+          .values({ userId: user.id, coins: args.coins, amountPkr: args.coins, jazzcashNumber: args.jazzcash_number, accountTitle: args.account_title ?? "" })
+          .returning();
+        if (!inserted[0]) throw new Error("withdrawal insert returned no row");
+        return {
+          ok: true,
+          message: `Withdrawal request bhej di: ${args.coins} coins (Rs.${args.coins}) hold par hain. Owner approve karega to JazzCash par paise milenge.`,
+          my_balance: deducted[0].coinBalance,
+          withdrawal: withdrawalDto(inserted[0]),
+        };
+      } catch (err) {
+        // The row could not be recorded after the hold — refund the hold so
+        // a failed request never costs the user coins.
+        console.error("[api] requestWithdrawal insert failed, refunding hold:", err?.message || err);
+        await db.update(schema.users).set({ coinBalance: sql`${schema.users.coinBalance} + ${args.coins}` }).where(eq(schema.users.id, user.id));
+        return { ok: false, message: "Withdrawal could not be created. Your coins were not deducted — please try again." };
+      }
     }
   ),
 
@@ -884,6 +949,15 @@ export const Actions = {
     const giftTotals = await db
       .select({ total: sql`coalesce(sum(${schema.giftEvents.platformShare}), 0)`.mapWith(Number) })
       .from(schema.giftEvents);
+    // Withdrawal requests (coins already held at submission). Approving
+    // only marks the payout the owner then sends manually via JazzCash;
+    // rejecting refunds the held coins (see reviewWithdrawal).
+    const wdRows = await db
+      .select({ withdrawal: schema.withdrawalRequests, requester: schema.users })
+      .from(schema.withdrawalRequests)
+      .innerJoin(schema.users, eq(schema.withdrawalRequests.userId, schema.users.id))
+      .orderBy(sql`case when ${schema.withdrawalRequests.status} = 'pending' then 0 else 1 end`, desc(schema.withdrawalRequests.createdAt))
+      .limit(100);
     return {
       ok: true,
       platform_gift_coins: giftTotals[0]?.total ?? 0,
@@ -897,6 +971,7 @@ export const Actions = {
         created_at: r.request.createdAt.getTime(),
         buyer: authorDto(r.buyer),
       })),
+      withdrawals: wdRows.map((r) => ({ ...withdrawalDto(r.withdrawal), requester: authorDto(r.requester) })),
     };
   }),
 
@@ -917,6 +992,37 @@ export const Actions = {
       }
       await db.batch(statements);
       return { ok: true, message: args.decision === "approved" ? `Approved — ${request.packCoins} coins credited.` : "Request rejected." };
+    }
+  ),
+
+  // Owner decision on a withdrawal. The coins were already held at
+  // submission: APPROVE leaves them deducted (the owner pays the user via
+  // JazzCash manually); REJECT refunds the held coins in the same batch,
+  // so a rejected withdrawal never costs the user anything and the house
+  // can never pay out twice for the same coins.
+  reviewWithdrawal: withValidation(
+    z.object({ token: tokenArg, withdrawal_id: z.number().int().positive(), decision: z.enum(["approved", "rejected"]) }),
+    async (args) => {
+      const admin = await authUser(args.token);
+      if (!admin) return { ok: false, message: "Please sign in." };
+      if (!isAdminUser(admin)) return { ok: false, message: "Owner access required." };
+      const wd = (await db.select().from(schema.withdrawalRequests).where(eq(schema.withdrawalRequests.id, args.withdrawal_id)).limit(1))[0];
+      if (!wd) return { ok: false, message: "Withdrawal not found." };
+      if (wd.status !== "pending") return { ok: false, message: `This withdrawal was already ${wd.status}.` };
+      const statements = [
+        db.update(schema.withdrawalRequests).set({ status: args.decision, reviewedBy: admin.id, decidedAt: new Date() }).where(eq(schema.withdrawalRequests.id, wd.id)),
+      ];
+      if (args.decision === "rejected") {
+        statements.push(db.update(schema.users).set({ coinBalance: sql`${schema.users.coinBalance} + ${wd.coins}` }).where(eq(schema.users.id, wd.userId)));
+      }
+      await db.batch(statements);
+      return {
+        ok: true,
+        message:
+          args.decision === "approved"
+            ? `Approved — ab Rs.${wd.amountPkr} JazzCash ${wd.jazzcashNumber} par bhej dein.`
+            : "Withdrawal rejected — held coins wapas balance me daal diye.",
+      };
     }
   ),
 };

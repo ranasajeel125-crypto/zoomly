@@ -73,6 +73,24 @@ export const coinRequests = sqliteTable("coin_requests", {
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
+// A cash-out request. The coins are HELD at submission (deducted from the
+// user's balance with an atomic guarded update, like a gift spend): on
+// REJECT the held coins are refunded; on APPROVE they stay deducted and the
+// owner pays the user manually via JazzCash outside the app.
+// amountPkr always equals coins (1 coin = Rs.1), derived server-side.
+export const withdrawalRequests = sqliteTable("withdrawal_requests", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  coins: integer("coins").notNull(),
+  amountPkr: integer("amount_pkr").notNull(),
+  jazzcashNumber: text("jazzcash_number").notNull(),
+  accountTitle: text("account_title").notNull().default(""),
+  status: text("status", { enum: ["pending", "approved", "rejected"] }).notNull().default("pending"),
+  reviewedBy: integer("reviewed_by").references(() => users.id),
+  decidedAt: integer("decided_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
 // A LIVE broadcast. endedAt is null while the broadcast is running.
 // totalGiftCoins = gross gift coins received; platformCutCoins = the
 // platform's 30% share of those gifts (the creator received the other 70%).
