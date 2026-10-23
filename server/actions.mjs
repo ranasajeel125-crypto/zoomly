@@ -3,7 +3,7 @@
 // Mirrors the SMM panel's conventions: zod validation, PBKDF2 password
 // hashes, SHA-256-hashed session tokens stored in the DB.
 import { z } from "zod";
-import { and, desc, eq, gte, inArray, isNull, like, lt, notInArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, like, lt, ne, notInArray, or, sql } from "drizzle-orm";
 import { db } from "./db.mjs";
 import * as schema from "./schema.mjs";
 import {
@@ -14,6 +14,7 @@ import {
   ICE_SERVERS,
   JAZZCASH,
   LEADERBOARD_LIMIT,
+  REFERRAL_REWARD_COINS,
   REPORT_AUTOHIDE_THRESHOLD,
   findBannedContent,
   giftForKey,
@@ -351,9 +352,37 @@ function liveSessionDto(session, broadcaster) {
 }
 
 // ---- Referral -------------------------------------------------------------
-// First valid claim only: sets referred_by so the inviter's referral
-// COUNT goes up (leaderboard + profile counts). It credits NO coins to
-// either side — referrals must never mint free coins (see config.mjs).
+// First valid claim only: sets referred_by so the inviter's referral COUNT
+// goes up (leaderboard + profile counts), and credits the INVITER
+// REFERRAL_REWARD_COINS (+1) as part of that same one-time operation. The
+// new user gets NO coins — the welcome bonus stays removed. The link UPDATE
+// only lands while referred_by is still NULL, so replays/retries/races can
+// never set it — or pay the reward — twice.
+//
+// Anti-self-referral guard (gates ONLY the coin, never the count): one
+// person must not farm coins by signing up alt accounts on their own
+// device and cashing out at 100. The coin is withheld when
+//   (a) the new account's signup_device is non-null and matches ANY other
+//       existing account's signup_device (same physical device/browser
+//       already had an account — the inviter's own device included), or
+//   (b) the signup sent no device id AND the new account's signup_ip
+//       exactly matches the inviter's signup_ip (same-network signal with
+//       no device proof to clear it).
+// Missing data never blocks by itself (legacy accounts have NULLs), and a
+// device-cleared signup is never blocked on IP alone — Pakistani mobile
+// IPs are shared (CGNAT), so IP is only a fallback signal.
+async function referralCoinBlocked(user, inviter) {
+  if (user.signupDevice) {
+    const clash = await db
+      .select({ id: schema.users.id })
+      .from(schema.users)
+      .where(and(eq(schema.users.signupDevice, user.signupDevice), ne(schema.users.id, user.id)))
+      .limit(1);
+    return clash.length > 0;
+  }
+  return Boolean(user.signupIp && inviter.signupIp && user.signupIp === inviter.signupIp);
+}
+
 async function applyReferral(user, rawCode) {
   const code = String(rawCode || "").trim().toUpperCase();
   if (!code) return { ok: false, message: "Enter a referral code." };
@@ -362,8 +391,27 @@ async function applyReferral(user, rawCode) {
   const inviter = inviters[0];
   if (!inviter) return { ok: false, message: "That referral code was not found." };
   if (inviter.id === user.id) return { ok: false, message: "You cannot use your own referral code." };
-  await db.update(schema.users).set({ referredBy: inviter.id }).where(eq(schema.users.id, user.id));
-  await notify({ userId: inviter.id, type: "referral", actorId: user.id, text: `@${user.username} joined Zoomly with your referral code 🎉` });
+  const linked = await db
+    .update(schema.users)
+    .set({ referredBy: inviter.id })
+    .where(and(eq(schema.users.id, user.id), isNull(schema.users.referredBy)))
+    .returning({ id: schema.users.id });
+  if (linked.length === 0) return { ok: false, message: "You have already claimed a referral code." };
+  const credited = !(await referralCoinBlocked(user, inviter));
+  if (credited) {
+    await db
+      .update(schema.users)
+      .set({ coinBalance: sql`${schema.users.coinBalance} + ${REFERRAL_REWARD_COINS}` })
+      .where(eq(schema.users.id, inviter.id));
+  }
+  await notify({
+    userId: inviter.id,
+    type: "referral",
+    actorId: user.id,
+    text: credited
+      ? `@${user.username} joined Zoomly with your referral code 🎉 +${REFERRAL_REWARD_COINS} coin tumhare balance me add ho gaya!`
+      : `@${user.username} joined Zoomly with your referral code 🎉`,
+  });
   return { ok: true, message: `Referral claimed! @${inviter.username} is now counted as your referrer.` };
 }
 
@@ -391,14 +439,15 @@ export async function googleSignIn(profile) {
 
 // Finalizes a first-time Google signup once the user has picked a username.
 // Mirrors the password signup: referral code is generated, an optional
-// referral claim links the referrer (count only — no coins are minted),
-// and the Google profile picture becomes the account's DP.
+// referral claim links the referrer (the inviter earns the guarded +1 coin
+// — see applyReferral), and the Google profile picture becomes the DP.
 export async function googleCompleteSignup(profile, rawArgs) {
   const parsed = z
     .object({
       username: usernameRule,
       display_name: z.string().trim().min(2).max(60).optional(),
       referral_code: z.string().trim().max(64).optional(),
+      device_id: z.string().trim().max(64).optional(),
     })
     .safeParse(rawArgs ?? {});
   if (!parsed.success) return { ok: false, message: "Please pick a valid username (3–24 letters, numbers or underscores)." };
@@ -425,6 +474,9 @@ export async function googleCompleteSignup(profile, rawArgs) {
       email: profile.email ?? null,
       avatarUrl: profile.picture ?? null,
       referralCode: tempCode,
+      // Anti-self-referral guard inputs, same as the password signup.
+      signupDevice: args.device_id || null,
+      signupIp: rawArgs?.__ip || null,
     })
     .returning();
   const user = inserted[0];
@@ -446,6 +498,9 @@ export async function googleCompleteSignup(profile, rawArgs) {
 }
 
 // Validates request args with zod; returns { ok:false, message } on bad input.
+// The handler also receives the RAW args as its second parameter so it can
+// read server-injected fields that are not part of the client contract
+// (currently __ip, set by index.mjs from the request — never client data).
 function withValidation(shape, handler) {
   return async (rawArgs) => {
     let args;
@@ -454,7 +509,7 @@ function withValidation(shape, handler) {
     } catch {
       return { ok: false, message: "Invalid request." };
     }
-    return handler(args);
+    return handler(args, rawArgs ?? {});
   };
 }
 
@@ -473,8 +528,9 @@ export const Actions = {
       display_name: z.string().trim().min(2).max(60).optional(),
       password: z.string().min(6).max(128),
       referral_code: z.string().trim().max(64).optional(),
+      device_id: z.string().trim().max(64).optional(),
     }),
-    async (args) => {
+    async (args, rawArgs) => {
       const username = args.username.toLowerCase();
       if (args.display_name && findBannedContent(args.display_name)) {
         return { ok: false, message: "Is display name me aisi language allowed nahi hai — koi aur name choose karein." };
@@ -489,6 +545,10 @@ export const Actions = {
           displayName: args.display_name?.trim() || username,
           passwordHash: await hashPassword(args.password),
           referralCode: tempCode,
+          // Anti-self-referral guard inputs (see applyReferral): the device
+          // id the client sent, and the request IP injected by index.mjs.
+          signupDevice: args.device_id || null,
+          signupIp: rawArgs?.__ip || null,
         })
         .returning();
       const user = inserted[0];

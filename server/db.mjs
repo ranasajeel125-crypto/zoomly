@@ -41,6 +41,8 @@ export async function initDb() {
       hidden_count INTEGER NOT NULL DEFAULT 0,
       referral_code TEXT NOT NULL UNIQUE,
       referred_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      signup_device TEXT,
+      signup_ip TEXT,
       created_at INTEGER NOT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS sessions (
@@ -218,6 +220,8 @@ export async function initDb() {
   if (!colNames.has("google_id")) await client.execute("ALTER TABLE users ADD COLUMN google_id TEXT");
   if (!colNames.has("email")) await client.execute("ALTER TABLE users ADD COLUMN email TEXT");
   if (!colNames.has("live_title")) await client.execute("ALTER TABLE users ADD COLUMN live_title TEXT");
+  if (!colNames.has("signup_device")) await client.execute("ALTER TABLE users ADD COLUMN signup_device TEXT");
+  if (!colNames.has("signup_ip")) await client.execute("ALTER TABLE users ADD COLUMN signup_ip TEXT");
   await client.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id)");
   const crCols = await client.execute("PRAGMA table_info(coin_requests)");
   const crColNames = new Set(crCols.rows.map((r) => r.name));

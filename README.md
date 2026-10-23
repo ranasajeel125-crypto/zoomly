@@ -27,8 +27,12 @@ deployable on Render's free tier. Same proven stack as the SMM panel.
   (`/?ref=<code>`): opening it stores the code so both signup flows
   (password and Google) apply it automatically. A new user can enter a code at signup
   or claim one later: the signup is linked as the inviter's referral
-  (count only — referrals mint no coins). Profiles show referral count
-  and "my referrals".
+  (count + leaderboard), and the inviter earns **+1 coin** per referral —
+  credited once, inside the claim, and gated by an anti-self-referral
+  guard (the coin is withheld when the signup's device id matches any
+  earlier account's device, or — with no device id — when the signup IP
+  exactly matches the inviter's). The new user gets no coins. Profiles
+  show referral count and "my referrals".
 - **Coin system** — coin balance per user. The Buy Coins page shows the
   owner's JazzCash number **03266040350** (Muhammad Sajeel) and 5 packs:
   100 coins/Rs.100 · 550/Rs.500 · 1,150/Rs.1,000 · 6,000/Rs.5,000 ·

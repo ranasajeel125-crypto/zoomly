@@ -232,7 +232,7 @@ app.post("/api/auth/google/complete", async (req, res) => {
   const profile = verifyPendingProfile(parseCookies(req)[GOOGLE_PENDING_COOKIE]);
   if (!profile) return res.status(401).json({ ok: false, message: "Your Google sign-in session has expired. Please try signing in with Google again." });
   try {
-    const result = await googleCompleteSignup(profile, req.body ?? {});
+    const result = await googleCompleteSignup(profile, { ...(req.body ?? {}), __ip: clientIp(req) });
     if (result.ok) res.clearCookie(GOOGLE_PENDING_COOKIE, { path: "/" });
     return res.json(result);
   } catch (err) {
@@ -241,6 +241,15 @@ app.post("/api/auth/google/complete", async (req, res) => {
   }
 });
 
+// Client IP for the anti-self-referral guard: Render sits behind a proxy,
+// so the first x-forwarded-for hop is the real client; locally it is the
+// socket address. Injected into action args as __ip (server-set only — a
+// client-supplied __ip in the body is overwritten here).
+function clientIp(req) {
+  const fwd = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return fwd || req.socket?.remoteAddress || "";
+}
+
 app.post("/api/:action", async (req, res) => {
   const name = req.params.action;
   const handler = Actions[name];
@@ -248,7 +257,7 @@ app.post("/api/:action", async (req, res) => {
     return res.status(404).json({ ok: false, message: "Unknown action." });
   }
   try {
-    const result = await handler(req.body ?? {});
+    const result = await handler({ ...(req.body ?? {}), __ip: clientIp(req) });
     res.json(result ?? { ok: false, message: "Empty response." });
   } catch (err) {
     console.error(`[api] action "${name}" threw:`, err && err.message ? err.message : err);

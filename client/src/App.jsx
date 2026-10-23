@@ -174,6 +174,30 @@ export function inviteLinkFor(code) {
   return `${window.location.origin}/?ref=${encodeURIComponent(code || "")}`;
 }
 
+// ---------- device id (anti-self-referral guard) ------------------------------
+// A stable per-browser id, created once and kept in localStorage. Both
+// signup flows send it; the server stores it on the account and withholds
+// the referral coin when a "new" account is really the inviter's own alt
+// on the same device. It is NOT a tracking/fingerprint id — just a random
+// value this browser generated for itself.
+const DEVICE_STORAGE_KEY = "zoomly_device_id";
+
+export function deviceId() {
+  try {
+    let id = localStorage.getItem(DEVICE_STORAGE_KEY);
+    if (!id) {
+      id =
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `dev-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+      localStorage.setItem(DEVICE_STORAGE_KEY, id);
+    }
+    return id;
+  } catch {
+    return undefined;
+  }
+}
+
 // A shared video link looks like https://zoomly.onrender.com/?v=<post id>.
 // Opening the app with ?v=<id> returns the id once (and cleans the URL) so
 // the feed can open at that video.
@@ -329,7 +353,7 @@ function GoogleSetupView({ onAuthed, onCancel }) {
     const res = await fetch("/api/auth/google/complete", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ username, display_name: displayName || undefined, referral_code: referralCode || undefined }),
+      body: JSON.stringify({ username, display_name: displayName || undefined, referral_code: referralCode || undefined, device_id: deviceId() }),
     }).then((r) => r.json()).catch(() => null);
     setBusy(false);
     if (!res?.ok) {
@@ -409,7 +433,7 @@ function AuthView({ onAuthed }) {
     setNote("");
     const res =
       mode === "signup"
-        ? await call("signup", { username, display_name: displayName || undefined, password, referral_code: referralCode || undefined })
+        ? await call("signup", { username, display_name: displayName || undefined, password, referral_code: referralCode || undefined, device_id: deviceId() })
         : await call("login", { username, password });
     setBusy(false);
     if (!res.ok) {
@@ -2649,6 +2673,7 @@ function RewardsView({ me, refreshMe }) {
         <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>
           Share your code or your invite link — every friend who joins with it counts as your referral and climbs you up the Top Referrals board. Friends who open your link get the code applied automatically when they sign up. You have {data.referral_count} referral{data.referral_count === 1 ? "" : "s"} so far.
         </p>
+        <p style={{ color: "var(--accent)", fontSize: 14, fontWeight: 700, margin: "0 0 10px" }}>🪙 Har referral pe 1 coin — foran aap ke balance me!</p>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <code style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, padding: "9px 12px", fontWeight: 700, fontSize: 15 }}>{data.my_code}</code>
           <button className="btn" onClick={copyCode}>
@@ -2744,10 +2769,10 @@ function RewardsView({ me, refreshMe }) {
       <div className="card" style={{ marginTop: 14 }}>
         <h3 style={{ margin: "0 0 4px" }}>💸 Withdraw coins (cash out)</h3>
         <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>
-          1 coin = Rs.1. Request bhejte hi coins tumhare balance se <strong style={{ color: "var(--text)" }}>hold</strong> ho jate hain — hold wale coins na gift ho sakte hain, na dobara withdraw. Owner approve karega to tumhare JazzCash number par paise milenge; agar reject ho jaye to coins auto wapas balance me aa jate hain. Kam az kam 10 coins.
+          1 coin = Rs.1. Request bhejte hi coins tumhare balance se <strong style={{ color: "var(--text)" }}>hold</strong> ho jate hain — hold wale coins na gift ho sakte hain, na dobara withdraw. Owner approve karega to tumhare JazzCash number par paise milenge; agar reject ho jaye to coins auto wapas balance me aa jate hain. Kam az kam 100 coins (Rs.100).
         </p>
         <form onSubmit={withdraw} style={{ display: "grid", gap: 8 }}>
-          <input className="input" type="number" min="10" step="1" placeholder={`Coins to withdraw (your balance: ${data.coin_balance})`} value={wdCoins} onChange={(e) => setWdCoins(e.target.value)} required />
+          <input className="input" type="number" min="100" step="1" placeholder={`Coins to withdraw (your balance: ${data.coin_balance})`} value={wdCoins} onChange={(e) => setWdCoins(e.target.value)} required />
           {wdCoinsNum > 0 && (
             <div style={{ fontSize: 14 }}>
               You will receive: <strong>Rs.{wdCoinsNum.toLocaleString()}</strong>

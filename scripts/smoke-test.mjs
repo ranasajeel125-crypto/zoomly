@@ -1,7 +1,9 @@
 // End-to-end smoke test for Zoomly. Boots against an already-running server
 // (BASE_URL) and exercises the key flows:
-//   signup (x2, admin via ADMIN_USERNAME), referral at signup (links only —
-//   referrals mint NO coins), login, create post metadata, like, comment,
+//   signup (x2, admin via ADMIN_USERNAME), referral at signup (inviter
+//   earns +1 coin per referral; the new user gets none; a same-device
+//   self-referral is counted but NOT paid), login, create post metadata,
+//   like, comment,
 //   follow, referral double-claim rejection, coin request, duplicate TID
 //   rejection, admin approve (coins credited), leaderboards shape (<= 50 rows),
 //   DP avatar field round-trip.
@@ -47,17 +49,39 @@ check("admin has referral code", /^ZOOM-\d+-/.test(adminCode), adminCode);
 check("admin flagged is_admin", admin.user.is_admin === true);
 check("admin flagged is_owner (Official Owner badge source)", admin.user.is_owner === true);
 
-// Signup user B WITH admin's referral code -> linked as a referral, but
-// NO coins are minted for either side (referrals are count-only now).
+// Signup user B WITH admin's referral code (from B's own device) -> linked
+// as a referral; the INVITER earns +1 coin, the new user still gets none.
 const before = (await api("getMe", { token: adminToken })).user.coin_balance;
-const bSignup = await api("signup", { username: userB, display_name: "Test Fan", password: "test-pass-123", referral_code: adminCode });
+const bDevice = `smoke-device-b-${suffix}`;
+const bSignup = await api("signup", { username: userB, display_name: "Test Fan", password: "test-pass-123", referral_code: adminCode, device_id: bDevice });
 check("user B signup with referral", bSignup.ok === true, JSON.stringify(bSignup));
 check("user B is NOT flagged is_owner", bSignup.user.is_owner === false);
 check("user B got NO free welcome coins", bSignup.user.coin_balance === 0, `balance=${bSignup.user.coin_balance}`);
 const bToken = bSignup.token;
 const adminAfter = (await api("getMe", { token: adminToken })).user;
-check("admin got NO referral coins", adminAfter.coin_balance === before, `before=${before} after=${adminAfter.coin_balance}`);
+check("inviter (admin) credited +1 coin for the referral", adminAfter.coin_balance === before + 1, `before=${before} after=${adminAfter.coin_balance}`);
 check("admin referral count is >= 1", adminAfter.referral_count >= 1);
+
+// A second referred signup (a DIFFERENT device) pays +1 again -> total +2.
+const userC = `pal_${suffix}`;
+const cSignup = await api("signup", { username: userC, display_name: "Test Pal", password: "test-pass-123", referral_code: adminCode, device_id: `smoke-device-c-${suffix}` });
+check("user C signup with referral (different device)", cSignup.ok === true, JSON.stringify(cSignup));
+check("user C got NO free welcome coins", cSignup.user.coin_balance === 0, `balance=${cSignup.user.coin_balance}`);
+const adminAfterC = (await api("getMe", { token: adminToken })).user;
+check("second referral credits +1 again (total +2)", adminAfterC.coin_balance === before + 2, `before=${before} after=${adminAfterC.coin_balance}`);
+check("admin referral count is >= 2", adminAfterC.referral_count >= 2);
+
+// Anti-self-referral guard: user D signs up from the SAME device as user B
+// (B's device already has an account) using admin's code. The referral is
+// still COUNTED, but the +1 coin is withheld.
+const userD = `alt_${suffix}`;
+const countBeforeD = adminAfterC.referral_count;
+const dSignup = await api("signup", { username: userD, display_name: "Test Alt", password: "test-pass-123", referral_code: adminCode, device_id: bDevice });
+check("user D signup with referral (same device as B)", dSignup.ok === true, JSON.stringify(dSignup));
+check("user D got NO free welcome coins", dSignup.user.coin_balance === 0, `balance=${dSignup.user.coin_balance}`);
+const adminAfterD = (await api("getMe", { token: adminToken })).user;
+check("same-device referral still COUNTED (+1)", adminAfterD.referral_count === countBeforeD + 1, `count ${countBeforeD} -> ${adminAfterD.referral_count}`);
+check("same-device referral coin WITHHELD (balance unchanged)", adminAfterD.coin_balance === before + 2, `balance=${adminAfterD.coin_balance}`);
 
 // Double claim must fail
 const again = await api("claimReferral", { token: bToken, code: adminCode });
@@ -152,11 +176,9 @@ const wd1 = await api("requestWithdrawal", { token: bToken, coins: 100, jazzcash
 check("withdrawal request ok", wd1.ok === true, JSON.stringify(wd1));
 check("hold deducted at request (balance 37)", wd1.my_balance === 37, `my_balance=${wd1.my_balance}`);
 check("withdrawal amount_pkr equals coins", wd1.withdrawal?.amount_pkr === 100 && wd1.withdrawal?.status === "pending", JSON.stringify(wd1.withdrawal));
-const wdOver = await api("requestWithdrawal", { token: bToken, coins: 50, jazzcash_number: "03001234567" });
-check("over-balance withdrawal rejected (held coins not double-spendable)", wdOver.ok === false, JSON.stringify(wdOver));
 const wdSmall = await api("requestWithdrawal", { token: bToken, coins: 5, jazzcash_number: "03001234567" });
-check("withdrawal under 10 coins rejected", wdSmall.ok === false);
-const wdBadNumber = await api("requestWithdrawal", { token: bToken, coins: 10, jazzcash_number: "12345678901" });
+check("withdrawal under 100 coins rejected (minimum)", wdSmall.ok === false);
+const wdBadNumber = await api("requestWithdrawal", { token: bToken, coins: 100, jazzcash_number: "12345678901" });
 check("withdrawal with invalid JazzCash number rejected", wdBadNumber.ok === false);
 const wdNonAdmin = await api("reviewWithdrawal", { token: bToken, withdrawal_id: wd1.withdrawal.id, decision: "approved" });
 check("non-admin cannot review withdrawals", wdNonAdmin.ok === false);
@@ -168,13 +190,17 @@ const wdReject = await api("reviewWithdrawal", { token: adminToken, withdrawal_i
 check("admin reject ok", wdReject.ok === true, JSON.stringify(wdReject));
 const bAfterReject = (await api("getMe", { token: bToken })).user;
 check("reject refunds held coins (137)", bAfterReject.coin_balance === 137, `balance=${bAfterReject.coin_balance}`);
-// Withdraw 30 again -> approve -> coins stay deducted (balance 107).
-const wd2 = await api("requestWithdrawal", { token: bToken, coins: 30, jazzcash_number: "03001234567" });
-check("second withdrawal ok (balance 107 on hold)", wd2.ok === true && wd2.my_balance === 107, JSON.stringify(wd2));
+// With a sufficient balance (137), a 50-coin request is STILL rejected —
+// the 100-coin minimum, not the balance, is what stops it.
+const wdBelowMin = await api("requestWithdrawal", { token: bToken, coins: 50, jazzcash_number: "03001234567" });
+check("withdrawal of 50 rejected despite sufficient balance (minimum is 100)", wdBelowMin.ok === false, JSON.stringify(wdBelowMin));
+// Withdraw 100 again -> approve -> coins stay deducted (balance 37).
+const wd2 = await api("requestWithdrawal", { token: bToken, coins: 100, jazzcash_number: "03001234567" });
+check("second withdrawal ok (balance 37 on hold)", wd2.ok === true && wd2.my_balance === 37, JSON.stringify(wd2));
 const wdApprove = await api("reviewWithdrawal", { token: adminToken, withdrawal_id: wd2.withdrawal.id, decision: "approved" });
 check("admin approve withdrawal ok", wdApprove.ok === true, JSON.stringify(wdApprove));
 const bAfterApprove = (await api("getMe", { token: bToken })).user;
-check("approve keeps coins deducted (107)", bAfterApprove.coin_balance === 107, `balance=${bAfterApprove.coin_balance}`);
+check("approve keeps coins deducted (37)", bAfterApprove.coin_balance === 37, `balance=${bAfterApprove.coin_balance}`);
 const wdDouble = await api("reviewWithdrawal", { token: adminToken, withdrawal_id: wd2.withdrawal.id, decision: "approved" });
 check("double review of withdrawal rejected", wdDouble.ok === false);
 const rewardsAfterWd = await api("getRewards", { token: bToken });

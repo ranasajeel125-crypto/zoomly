@@ -64,11 +64,15 @@ await api("toggleLike", { token: creator.token, post_id: postId });
 inbox = await api("getNotifications", { token: creator.token });
 check("self-like creates no notification", inbox.unread_count === 3, `unread=${inbox.unread_count}`);
 
-// Referral signup notifies the inviter (count-only — no coins involved).
-const referred = await mkUser("ntref", { referral_code: creator.user.referral_code });
+// Referral signup notifies the inviter and pays the +1 coin reward (the
+// referred user gets nothing). The referred signup sends its own device id,
+// like a real client's browser would.
+const referred = await mkUser("ntref", { referral_code: creator.user.referral_code, device_id: `nt-device-${suffix}` });
 inbox = await api("getNotifications", { token: creator.token });
 check("referral-joined notification created", inbox.notifications.some((n) => n.type === "referral" && n.actor?.username === referred.user.username));
-check("referral made no coins for anyone", referred.user.coin_balance === 0 && (await api("getMe", { token: creator.token })).user.coin_balance === 0);
+const refNotif = inbox.notifications.find((n) => n.type === "referral" && n.actor?.username === referred.user.username);
+check("referral notification mentions the +1 coin", Boolean(refNotif) && /\+1 coin/.test(refNotif.text), refNotif?.text);
+check("referral credits inviter +1 coin; referred user gets nothing", referred.user.coin_balance === 0 && (await api("getMe", { token: creator.token })).user.coin_balance === 1);
 
 // Fund the fan (pack 3 = 6000 coins) — the approval itself notifies the fan.
 const tid = `NT-${Date.now()}`;
@@ -104,7 +108,7 @@ const wdRow = adminView.withdrawals.find((w) => w.id === wd.withdrawal.id);
 await api("reviewWithdrawal", { token: adminToken, withdrawal_id: wdRow.id, decision: "rejected" });
 let fanInbox3 = await api("getNotifications", { token: fan.token });
 check("withdrawal rejection notifies (with refund wording)", fanInbox3.notifications.some((n) => n.type === "withdrawal" && /rejected/.test(n.text)));
-const wd2 = await api("requestWithdrawal", { token: fan.token, coins: 50, jazzcash_number: "03001234567" });
+const wd2 = await api("requestWithdrawal", { token: fan.token, coins: 100, jazzcash_number: "03001234567" });
 await api("reviewWithdrawal", { token: adminToken, withdrawal_id: wd2.withdrawal.id, decision: "approved" });
 fanInbox3 = await api("getNotifications", { token: fan.token });
 check("withdrawal approval notifies", fanInbox3.notifications.some((n) => n.type === "withdrawal" && /approved/.test(n.text)));

@@ -18,6 +18,8 @@ export const users = sqliteTable("users", {
   hiddenCount: integer("hidden_count").notNull().default(0), // how many times this user's content was auto-hidden
   referralCode: text("referral_code").notNull().unique(), // e.g. ZOOM-3-ALI
   referredBy: integer("referred_by").references(() => users.id, { onDelete: "set null" }),
+  signupDevice: text("signup_device"), // device id the client sent at signup (anti-self-referral guard); null for older accounts
+  signupIp: text("signup_ip"), // IP the account signed up from (anti-self-referral guard); null for older accounts
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 

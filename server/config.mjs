@@ -13,8 +13,10 @@ export const COIN_PACKS = [
 // client-supplied price is never trusted), with this minimum.
 export const CUSTOM_BUY_MIN_COINS = 10;
 
-// Withdrawals: users cash out coins at 1 coin = Rs.1, with this minimum.
-export const WITHDRAW_MIN_COINS = 10;
+// Withdrawals: users cash out coins at 1 coin = Rs.1, with this minimum
+// (raised 10 -> 100 by the owner 2026-10-23, alongside the referral reward:
+// small balances can no longer be cashed out).
+export const WITHDRAW_MIN_COINS = 100;
 
 // Coin levels, by current coin balance. `min` is the balance at which the
 // level starts. Progress is measured towards the next level's `min`.
@@ -82,10 +84,14 @@ export function googleConfig() {
   return { clientId, clientSecret, configured: Boolean(clientId && clientSecret) };
 }
 
-// Referrals mint NO coins (owner decision 2026-10-23): a referral only
-// links the two accounts so the inviter's referral COUNT goes up. With
-// cash withdrawals in the app, free referral coins would be real money
-// out of the owner's pocket — no code path may credit them.
+// Referral reward (owner decision 2026-10-23, superseding the earlier
+// no-coins rule): the INVITER earns this many coins per completed referral
+// signup, credited once inside applyReferral. The new user still gets NO
+// coins (no welcome bonus). The credit is gated by an anti-self-referral
+// guard (device/IP match — see applyReferral in actions.mjs); the referral
+// COUNT and leaderboard are never gated. Withdrawals stay owner-approved
+// with a 100-coin minimum, which is the house's cash-out checkpoint.
+export const REFERRAL_REWARD_COINS = 1;
 export const LEADERBOARD_LIMIT = 50;
 
 // ---- Live gifts -------------------------------------------------------------

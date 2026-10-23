@@ -154,6 +154,8 @@ try {
   check("Rewards view did NOT crash the app", !t.includes("could not open"));
   check("referral code rendered", t.includes(rewards.my_code));
   check("invite link rendered with ?ref=<code>", t.includes(`/?ref=${rewards.my_code}`));
+  check("referral offer copy rendered (Har referral pe 1 coin)", t.includes("Har referral pe 1 coin — foran aap ke balance me!"));
+  check("withdraw minimum copy rendered as 100 coins (Rs.100)", t.includes("Kam az kam 100 coins (Rs.100)"));
   check("Copy link button rendered", [...document.querySelectorAll("button")].some((b) => (b.textContent || "").includes("Copy link")));
   check("coin balance + level rendered", t.includes("Your coin balance") && t.includes(rewards.level));
   check("all 5 pack prices rendered", rewards.packs.every((p) => t.includes(`Rs.${p.pricePkr.toLocaleString()}`)));

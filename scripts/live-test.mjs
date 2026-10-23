@@ -133,7 +133,7 @@ const viewer = await api("signup", { username: viewerName, display_name: "Live F
 check("viewer signup (with referral)", viewer.ok === true);
 const viewerToken = viewer.token;
 const viewerId = viewer.user.id;
-check("viewer starts with 0 coins (referrals mint no free coins)", viewer.user.coin_balance === 0, `bal=${viewer.user.coin_balance}`);
+check("viewer starts with 0 coins (no free welcome coins)", viewer.user.coin_balance === 0, `bal=${viewer.user.coin_balance}`);
 
 // Fund the viewer properly: coin request for pack 3 (6000 coins) + admin approve.
 const tid = `LIVETID${Date.now()}`;
