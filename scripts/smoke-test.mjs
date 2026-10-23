@@ -233,6 +233,11 @@ const rewards = await api("getRewards", { token: bToken });
 check("rewards ok", rewards.ok === true, JSON.stringify(rewards).slice(0, 200));
 check("jazzcash number shown", rewards.jazzcash?.number === "03266040350", rewards.jazzcash?.number);
 check("5 packs", Array.isArray(rewards.packs) && rewards.packs.length === 5);
+check(
+  "packs are strictly 1 coin = Rs.1 (no bonuses): [100,500,1000,5000,10000]",
+  JSON.stringify((rewards.packs ?? []).map((p) => [p.coins, p.pricePkr])) === JSON.stringify([[100, 100], [500, 500], [1000, 1000], [5000, 5000], [10000, 10000]]),
+  JSON.stringify(rewards.packs),
+);
 check("top_coins <= 50 rows", Array.isArray(rewards.leaderboards?.top_coins) && rewards.leaderboards.top_coins.length <= 50);
 check("top_referrals <= 50 rows", Array.isArray(rewards.leaderboards?.top_referrals) && rewards.leaderboards.top_referrals.length <= 50);
 const topRow = rewards.leaderboards?.top_coins?.[0];

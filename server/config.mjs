@@ -1,11 +1,15 @@
 // Shared configuration for Zoomly: coin packs, coin levels, JazzCash
 // buy-coins display info, and the Cloudinary configuration check.
+// Coin packs are STRICTLY 1 coin = Rs.1 at every size — no bonus packs
+// (owner correction 2026-10-23: the old bonus tiers, e.g. 1,150 coins
+// for Rs.1,000, were wrong). The same flat rate holds for custom buys
+// and for withdrawals, so a coin is worth exactly one rupee everywhere.
 export const COIN_PACKS = [
   { coins: 100, pricePkr: 100 },
-  { coins: 550, pricePkr: 500 },
-  { coins: 1150, pricePkr: 1000 },
-  { coins: 6000, pricePkr: 5000 },
-  { coins: 14000, pricePkr: 10000 },
+  { coins: 500, pricePkr: 500 },
+  { coins: 1000, pricePkr: 1000 },
+  { coins: 5000, pricePkr: 5000 },
+  { coins: 10000, pricePkr: 10000 },
 ];
 
 // Custom coin buy: besides the packs, a user can buy any amount of coins at

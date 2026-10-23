@@ -97,6 +97,11 @@ const rewards = await api("getRewards", { token });
 check("getRewards ok", rewards.ok === true);
 check("payload has my_code", typeof rewards.my_code === "string" && rewards.my_code.startsWith("ZOOM-"));
 check("payload packs have numeric coins + pricePkr", Array.isArray(rewards.packs) && rewards.packs.length === 5 && rewards.packs.every((p) => typeof p.coins === "number" && typeof p.pricePkr === "number"));
+check(
+  "payload packs are strictly 1:1 — coins [100,500,1000,5000,10000] at the same prices (no bonus packs)",
+  JSON.stringify((rewards.packs ?? []).map((p) => p.coins)) === JSON.stringify([100, 500, 1000, 5000, 10000]) && rewards.packs.every((p) => p.coins === p.pricePkr),
+  JSON.stringify(rewards.packs),
+);
 check("payload jazzcash has number + title", typeof rewards.jazzcash?.number === "string" && typeof rewards.jazzcash?.title === "string");
 check("payload my_requests is an array", Array.isArray(rewards.my_requests));
 check("payload leaderboards have both boards", Array.isArray(rewards.leaderboards?.top_coins) && Array.isArray(rewards.leaderboards?.top_referrals));

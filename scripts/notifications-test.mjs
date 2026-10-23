@@ -77,7 +77,7 @@ const refNotif = inbox.notifications.find((n) => n.type === "referral" && n.acto
 check("referral notification mentions the +1 coin", Boolean(refNotif) && /\+1 coin/.test(refNotif.text), refNotif?.text);
 check("referral credits inviter +1 coin; referred user gets nothing", referred.user.coin_balance === 0 && (await api("getMe", { token: creator.token })).user.coin_balance === 1);
 
-// Fund the fan (pack 3 = 6000 coins) — the approval itself notifies the fan.
+// Fund the fan (pack 3 = 5000 coins at the flat 1:1 rate) — the approval itself notifies the fan.
 const tid = `NT-${Date.now()}`;
 await api("requestCoins", { token: fan.token, pack_index: 3, tid });
 const adminReqs = await api("getAdminCoinRequests", { token: adminToken });

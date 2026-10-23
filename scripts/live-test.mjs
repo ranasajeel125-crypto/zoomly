@@ -135,9 +135,10 @@ const viewerToken = viewer.token;
 const viewerId = viewer.user.id;
 check("viewer starts with 0 coins (no free welcome coins)", viewer.user.coin_balance === 0, `bal=${viewer.user.coin_balance}`);
 
-// Fund the viewer properly: coin request for pack 3 (6000 coins) + admin approve.
+// Fund the viewer properly: a custom 6,000-coin request (packs are flat
+// 1:1 now — the biggest pack is 5,000) + admin approve.
 const tid = `LIVETID${Date.now()}`;
-const req = await api("requestCoins", { token: viewerToken, pack_index: 3, tid });
+const req = await api("requestCustomCoins", { token: viewerToken, coins: 6000, tid });
 check("viewer coin request created", req.ok === true, JSON.stringify(req));
 const pending = await api("getAdminCoinRequests", { token: adminToken });
 const myReq = pending.requests?.find((r) => r.tid === tid);

@@ -108,9 +108,11 @@ function connectSocket(token) {
   });
 }
 
-async function fundUser(token, packIndex = 3) {
+async function fundUser(token, coins = 6000) {
   const tid = `MATCHTID${Date.now()}${Math.floor(Math.random() * 1e6)}`;
-  const req = await api("requestCoins", { token, pack_index: packIndex, tid });
+  // Custom amount: packs are flat 1 coin = Rs.1 (max pack 5,000), and the
+  // match gift math below assumes a 6,000-coin float.
+  const req = await api("requestCustomCoins", { token, coins, tid });
   if (!req.ok) throw new Error(`fund request failed: ${JSON.stringify(req)}`);
   const pending = await api("getAdminCoinRequests", { token: adminToken });
   const row = pending.requests?.find((r) => r.tid === tid);

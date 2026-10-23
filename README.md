@@ -34,12 +34,25 @@ deployable on Render's free tier. Same proven stack as the SMM panel.
   exactly matches the inviter's). The new user gets no coins. Profiles
   show referral count and "my referrals".
 - **Coin system** — coin balance per user. The Buy Coins page shows the
-  owner's JazzCash number **03266040350** (Muhammad Sajeel) and 5 packs:
-  100 coins/Rs.100 · 550/Rs.500 · 1,150/Rs.1,000 · 6,000/Rs.5,000 ·
-  14,000/Rs.10,000. The buyer submits the JazzCash **TID** to create a
+  owner's JazzCash number **03266040350** (Muhammad Sajeel) and 5 packs,
+  strictly **1 coin = Rs.1** at every size (no bonus packs):
+  100 coins/Rs.100 · 500/Rs.500 · 1,000/Rs.1,000 · 5,000/Rs.5,000 ·
+  10,000/Rs.10,000 — the same flat rate as custom buys and withdrawals.
+  The buyer submits the JazzCash **TID** to create a
   request (a TID can only be used once — duplicates are rejected). The
   owner reviews requests in the app (Rewards → Owner section): **Approve**
   credits the coins, **Reject** closes the request.
+- **Monetization program** — creators apply from Rewards → **💰 Start
+  Monetization** once they meet the criteria (age **18+** from their
+  application DOB, **5,000 followers**, **50,000 total video views** —
+  the sum of the per-post view counters; a view counts once per viewer).
+  The owner reviews applications in the admin area (form data, computed
+  age, at-apply + current followers/views) and approves or rejects;
+  only **approved** creators can withdraw (the owner is exempt).
+  Withdrawals (min 100 coins, 1 coin = Rs.1) are held at request time
+  and refunded on rejection.
+- **Feed** — For You orders **unseen videos first**: videos the viewer
+  already watched recycle at the very end rather than repeating up top.
 - **Coin levels** (by balance, shown as a badge with a progress bar):
   Starter 0–99 · Bronze 100–499 · Silver 500–1,499 · Golden 1,500–4,999 ·
   Platinum 5,000–13,999 · Diamond 14,000+.
