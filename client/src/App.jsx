@@ -151,6 +151,44 @@ export function inviteLinkFor(code) {
   return `${window.location.origin}/?ref=${encodeURIComponent(code || "")}`;
 }
 
+// A shared video link looks like https://zoomly.onrender.com/?v=<post id>.
+// Opening the app with ?v=<id> returns the id once (and cleans the URL) so
+// the feed can open at that video.
+export function captureSharedPostId() {
+  try {
+    const v = new URLSearchParams(window.location.search).get("v");
+    if (v && /^\d+$/.test(v)) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("v");
+      window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+      return Number(v);
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+// Web Share API when available, clipboard otherwise (used by video Share
+// buttons and profile sharing).
+export async function shareUrl({ url, text }) {
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: "Zoomly", text, url });
+      return "shared";
+    } catch {
+      /* user cancelled */
+      return "cancelled";
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+    return "copied";
+  } catch {
+    return "failed";
+  }
+}
+
 // ---------- auth --------------------------------------------------------------
 
 export function GoogleIcon({ size = 20 }) {
@@ -487,7 +525,7 @@ export function ReportDialog({ targetType, targetId, label, onClose }) {
   );
 }
 
-function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock }) {
+function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, badge }) {
   const videoRef = useRef(null);
   const cardRef = useRef(null);
   // Sound is ON by default; `muted` here is only ever the viewer's own
@@ -499,6 +537,18 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock }
   const [paused, setPaused] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
+  const [shareNote, setShareNote] = useState("");
+
+  async function shareVideo() {
+    const url = `${window.location.origin}/?v=${post.id}`;
+    const result = await shareUrl({ url, text: `Watch “${post.title}” on Zoomly` });
+    if (result === "copied") {
+      setShareNote("Link copied ✓");
+      setTimeout(() => setShareNote(""), 2000);
+    } else if (result === "failed") {
+      window.prompt("Copy this video link:", url);
+    }
+  }
   const mutedRef = useRef(muted);
   mutedRef.current = muted;
 
@@ -597,6 +647,9 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock }
           ▶
         </div>
       )}
+      {badge && (
+        <div style={{ position: "absolute", top: 10, left: 10, background: "rgba(10,10,10,0.78)", color: "#fff", borderRadius: 999, padding: "5px 11px", fontSize: 12.5, fontWeight: 700, zIndex: 4 }}>{badge}</div>
+      )}
       {post.hidden && post.author?.is_me && (
         <div style={{ position: "absolute", top: 10, left: 10, right: 10, background: "rgba(120,53,15,0.92)", color: "#ffd9a8", borderRadius: 10, padding: "8px 10px", fontSize: 13, zIndex: 4 }}>
           ⏳ Ye video reports ki wajah se <strong>review me hai</strong> — abhi sirf tumhe dikh rahi hai.
@@ -643,6 +696,10 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock }
         <button onClick={() => onComment(post)} style={{ background: "none", border: "none", color: "#fff", fontSize: 28, lineHeight: 1 }} aria-label="Comments">
           💬
           <div style={{ fontSize: 13, fontWeight: 700 }}>{post.comment_count}</div>
+        </button>
+        <button onClick={shareVideo} style={{ background: "none", border: "none", color: "#fff", fontSize: 24, lineHeight: 1 }} aria-label="Share video" title="Share video">
+          🔗
+          <div style={{ fontSize: 12, fontWeight: 700 }}>{shareNote || "Share"}</div>
         </button>
         <button onClick={toggleMute} style={{ background: "none", border: "none", color: "#fff", fontSize: 24, lineHeight: 1 }} aria-label="Sound">
           {muted ? "🔇" : "🔊"}
@@ -692,13 +749,25 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock }
   );
 }
 
-function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications }) {
+function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications, sharedPostId }) {
   const [stream, setStream] = useState("foryou");
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [commentPost, setCommentPost] = useState(null);
+  // A video shared via /?v=<id> opens pinned at the top of the feed.
+  const [sharedPost, setSharedPost] = useState(null);
+  const [sharedMissing, setSharedMissing] = useState(false);
   const waking = useWaking();
+
+  useEffect(() => {
+    if (!sharedPostId) return;
+    (async () => {
+      const res = await call("getPost", { post_id: sharedPostId });
+      if (res.ok) setSharedPost(res.post);
+      else setSharedMissing(true);
+    })();
+  }, [sharedPostId]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -717,14 +786,18 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications 
   async function handleLike(post) {
     const res = await call("toggleLike", { post_id: post.id });
     if (res.ok) {
-      setPosts((prev) => prev.map((p) => (p.id === post.id ? { ...p, liked_by_me: res.liked, like_count: res.like_count } : p)));
+      const patch = (p) => (p.id === post.id ? { ...p, liked_by_me: res.liked, like_count: res.like_count } : p);
+      setPosts((prev) => prev.map(patch));
+      setSharedPost((prev) => (prev ? patch(prev) : prev));
     }
   }
 
   async function handleFollow(author) {
     const res = await call("toggleFollow", { user_id: author.id });
     if (res.ok) {
-      setPosts((prev) => prev.map((p) => (p.author?.id === author.id ? { ...p, author: { ...p.author, followed_by_me: res.following } } : p)));
+      const patch = (p) => (p.author?.id === author.id ? { ...p, author: { ...p.author, followed_by_me: res.following } } : p);
+      setPosts((prev) => prev.map(patch));
+      setSharedPost((prev) => (prev ? patch(prev) : prev));
       refreshMe?.();
     }
   }
@@ -790,17 +863,40 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications 
             <p>{stream === "following" ? "Follow some creators and their videos will show up here." : "Be the first to upload a video — tap the + button below."}</p>
           </div>
         )}
-        {posts.map((post) => (
+        {sharedMissing && (
+          <div style={{ padding: 28, textAlign: "center", color: "var(--dim)" }}>
+            <p style={{ fontSize: 18, color: "var(--text)", fontWeight: 700 }}>😕 Shared video available nahi hai</p>
+            <p>Ye video delete ho gayi hai ya abhi review me hai. Baqi videos neeche hain.</p>
+          </div>
+        )}
+        {sharedPost && (
           <VideoCard
-            key={post.id}
-            post={post}
+            key={`shared-${sharedPost.id}`}
+            post={sharedPost}
+            badge="🔗 Shared video"
             onLike={handleLike}
             onFollow={handleFollow}
             onComment={setCommentPost}
             onOpenProfile={onOpenProfile}
-            onBlock={(author) => setPosts((prev) => prev.filter((p) => p.author?.id !== author.id))}
+            onBlock={(author) => {
+              setSharedPost(null);
+              setPosts((prev) => prev.filter((p) => p.author?.id !== author.id));
+            }}
           />
-        ))}
+        )}
+        {posts
+          .filter((p) => p.id !== sharedPost?.id)
+          .map((post) => (
+            <VideoCard
+              key={post.id}
+              post={post}
+              onLike={handleLike}
+              onFollow={handleFollow}
+              onComment={setCommentPost}
+              onOpenProfile={onOpenProfile}
+              onBlock={(author) => setPosts((prev) => prev.filter((p) => p.author?.id !== author.id))}
+            />
+          ))}
       </div>
       {commentPost && (
         <CommentsSheet
@@ -1252,6 +1348,15 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout }) {
           </button>
           <button className="btn" onClick={() => setReportOpen(true)}>
             🚩 Report
+          </button>
+          <button
+            className="btn"
+            onClick={async () => {
+              const r = await shareUrl({ url: `${window.location.origin}/?u=${profile.username}`, text: `@${profile.username} on Zoomly` });
+              if (r === "copied") setNotice("Profile link copied ✓");
+            }}
+          >
+            🔗 Share
           </button>
           {profile.blocked_by_me ? (
             <button className="btn" onClick={handleUnblock}>
@@ -2123,6 +2228,8 @@ export function App() {
   const [googleSetup, setGoogleSetup] = useState(false);
   const [tab, setTab] = useState("feed");
   const [showNotifs, setShowNotifs] = useState(false);
+  const [sharedPostId, setSharedPostId] = useState(null);
+  const [sharedUsername, setSharedUsername] = useState(null);
   const [profileUserId, setProfileUserId] = useState(null);
   const [feedKey, setFeedKey] = useState(0);
   const waking = useWaking();
@@ -2138,6 +2245,21 @@ export function App() {
       // An invite link (?ref=CODE) may have brought the visitor here:
       // stash the code first so the signup flows can apply it.
       captureInviteRef();
+      // A shared video link (?v=<post id>) opens the feed at that video.
+      const sharedId = captureSharedPostId();
+      if (sharedId) setSharedPostId(sharedId);
+      // A shared profile link (?u=<username>) opens that profile.
+      try {
+        const u = new URLSearchParams(window.location.search).get("u");
+        if (u && u.trim()) {
+          setSharedUsername(u.trim().toLowerCase());
+          const url = new URL(window.location.href);
+          url.searchParams.delete("u");
+          window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+        }
+      } catch {
+        /* ignore */
+      }
       // Google sign-in returns through the URL hash: #google-token=<session>
       // for existing accounts, #google-setup for first-time username choice.
       const hash = window.location.hash || "";
@@ -2166,6 +2288,18 @@ export function App() {
     setProfileUserId(userId ?? null);
     setTab("profile");
   }
+
+  // Resolve a shared profile link (?u=<username>) once signed in.
+  useEffect(() => {
+    if (!sharedUsername || !me) return;
+    const wanted = sharedUsername;
+    setSharedUsername(null);
+    (async () => {
+      const res = await call("getPeople", { query: wanted });
+      const match = res.ok ? res.people.find((p) => p.username === wanted) : null;
+      if (match) openProfile(match.id);
+    })();
+  }, [sharedUsername, me]);
 
   async function logout() {
     await call("logout", {});
@@ -2229,7 +2363,7 @@ export function App() {
   return (
     <div style={{ height: "100dvh", display: "flex", flexDirection: "column", maxWidth: 860, margin: "0 auto" }}>
       <div style={{ flex: 1, minHeight: 0, overflowY: tab === "feed" ? "hidden" : "auto" }} className={tab === "feed" ? "" : "no-scrollbar"}>
-        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} onOpenNotifications={() => setShowNotifs(true)} />}
+        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} onOpenNotifications={() => setShowNotifs(true)} sharedPostId={sharedPostId} />}
         {tab === "watch" && <WatchView onOpenProfile={openProfile} />}
         {tab === "live" && <LiveView me={me} refreshMe={refreshMe} onOpenProfile={openProfile} />}
         {tab === "upload" && (

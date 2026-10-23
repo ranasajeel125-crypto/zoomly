@@ -556,6 +556,19 @@ export const Actions = {
     }
   ),
 
+  // Single-post lookup for share deep links (/?v=<id>): respects the same
+  // hidden/block rules as the feed — a hidden or unavailable video returns
+  // a clean failure so the client can show a graceful message.
+  getPost: withValidation(z.object({ token: tokenArg, post_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const post = (await db.select().from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
+    if (!post) return { ok: false, message: "Video not found." };
+    if (post.hidden && post.userId !== user.id) return { ok: false, message: "Ye video abhi available nahi hai (review me hai)." };
+    if (post.userId !== user.id && (await blockExistsBetween(user.id, post.userId))) return { ok: false, message: "Video not available." };
+    return { ok: true, post: (await postDtos([post], user))[0] };
+  }),
+
   createPost: withValidation(
     z.object({
       token: tokenArg,

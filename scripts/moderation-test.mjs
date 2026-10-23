@@ -154,6 +154,10 @@ const rep3 = await api("reportContent", { token: D.token, target_type: "post", t
 check("third distinct report auto-hides", rep3.ok === true && rep3.auto_hidden === true, JSON.stringify(rep3));
 check("hidden post gone from other users' feed", !(await feedHasPost(C.token)));
 check("hidden post still visible to its owner", await feedHasPost(A.token));
+const hiddenGet = await api("getPost", { token: C.token, post_id: postId });
+check("share link (getPost) refuses a hidden video for non-owners", hiddenGet.ok === false, JSON.stringify(hiddenGet));
+const ownerGet = await api("getPost", { token: A.token, post_id: postId });
+check("share link (getPost) still resolves for the owner", ownerGet.ok === true && ownerGet.post?.hidden === true, JSON.stringify(ownerGet).slice(0, 160));
 const ownerFeed = await api("getFeed", { token: A.token, stream: "foryou", limit: 30 });
 check("owner's copy is flagged hidden (under review)", ownerFeed.posts?.find((p) => p.id === postId)?.hidden === true);
 const ownReport = await api("reportContent", { token: A.token, target_type: "post", target_id: postId, reason: "spam" });

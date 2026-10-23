@@ -186,6 +186,13 @@ check("top_coins rows are anonymous (no name/username sent; DP + balance + level
 const topRefRow = rewards.leaderboards?.top_referrals?.[0];
 check("top_referrals rows keep name/username", Boolean(topRefRow) && "username" in topRefRow && "display_name" in topRefRow, JSON.stringify(topRefRow).slice(0, 200));
 
+// Share deep link resolution: getPost returns the post for viewers, and a
+// missing id fails cleanly (the client shows a graceful message).
+const sharedPost = await api("getPost", { token: adminToken, post_id: feedPost.id });
+check("getPost resolves a shared video", sharedPost.ok === true && sharedPost.post?.id === feedPost.id, JSON.stringify(sharedPost).slice(0, 160));
+const missingPost = await api("getPost", { token: adminToken, post_id: 99999999 });
+check("getPost on a missing video fails cleanly", missingPost.ok === false);
+
 // Upload without Cloudinary configured must fail with a clear message
 const form = new FormData();
 form.append("token", bToken);
