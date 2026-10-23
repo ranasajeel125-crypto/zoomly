@@ -97,6 +97,9 @@ function authorDto(user) {
     username: user.username,
     display_name: user.displayName,
     avatar_url: user.avatarUrl ?? null,
+    // Derived from the same admin check as is_admin — never a stored or
+    // user-editable field, so only the owner's account can ever carry it.
+    is_owner: isAdminUser(user),
   };
 }
 

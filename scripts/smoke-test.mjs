@@ -45,12 +45,14 @@ const adminToken = admin.token;
 const adminCode = admin.user.referral_code;
 check("admin has referral code", /^ZOOM-\d+-/.test(adminCode), adminCode);
 check("admin flagged is_admin", admin.user.is_admin === true);
+check("admin flagged is_owner (Official Owner badge source)", admin.user.is_owner === true);
 
 // Signup user B WITH admin's referral code -> linked as a referral, but
 // NO coins are minted for either side (referrals are count-only now).
 const before = (await api("getMe", { token: adminToken })).user.coin_balance;
 const bSignup = await api("signup", { username: userB, display_name: "Test Fan", password: "test-pass-123", referral_code: adminCode });
 check("user B signup with referral", bSignup.ok === true, JSON.stringify(bSignup));
+check("user B is NOT flagged is_owner", bSignup.user.is_owner === false);
 check("user B got NO free welcome coins", bSignup.user.coin_balance === 0, `balance=${bSignup.user.coin_balance}`);
 const bToken = bSignup.token;
 const adminAfter = (await api("getMe", { token: adminToken })).user;
@@ -83,6 +85,7 @@ const feed = await api("getFeed", { token: bToken, stream: "foryou" });
 const feedPost = feed.posts?.find((p) => p.id === postId);
 check("feed returns the post", Boolean(feedPost));
 check("post author has avatar_url field (DP)", feedPost && "avatar_url" in feedPost.author);
+check("feed post author (the owner) carries is_owner", feedPost?.author?.is_owner === true);
 
 // Like + comment + follow from B
 const like = await api("toggleLike", { token: bToken, post_id: postId });
@@ -91,6 +94,7 @@ const comment = await api("addComment", { token: bToken, post_id: postId, body: 
 check("comment works", comment.ok === true && comment.comment?.body === "Nice video!");
 const comments = await api("getComments", { token: bToken, post_id: postId });
 check("comments list returns it", comments.ok === true && comments.comments.length >= 1);
+check("comment author (normal user) is NOT flagged is_owner", comments.comments?.find((c) => c.body === "Nice video!")?.author?.is_owner === false);
 const follow = await api("toggleFollow", { token: bToken, user_id: admin.user.id });
 check("follow works", follow.ok === true && follow.following === true && follow.follower_count >= 1, JSON.stringify(follow));
 const followingFeed = await api("getFeed", { token: bToken, stream: "following" });
@@ -101,6 +105,9 @@ const setDp = await api("setAvatar", { token: bToken, avatar_url: "https://examp
 check("setAvatar ok", setDp.ok === true && setDp.user.avatar_url === "https://example.com/dp.jpg", JSON.stringify(setDp));
 const bProfile = await api("getProfile", { token: bToken, user_id: bLogin.user.id });
 check("profile shows DP", bProfile.profile?.avatar_url === "https://example.com/dp.jpg");
+check("normal user profile is NOT flagged is_owner", bProfile.profile?.is_owner === false);
+const adminProfile = await api("getProfile", { token: bToken, user_id: admin.user.id });
+check("owner profile payload carries is_owner", adminProfile.profile?.is_owner === true);
 
 // Coin request: pack 0 = 100 coins / Rs.100
 const tid = `TID${Date.now()}`;

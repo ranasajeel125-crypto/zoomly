@@ -294,6 +294,48 @@ try {
   check(`remembered-tab flow completed (${err.message})`, false);
 }
 
+// ---- 5. owner badge: only the owner's (admin) account carries it -------------
+// The server derives is_owner from the same ADMIN_USERNAME check as admin
+// rights; the client renders a "👑 Official Owner" pill on the profile of a
+// user whose payload has it. A normal user's profile must never show it.
+try {
+  const adminName = (process.env.ADMIN_USERNAME || "sajeel").toLowerCase();
+  let owner = await api("signup", { username: adminName, display_name: "Zoomly Owner", password: "test-pass-123" });
+  if (!owner.ok) owner = await api("login", { username: adminName, password: "test-pass-123" });
+  check("owner (admin) account available for the badge scenario", owner.ok === true, JSON.stringify(owner).slice(0, 200));
+  check("owner payload carries is_owner === true", owner.user?.is_owner === true);
+  check("normal user payload carries is_owner === false", signup.user?.is_owner === false);
+  const ownerProfile = await api("getProfile", { token, user_id: owner.user.id });
+  check("owner profile payload carries is_owner === true", ownerProfile.profile?.is_owner === true);
+  const myProfile = await api("getProfile", { token, user_id: signup.user.id });
+  check("normal profile payload carries is_owner === false", myProfile.profile?.is_owner === false);
+
+  // Render as the normal user: People -> owner's row -> profile shows badge.
+  const dG = bootTab({});
+  const docG = dG.window.document;
+  await waitFor("shell for the badge scenario", () => [...docG.querySelectorAll("nav button")].some((b) => (b.textContent || "").includes("People")) || crashed(docG));
+  const peopleBtn = [...docG.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("People"));
+  check("People nav button found (badge scenario)", Boolean(peopleBtn));
+  peopleBtn.dispatchEvent(new dG.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await waitFor("owner row in People", () => [...docG.querySelectorAll("button")].some((b) => (b.textContent || "").includes(`@${adminName}`)) || crashed(docG));
+  check("owner row in People carries the 👑 Owner tag", [...docG.querySelectorAll("button")].some((b) => (b.textContent || "").includes(`@${adminName}`) && (b.textContent || "").includes("👑 Owner")));
+  const ownerRowBtn = [...docG.querySelectorAll("button")].find((b) => (b.textContent || "").includes(`@${adminName}`));
+  ownerRowBtn.dispatchEvent(new dG.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await waitFor("owner badge on the profile", () => tabText(docG).includes("Official Owner") || crashed(docG));
+  check("owner profile renders the 👑 Official Owner badge", tabText(docG).includes("👑 Official Owner") && !crashed(docG));
+
+  // The normal user's OWN profile must NOT show the badge.
+  const profileBtn = [...docG.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("Profile"));
+  check("Profile nav button found (badge scenario)", Boolean(profileBtn));
+  profileBtn.dispatchEvent(new dG.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await waitFor("own profile view", () => tabText(docG).includes(`@${username}`) && tabText(docG).includes("ID #"));
+  await sleep(800);
+  check("normal user's own profile has NO owner badge", !tabText(docG).includes("Official Owner") && !tabText(docG).includes("👑 Owner"));
+  dG.window.close();
+} catch (err) {
+  check(`owner-badge flow completed (${err.message})`, false);
+}
+
 if (failures > 0 || jsdomError) {
   console.log(`\nREWARDS RENDER CHECK FAILED ✗ (${failures} failures)`);
   process.exit(1);

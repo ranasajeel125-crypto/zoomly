@@ -79,6 +79,29 @@ export function LevelBadge({ level }) {
   );
 }
 
+// Shown only for the owner's account: the server sets `is_owner` from the
+// admin check, so no user can fake or earn this badge.
+export function OwnerBadge({ user, full = false }) {
+  if (!user?.is_owner) return null;
+  return (
+    <span
+      className="chip"
+      title="Zoomly ke official owner"
+      style={{
+        background: "linear-gradient(90deg, #bef264, #84cc16)",
+        color: "#1c2a05",
+        borderColor: "transparent",
+        padding: "2px 8px",
+        fontSize: 12,
+        fontWeight: 800,
+        whiteSpace: "nowrap",
+      }}
+    >
+      👑 {full ? "Official Owner" : "Owner"}
+    </span>
+  );
+}
+
 function timeAgo(ts) {
   const s = Math.max(1, Math.floor((Date.now() - ts) / 1000));
   if (s < 60) return "just now";
@@ -497,7 +520,7 @@ function CommentsSheet({ post, onClose, onAdded }) {
               <Avatar user={c.author} size={34} />
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 13 }}>
-                  <strong>{c.author.display_name}</strong> <span style={{ color: "var(--dim)" }}>@{c.author.username} · {timeAgo(c.created_at)}</span>
+                  <strong>{c.author.display_name}</strong> <OwnerBadge user={c.author} /> <span style={{ color: "var(--dim)" }}>@{c.author.username} · {timeAgo(c.created_at)}</span>
                 </div>
                 <div style={{ fontSize: 15 }}>{c.body}</div>
               </div>
@@ -804,7 +827,8 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
       <div style={{ position: "absolute", left: 12, right: 84, bottom: 86, color: "#fff", textShadow: "0 1px 6px rgba(0,0,0,0.8)" }}>
         <button onClick={() => onOpenProfile(post.author.id)} style={{ background: "none", border: "none", color: "#fff", padding: 0, fontWeight: 800, fontSize: 16 }}>
           @{post.author?.username}
-        </button>
+        </button>{" "}
+        <OwnerBadge user={post.author} />
         <div style={{ fontWeight: 700, marginTop: 2 }}>{post.title}</div>
         {post.description && <div style={{ fontSize: 14, opacity: 0.9 }}>{post.description}</div>}
         <div style={{ fontSize: 12, opacity: 0.75, marginTop: 2 }}>{timeAgo(post.created_at)}</div>
@@ -887,7 +911,7 @@ export function StoryViewer({ groups, startAuthorId, me, onClose, onChanged }) {
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px" }}>
         <Avatar user={group.author} size={36} />
         <div style={{ flex: 1, color: "#fff" }}>
-          <strong>{group.author?.display_name}</strong>{" "}
+          <strong>{group.author?.display_name}</strong> <OwnerBadge user={group.author} />{" "}
           <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 13 }}>
             @{group.author?.username} · {timeAgo(story.created_at)}
           </span>
@@ -1585,7 +1609,7 @@ function PeopleView({ me, onOpenProfile, refreshMe, onMessage, onOpenInbox }) {
               <Avatar user={person} size={46} />
               <span style={{ minWidth: 0 }}>
                 <span style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700 }}>
-                  {person.display_name} <LevelBadge level={person.level} />
+                  {person.display_name} <LevelBadge level={person.level} /> <OwnerBadge user={person} />
                 </span>
                 <span style={{ display: "block", color: "var(--dim)", fontSize: 13 }}>
                   @{person.username} · ID #{person.id} · {person.follower_count} followers
@@ -1797,6 +1821,7 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <span style={{ fontSize: 20, fontWeight: 800 }}>{profile.display_name}</span>
             <LevelBadge level={profile.level} />
+            <OwnerBadge user={profile} full />
           </div>
           <div style={{ color: "var(--dim)", fontSize: 14 }}>
             @{profile.username} · ID #{profile.id}
@@ -1926,7 +1951,7 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
         <StoryViewer
           groups={[
             {
-              author: { id: profile.id, username: profile.username, display_name: profile.display_name, avatar_url: profile.avatar_url },
+              author: { id: profile.id, username: profile.username, display_name: profile.display_name, avatar_url: profile.avatar_url, is_owner: profile.is_owner },
               stories: data.stories,
               has_unseen: data.stories.some((s) => !s.seen_by_me),
             },

@@ -21,7 +21,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { call } from "./api";
 import { logSelectedCandidatePair, openLiveSocket, peerConnectionConfig, setIceServers } from "./live";
 import { setViewerMuted, viewerMuted } from "./sound";
-import { Avatar, Notice, ReportDialog } from "./App.jsx";
+import { Avatar, Notice, OwnerBadge, ReportDialog } from "./App.jsx";
 
 const ENDED_TEXT = "This live has ended.";
 
@@ -437,7 +437,7 @@ function LiveList({ me, onGoLive, onWatch, onOpenProfile }) {
                 <strong style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{live.title}</strong>
               </div>
               <div style={{ color: "var(--dim)", fontSize: 13, marginTop: 3 }}>
-                {live.broadcaster?.display_name} (@{live.broadcaster?.username}) · 👀 {live.viewer_count} watching
+                {live.broadcaster?.display_name} <OwnerBadge user={live.broadcaster} /> (@{live.broadcaster?.username}) · 👀 {live.viewer_count} watching
                 {live.in_match ? " · ⚔️ PK Match chal raha hai" : ""}
                 {live.hidden ? " · ⏳ review me hai (sirf tumhe dikh raha hai)" : ""}
               </div>
@@ -1044,7 +1044,7 @@ function BroadcastRoom({ me, session, stream, onDone }) {
               <div key={l.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <Avatar user={l.broadcaster} size={34} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <strong style={{ fontSize: 14, color: "#fff" }}>@{l.broadcaster?.username}</strong>
+                  <strong style={{ fontSize: 14, color: "#fff" }}>@{l.broadcaster?.username}</strong> <OwnerBadge user={l.broadcaster} />
                   <div style={{ color: "rgba(255,255,255,0.65)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.title}</div>
                 </div>
                 <button className="btn btn-primary btn-small" onClick={() => sendInvite(l)}>
@@ -1614,6 +1614,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
           <span style={{ fontSize: 14, color: "#fff", textShadow: "0 1px 4px rgba(0,0,0,0.9)" }}>
             {broadcaster?.display_name} <span style={{ color: "rgba(255,255,255,0.7)" }}>@{broadcaster?.username}</span>
           </span>
+          <OwnerBadge user={broadcaster} />
           {!detail?.is_mine && broadcaster?.id && (
             <button
               type="button"

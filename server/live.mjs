@@ -66,7 +66,7 @@ import crypto from "node:crypto";
 import { and, eq, isNull, or, sql } from "drizzle-orm";
 import { db } from "./db.mjs";
 import * as schema from "./schema.mjs";
-import { MATCH_DURATION_MS, MATCH_INVITE_TTL_MS, findBannedContent } from "./config.mjs";
+import { MATCH_DURATION_MS, MATCH_INVITE_TTL_MS, findBannedContent, isAdminUser } from "./config.mjs";
 
 const AUTH_TIMEOUT_MS = 10_000;
 const MAX_CHAT_CHARS = 500;
@@ -83,7 +83,7 @@ function roomFor(sessionId) {
 }
 
 function publicUser(user) {
-  return { id: user.id, username: user.username, display_name: user.displayName, avatar_url: user.avatarUrl ?? null };
+  return { id: user.id, username: user.username, display_name: user.displayName, avatar_url: user.avatarUrl ?? null, is_owner: isAdminUser(user) };
 }
 
 function send(conn, obj) {
