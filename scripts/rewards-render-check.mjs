@@ -135,7 +135,7 @@ try {
   check("no 'Rs.undefined' anywhere", !t.includes("Rs.undefined"));
   check("JazzCash number rendered", t.includes(rewards.jazzcash.number));
   check("leaderboard rendered", t.includes("Leaderboard") && t.includes("Top Coins") && t.includes("Top Referrals"));
-  check("Top Coins board renders anonymously (ID # shown, own @username absent)", t.includes("ID #") && !t.includes(`@${me.username}`), `username=@${me.username}`);
+  check("Top Coins board renders anonymously (ID # shown, own @username absent)", t.includes("ID #") && !t.includes(`@${username}`), `username=@${username}`);
   // Switch to the Top Referrals board and confirm it renders too.
   const refBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "") === "Top Referrals");
   if (refBtn) {
