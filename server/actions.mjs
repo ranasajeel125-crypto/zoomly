@@ -718,7 +718,11 @@ export const Actions = {
     const rows = await db.select().from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1);
     const post = rows[0];
     if (!post) return { ok: false, message: "Video not found." };
-    if (post.userId !== user.id) return { ok: false, message: "You can only delete your own videos." };
+    // The post's owner can always delete it; the app owner (admin) can
+    // delete ANY user's video — same cleanup as the moderation
+    // delete_content path (row removed, Cloudinary asset destroyed,
+    // comments/likes go with the row).
+    if (post.userId !== user.id && !isAdminUser(user)) return { ok: false, message: "You can only delete your own videos." };
     await db.delete(schema.posts).where(eq(schema.posts.id, post.id));
     if (post.videoPublicId) await destroyFromCloudinary(post.videoPublicId, "video");
     return { ok: true, message: "Video deleted." };

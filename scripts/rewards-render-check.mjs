@@ -478,6 +478,73 @@ try {
   check(`owner-badge flow completed (${err.message})`, false);
 }
 
+// ---- 6. owner delete: only the owner sees (and can use) the control -------
+// The app owner gets a delete affordance on OTHER users' videos (feed
+// card menu, Watch player, profile tiles); nobody else does. Server
+// enforcement lives in the smoke suite; here we verify the render side
+// and the full click-through (confirm stubbed to "yes").
+try {
+  const adminName6 = (process.env.ADMIN_USERNAME || "sajeel").toLowerCase();
+  let owner6 = await api("signup", { username: adminName6, display_name: "Zoomly Owner", password: "test-pass-123" });
+  if (!owner6.ok) owner6 = await api("login", { username: adminName6, password: "test-pass-123" });
+  check("owner account available for the delete scenario", owner6.ok === true);
+  const bootAs = (tok) => {
+    const d = new JSDOM(indexHtml, {
+      url: `${BASE}/`,
+      runScripts: "dangerously",
+      pretendToBeVisual: true,
+      beforeParse(window) {
+        window.fetch = (u, o = {}) => {
+          const { signal, ...rest } = o;
+          return fetch(new URL(u, BASE), rest);
+        };
+        window.IntersectionObserver = class {
+          observe() {}
+          unobserve() {}
+          disconnect() {}
+        };
+        window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+        window.HTMLMediaElement.prototype.pause = () => {};
+        window.HTMLMediaElement.prototype.load = () => {};
+        window.scrollTo = () => {};
+        window.confirm = () => true;
+        window.localStorage.setItem("zoomly_token", tok);
+      },
+    });
+    d.window.eval(bundle);
+    return d;
+  };
+  const clickIn = (win, el) => el?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }));
+  const findCard = (doc, text) => [...doc.querySelectorAll(".feed-item")].find((c) => (c.textContent || "").includes(text));
+
+  // Normal user: open the ⋯ menu on a card — no owner delete anywhere.
+  const dN = bootAs(token);
+  const docN = dN.window.document;
+  await waitFor("normal-user feed (delete scenario)", () => Boolean(findCard(docN, "Short caption post")) || crashed(docN));
+  clickIn(dN.window, findCard(docN, "Short caption post")?.querySelector('button[aria-label="More options"]'));
+  await sleep(500);
+  check("normal user sees NO owner delete control", !docN.querySelector("[data-admin-delete]"));
+  dN.window.close();
+
+  // Owner: the delete control appears in the same card's menu, and using
+  // it removes the video from the feed immediately (and server-side).
+  const dO = bootAs(owner6.token);
+  const docO = dO.window.document;
+  await waitFor("owner feed (delete scenario)", () => Boolean(findCard(docO, "Short caption post")) || crashed(docO));
+  check("owner feed shows the other user's post", Boolean(findCard(docO, "Short caption post")));
+  clickIn(dO.window, findCard(docO, "Short caption post")?.querySelector('button[aria-label="More options"]'));
+  await waitFor("owner delete control appears", () => Boolean(docO.querySelector("[data-admin-delete]")) || crashed(docO));
+  check("owner sees the delete control on another user's video", Boolean(docO.querySelector("[data-admin-delete]")));
+  clickIn(dO.window, docO.querySelector("[data-admin-delete]"));
+  await waitFor("card removed after owner delete", () => !findCard(docO, "Short caption post"));
+  check("owner delete removes the video from the feed at once", !findCard(docO, "Short caption post"));
+  dO.window.close();
+  const afterDel = await api("getFeed", { token, stream: "foryou" });
+  check("owner-deleted video is gone from the server feed too", !(afterDel.posts || []).some((p) => (p.title || "").includes("Short caption post")));
+} catch (err) {
+  check(`owner-delete render flow completed (${err.message})`, false);
+}
+
 if (failures > 0 || jsdomError) {
   console.log(`\nREWARDS RENDER CHECK FAILED ✗ (${failures} failures)`);
   process.exit(1);

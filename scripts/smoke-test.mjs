@@ -238,6 +238,26 @@ if (health.media_configured) {
   check("upload blocked with clear message when Cloudinary unconfigured", up.ok === false && /not configured/i.test(up.message || ""), JSON.stringify(up));
 }
 
+// Owner moderation delete: a normal user CANNOT delete someone else's
+// video, but the app owner (admin) can delete ANY user's video — and it
+// disappears from everyone's feed.
+const bPost = await api("createPost", { token: bToken, title: "B's own video", video_url: "https://example.com/b.mp4" });
+check("user B creates a post (for the owner-delete checks)", bPost.ok === true, JSON.stringify(bPost).slice(0, 160));
+const bPostId = bPost.post?.id;
+const cDel = await api("deletePost", { token: cSignup.token, post_id: bPostId });
+check("non-owner cannot delete another user's video", cDel.ok === false, JSON.stringify(cDel));
+const feedAfterCDel = await api("getFeed", { token: bToken, stream: "foryou" });
+check("video still in the feed after the rejected delete", feedAfterCDel.posts?.some((p) => p.id === bPostId) === true);
+const adminDel = await api("deletePost", { token: adminToken, post_id: bPostId });
+check("owner (admin) can delete another user's video", adminDel.ok === true, JSON.stringify(adminDel));
+const feedAfterAdminDel = await api("getFeed", { token: bToken, stream: "foryou" });
+check("owner-deleted video is gone from the feed for everyone", feedAfterAdminDel.posts?.some((p) => p.id === bPostId) === false);
+const gonePost = await api("getPost", { token: bToken, post_id: bPostId });
+check("owner-deleted video no longer resolves via getPost", gonePost.ok === false);
+const bPost2 = await api("createPost", { token: bToken, title: "B deletes this one herself", video_url: "https://example.com/b2.mp4" });
+const bDelOwn = await api("deletePost", { token: bToken, post_id: bPost2.post?.id });
+check("a user can still delete their OWN video (original path)", bDelOwn.ok === true);
+
 // Cleanup: delete the smoke post
 const del = await api("deletePost", { token: adminToken, post_id: postId });
 check("delete own post", del.ok === true);

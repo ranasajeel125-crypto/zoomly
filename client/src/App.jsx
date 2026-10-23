@@ -716,7 +716,7 @@ function CaptionBlock({ title, description }) {
   );
 }
 
-function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, badge }) {
+function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, badge, canModerate, onDelete }) {
   const videoRef = useRef(null);
   const cardRef = useRef(null);
   // Sound is ON by default; `muted` here is only ever the viewer's own
@@ -985,6 +985,20 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
                   }}
                 >
                   🚫 Block @{post.author?.username}
+                </button>
+              )}
+              {canModerate && post.author && !post.author.is_me && (
+                <button
+                  className="btn btn-small"
+                  data-admin-delete=""
+                  onClick={async () => {
+                    setMenuOpen(false);
+                    if (!window.confirm("Ye video delete kar dein?")) return;
+                    const res = await call("deletePost", { post_id: post.id });
+                    if (res.ok) onDelete?.(post);
+                  }}
+                >
+                  🗑 Delete video (Owner)
                 </button>
               )}
             </div>
@@ -1267,6 +1281,13 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
     }
   }
 
+  // Owner moderation: a video the owner deleted (from the card menu)
+  // disappears from the feed at once.
+  function handleDeleted(post) {
+    setPosts((prev) => prev.filter((p) => p.id !== post.id));
+    setSharedPost((prev) => (prev && prev.id === post.id ? null : prev));
+  }
+
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px 0" }}>
@@ -1353,6 +1374,8 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
               setSharedPost(null);
               setPosts((prev) => prev.filter((p) => p.author?.id !== author.id));
             }}
+            canModerate={me?.is_owner === true}
+            onDelete={handleDeleted}
           />
         )}
         {posts
@@ -1366,6 +1389,8 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
               onComment={setCommentPost}
               onOpenProfile={onOpenProfile}
               onBlock={(author) => setPosts((prev) => prev.filter((p) => p.author?.id !== author.id))}
+              canModerate={me?.is_owner === true}
+              onDelete={handleDeleted}
             />
           ))}
       </div>
@@ -1406,6 +1431,17 @@ function WatchView({ me, onOpenProfile }) {
     if (res.ok) {
       setPosts((prev) => prev.map((p) => (p.id === post.id ? { ...p, liked_by_me: res.liked, like_count: res.like_count } : p)));
       setPlaying((cur) => (cur && cur.id === post.id ? { ...cur, liked_by_me: res.liked, like_count: res.like_count } : cur));
+    }
+  }
+
+  // Owner moderation: the app owner can delete any video from here too
+  // (the server enforces the admin right on deletePost).
+  async function handleAdminDelete(post) {
+    if (!window.confirm("Ye video delete kar dein?")) return;
+    const res = await call("deletePost", { post_id: post.id });
+    if (res.ok) {
+      setPosts((prev) => prev.filter((p) => p.id !== post.id));
+      setPlaying((cur) => (cur && cur.id === post.id ? null : cur));
     }
   }
 
@@ -1472,6 +1508,11 @@ function WatchView({ me, onOpenProfile }) {
               <button className="btn" onClick={() => setCommentPost(playing)}>
                 💬 {playing.comment_count} Comments
               </button>
+              {me?.is_owner === true && !playing.author?.is_me && (
+                <button className="btn" data-admin-delete="" onClick={() => handleAdminDelete(playing)} style={{ color: "#ff9a8a" }}>
+                  🗑 Delete video (Owner)
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -1966,6 +2007,14 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
     if (res.ok) load();
   }
 
+  // Owner moderation: on someone else's profile the app owner gets a
+  // delete button on every video too (server enforces the admin right).
+  async function handleAdminDelete(post) {
+    if (!window.confirm("Ye video delete kar dein?")) return;
+    const res = await call("deletePost", { post_id: post.id });
+    if (res.ok) load();
+  }
+
   if (loading) return <p style={{ padding: 20, color: "var(--dim)" }}>Loading profile…</p>;
   if (!data) return <p style={{ padding: 20, color: "var(--dim)" }}>Profile not found.</p>;
   const profile = data.profile;
@@ -2161,6 +2210,11 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
             </div>
             {isMe && (
               <button onClick={() => handleDelete(post)} style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.65)", color: "#ff9a8a", border: "1px solid rgba(255,255,255,0.25)", borderRadius: 8, fontSize: 12, padding: "3px 7px" }}>
+                Delete
+              </button>
+            )}
+            {!isMe && me?.is_owner === true && (
+              <button data-admin-delete="" onClick={() => handleAdminDelete(post)} style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.65)", color: "#ff9a8a", border: "1px solid rgba(255,255,255,0.25)", borderRadius: 8, fontSize: 12, padding: "3px 7px" }}>
                 Delete
               </button>
             )}
