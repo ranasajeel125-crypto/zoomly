@@ -40,6 +40,17 @@ export const posts = sqliteTable("posts", {
   title: text("title").notNull(),
   description: text("description").notNull().default(""),
   hidden: integer("hidden").notNull().default(0), // 1 = auto-hidden by reports / owner moderation (owner still sees it)
+  viewCount: integer("view_count").notNull().default(0), // distinct viewers who played this video (see post_views)
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+// One row per (post, viewer): a video's view_count counts each signed-in
+// viewer once, so the monetization "total views" number can't be inflated
+// by replaying your own (or a friend's) video on a loop.
+export const postViews = sqliteTable("post_views", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  postId: integer("post_id").notNull().references(() => posts.id, { onDelete: "cascade" }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
@@ -91,6 +102,27 @@ export const withdrawalRequests = sqliteTable("withdrawal_requests", {
   amountPkr: integer("amount_pkr").notNull(),
   jazzcashNumber: text("jazzcash_number").notNull(),
   accountTitle: text("account_title").notNull().default(""),
+  status: text("status", { enum: ["pending", "approved", "rejected"] }).notNull().default("pending"),
+  reviewedBy: integer("reviewed_by").references(() => users.id),
+  decidedAt: integer("decided_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+// A monetization application. The creator submits full name + date of
+// birth + JazzCash number from the Monetization screen once they meet the
+// followers/views criteria; the owner approves or rejects. DOB lives here
+// (the age criterion reads the LATEST application's dob; it can only be
+// changed by applying again after a rejection). followers/views are
+// snapshotted at apply time for the owner's review; approval is what
+// unlocks withdrawals (see requestWithdrawal).
+export const monetizationApplications = sqliteTable("monetization_applications", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  fullName: text("full_name").notNull(),
+  dob: text("dob").notNull(), // "YYYY-MM-DD", validated server-side; age is always computed, never stored
+  jazzcashNumber: text("jazzcash_number").notNull(),
+  followersSnapshot: integer("followers_snapshot").notNull().default(0),
+  viewsSnapshot: integer("views_snapshot").notNull().default(0),
   status: text("status", { enum: ["pending", "approved", "rejected"] }).notNull().default("pending"),
   reviewedBy: integer("reviewed_by").references(() => users.id),
   decidedAt: integer("decided_at", { mode: "timestamp_ms" }),

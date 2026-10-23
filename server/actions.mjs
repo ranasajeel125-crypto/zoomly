@@ -9,6 +9,7 @@ import * as schema from "./schema.mjs";
 import {
   COIN_PACKS,
   CUSTOM_BUY_MIN_COINS,
+  MONETIZATION_CRITERIA,
   WITHDRAW_MIN_COINS,
   GIFT_CATALOG,
   iceServers,
@@ -277,6 +278,91 @@ async function followCounts(userId) {
   return { followers: followers[0]?.count ?? 0, following: following[0]?.count ?? 0 };
 }
 
+// ---- Monetization program ---------------------------------------------------
+// Age is ALWAYS computed server-side from a stored "YYYY-MM-DD" date of
+// birth — never trusted from the client. parseDob returns { dob, age } or
+// null for anything that isn't a real calendar date, lies in the future,
+// or implies an implausible age (> 100).
+function parseDob(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value ?? "").trim());
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  if (dt.getUTCFullYear() !== year || dt.getUTCMonth() !== month - 1 || dt.getUTCDate() !== day) return null; // e.g. Feb 30
+  const now = new Date();
+  const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  if (dt.getTime() > todayUtc) return null; // not born yet
+  let age = now.getUTCFullYear() - year;
+  const monthDiff = now.getUTCMonth() - (month - 1);
+  if (monthDiff < 0 || (monthDiff === 0 && now.getUTCDate() < day)) age -= 1;
+  if (age < 0 || age > 100) return null;
+  return { dob: `${m[1]}-${m[2]}-${m[3]}`, age };
+}
+
+function ageFromDob(dob) {
+  return parseDob(dob)?.age ?? null;
+}
+
+// Total video views for the criteria: the sum of the per-post view
+// counters (distinct viewers per post — see recordPostView) over ALL of
+// the user's posts.
+async function totalVideoViews(userId) {
+  const rows = await db
+    .select({ total: sql`coalesce(sum(${schema.posts.viewCount}), 0)`.mapWith(Number) })
+    .from(schema.posts)
+    .where(eq(schema.posts.userId, userId));
+  return rows[0]?.total ?? 0;
+}
+
+function monetizationApplicationDto(a) {
+  if (!a) return null;
+  return {
+    id: a.id,
+    status: a.status,
+    full_name: a.fullName,
+    dob: a.dob,
+    jazzcash_number: a.jazzcashNumber,
+    followers_snapshot: a.followersSnapshot,
+    views_snapshot: a.viewsSnapshot,
+    created_at: a.createdAt.getTime(),
+    decided_at: a.decidedAt ? a.decidedAt.getTime() : null,
+  };
+}
+
+// The single source of truth for a user's monetization state: live
+// criteria progress + the LATEST application (the state machine is
+// none -> pending -> approved | rejected; a rejected user may apply
+// again, which simply writes a newer row). `monetized` (an approved
+// application) is what unlocks withdrawals — meeting the criteria alone
+// only unlocks applying.
+async function monetizationStatus(user) {
+  const fc = await followCounts(user.id);
+  const views = await totalVideoViews(user.id);
+  const apps = await db
+    .select()
+    .from(schema.monetizationApplications)
+    .where(eq(schema.monetizationApplications.userId, user.id))
+    .orderBy(desc(schema.monetizationApplications.createdAt), desc(schema.monetizationApplications.id))
+    .limit(1);
+  const latest = apps[0] ?? null;
+  const age = latest ? ageFromDob(latest.dob) : null;
+  const criteria = {
+    age: { required: MONETIZATION_CRITERIA.minAge, current: age, met: age !== null && age >= MONETIZATION_CRITERIA.minAge, dob: latest?.dob ?? null },
+    followers: { required: MONETIZATION_CRITERIA.minFollowers, current: fc.followers, met: fc.followers >= MONETIZATION_CRITERIA.minFollowers },
+    views: { required: MONETIZATION_CRITERIA.minViews, current: views, met: views >= MONETIZATION_CRITERIA.minViews },
+  };
+  const monetized = latest?.status === "approved";
+  const pending = latest?.status === "pending";
+  return {
+    criteria,
+    can_apply: criteria.followers.met && criteria.views.met && !pending && !monetized,
+    monetized,
+    application: monetizationApplicationDto(latest),
+  };
+}
+
 async function meDto(user) {
   const counts = await referralCounts();
   const fc = await followCounts(user.id);
@@ -325,6 +411,7 @@ async function postDtos(postRows, viewer) {
     thumbnail_url: p.thumbnailUrl ?? null,
     created_at: p.createdAt.getTime(),
     hidden: Boolean(p.hidden),
+    view_count: p.viewCount ?? 0,
     like_count: likeMap.get(p.id) ?? 0,
     comment_count: commentMap.get(p.id) ?? 0,
     liked_by_me: likedSet.has(p.id),
@@ -687,6 +774,25 @@ export const Actions = {
     return { ok: true, post: (await postDtos([post], user))[0] };
   }),
 
+  // Records that `user` watched a video. A view counts ONCE per viewer
+  // per post (post_views UNIQUE) and never for the post's own author, so
+  // the monetization "total views" total is real audience, not replays.
+  recordPostView: withValidation(z.object({ token: tokenArg, post_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const post = (await db.select({ id: schema.posts.id, userId: schema.posts.userId, viewCount: schema.posts.viewCount }).from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
+    if (!post) return { ok: false, message: "Video not found." };
+    if (post.userId === user.id) return { ok: true, view_count: post.viewCount ?? 0, counted: false };
+    const inserted = await db.insert(schema.postViews).values({ userId: user.id, postId: post.id }).onConflictDoNothing().returning({ id: schema.postViews.id });
+    if (inserted.length === 0) return { ok: true, view_count: post.viewCount ?? 0, counted: false };
+    const updated = await db
+      .update(schema.posts)
+      .set({ viewCount: sql`${schema.posts.viewCount} + 1` })
+      .where(eq(schema.posts.id, post.id))
+      .returning({ viewCount: schema.posts.viewCount });
+    return { ok: true, view_count: updated[0]?.viewCount ?? (post.viewCount ?? 0) + 1, counted: true };
+  }),
+
   createPost: withValidation(
     z.object({
       token: tokenArg,
@@ -901,6 +1007,7 @@ export const Actions = {
     const myWithdrawals = await db.select().from(schema.withdrawalRequests).where(eq(schema.withdrawalRequests.userId, user.id)).orderBy(desc(schema.withdrawalRequests.createdAt)).limit(20);
     return {
       ok: true,
+      monetization: await monetizationStatus(user),
       my_code: user.referralCode,
       has_claimed_referral: Boolean(user.referredBy),
       coin_balance: user.coinBalance,
@@ -927,6 +1034,59 @@ export const Actions = {
       },
     };
   }),
+
+  // Monetization screen payload: criteria progress + application state.
+  getMonetization: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    return { ok: true, monetization: await monetizationStatus(user) };
+  }),
+
+  // Creator applies for monetization. Server-side gates, in order: not
+  // already monetized, no application already pending, followers + views
+  // criteria met, a plausible DOB that makes them 18+, and a valid
+  // JazzCash number. On success a PENDING application is written with the
+  // followers/views snapshot; the owner decides (reviewMonetization…).
+  applyForMonetization: withValidation(
+    z.object({
+      token: tokenArg,
+      full_name: z.string().trim().min(3).max(80),
+      dob: z.string().trim().min(8).max(10),
+      jazzcash_number: z.string().trim().min(10).max(15),
+    }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      const status = await monetizationStatus(user);
+      if (status.monetized) return { ok: false, message: "Aap pehle se monetized hain ✅ — dobara apply karne ki zaroorat nahi." };
+      if (status.application?.status === "pending") return { ok: false, message: "Tumhari application pehle se review me hai ⏳ — owner ke faislay ka intezar karein." };
+      const missing = [];
+      if (!status.criteria.followers.met) missing.push(`Followers ${status.criteria.followers.current}/${status.criteria.followers.required}`);
+      if (!status.criteria.views.met) missing.push(`Video views ${status.criteria.views.current}/${status.criteria.views.required}`);
+      if (missing.length > 0) return { ok: false, message: `Pehle monetization criteria pura karein: ${missing.join(", ")}.` };
+      if (!/^0\d{10}$/.test(args.jazzcash_number)) return { ok: false, message: "Sahi JazzCash number likhein (11 digits, 03 se shuru)." };
+      const parsed = parseDob(args.dob);
+      if (!parsed) return { ok: false, message: "Sahi date of birth likhein." };
+      if (parsed.age < MONETIZATION_CRITERIA.minAge) return { ok: false, message: "18 saal se kam umar monetization ke liye eligible nahi hai." };
+      const inserted = await db
+        .insert(schema.monetizationApplications)
+        .values({
+          userId: user.id,
+          fullName: args.full_name,
+          dob: parsed.dob,
+          jazzcashNumber: args.jazzcash_number,
+          followersSnapshot: status.criteria.followers.current,
+          viewsSnapshot: status.criteria.views.current,
+        })
+        .returning();
+      if (!inserted[0]) return { ok: false, message: "Application could not be created." };
+      return {
+        ok: true,
+        message: "Application bhej di gayi ✅ — owner review karke faisla batayega.",
+        monetization: await monetizationStatus(user),
+      };
+    }
+  ),
 
   requestCoins: withValidation(
     z.object({ token: tokenArg, pack_index: z.number().int().min(0).max(COIN_PACKS.length - 1), tid: z.string().trim().min(4).max(80) }),
@@ -989,6 +1149,18 @@ export const Actions = {
       if (!user) return { ok: false, message: "Please sign in." };
       if (args.coins < WITHDRAW_MIN_COINS) return { ok: false, message: `Kam az kam ${WITHDRAW_MIN_COINS} coins withdraw kar sakte hain.` };
       if (!/^0\d{10}$/.test(args.jazzcash_number)) return { ok: false, message: "Sahi JazzCash number likhein (11 digits, 03 se shuru)." };
+      // Monetization gate: cash-out is only for the owner/admin or a
+      // creator whose monetization application the owner APPROVED. The
+      // check runs before the hold, so a rejected attempt never touches
+      // the balance and never writes a request row.
+      if (!isAdminUser(user)) {
+        const approved = await db
+          .select({ id: schema.monetizationApplications.id })
+          .from(schema.monetizationApplications)
+          .where(and(eq(schema.monetizationApplications.userId, user.id), eq(schema.monetizationApplications.status, "approved")))
+          .limit(1);
+        if (approved.length === 0) return { ok: false, message: "Pehle monetization ke liye apply karein aur approval lein" };
+      }
       const deducted = await db
         .update(schema.users)
         .set({ coinBalance: sql`${schema.users.coinBalance} - ${args.coins}` })
@@ -1449,6 +1621,66 @@ export const Actions = {
             ? `Approved — ab Rs.${wd.amountPkr} JazzCash ${wd.jazzcashNumber} par bhej dein.`
             : "Withdrawal rejected — held coins wapas balance me daal diye.",
       };
+    }
+  ),
+
+  // Owner's monetization review queue: every application, pending first.
+  // Each row carries the applicant, the submitted form data (with the age
+  // computed from the DOB right now), the followers/views snapshot from
+  // apply time AND the applicant's current live numbers, so the owner
+  // can see if anything changed since they applied.
+  getAdminMonetizationApplications: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const admin = await authUser(args.token);
+    if (!admin) return { ok: false, message: "Please sign in." };
+    if (!isAdminUser(admin)) return { ok: false, message: "Owner access required." };
+    const rows = await db
+      .select({ application: schema.monetizationApplications, applicant: schema.users })
+      .from(schema.monetizationApplications)
+      .innerJoin(schema.users, eq(schema.monetizationApplications.userId, schema.users.id))
+      .orderBy(sql`case when ${schema.monetizationApplications.status} = 'pending' then 0 else 1 end`, desc(schema.monetizationApplications.createdAt))
+      .limit(100);
+    const out = [];
+    for (const r of rows) {
+      const fc = await followCounts(r.applicant.id);
+      const views = await totalVideoViews(r.applicant.id);
+      out.push({
+        ...monetizationApplicationDto(r.application),
+        age: ageFromDob(r.application.dob),
+        current_followers: fc.followers,
+        current_views: views,
+        criteria: MONETIZATION_CRITERIA,
+        applicant: authorDto(r.applicant),
+      });
+    }
+    return { ok: true, applications: out };
+  }),
+
+  // Owner decision on a monetization application. Approval is what makes
+  // the creator "monetized" (withdrawals unlock — the gate reads the
+  // application status); rejection leaves them free to apply again. The
+  // applicant is notified either way.
+  reviewMonetizationApplication: withValidation(
+    z.object({ token: tokenArg, application_id: z.number().int().positive(), decision: z.enum(["approved", "rejected"]) }),
+    async (args) => {
+      const admin = await authUser(args.token);
+      if (!admin) return { ok: false, message: "Please sign in." };
+      if (!isAdminUser(admin)) return { ok: false, message: "Owner access required." };
+      const application = (await db.select().from(schema.monetizationApplications).where(eq(schema.monetizationApplications.id, args.application_id)).limit(1))[0];
+      if (!application) return { ok: false, message: "Application not found." };
+      if (application.status !== "pending") return { ok: false, message: `This application was already ${application.status}.` };
+      await db
+        .update(schema.monetizationApplications)
+        .set({ status: args.decision, reviewedBy: admin.id, decidedAt: new Date() })
+        .where(eq(schema.monetizationApplications.id, application.id));
+      await notify({
+        userId: application.userId,
+        type: "monetization",
+        text:
+          args.decision === "approved"
+            ? "🎉 Monetization approved — mubarak ho! Ab aap Zoomly ke monetized creator hain aur withdrawal aap ke liye khul gaya hai."
+            : "Monetization application reject ho gayi — criteria check karke aap dobara apply kar sakte hain.",
+      });
+      return { ok: true, message: args.decision === "approved" ? "Application approved — creator monetized ho gaya ✅" : "Application rejected." };
     }
   ),
 

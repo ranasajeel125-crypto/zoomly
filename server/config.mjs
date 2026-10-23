@@ -18,6 +18,14 @@ export const CUSTOM_BUY_MIN_COINS = 10;
 // small balances can no longer be cashed out).
 export const WITHDRAW_MIN_COINS = 100;
 
+// Monetization program (owner spec 2026-10-23): creators APPLY from the
+// Monetization screen; the owner approves or rejects each application;
+// only APPROVED creators (and the owner/admin) can withdraw. Meeting the
+// criteria only unlocks the Apply button — approval is what unlocks
+// cash-out. Views = the sum of posts.view_count over ALL of the user's
+// posts. Change the numbers here and the whole program follows.
+export const MONETIZATION_CRITERIA = { minAge: 18, minFollowers: 5000, minViews: 50000 };
+
 // Coin levels, by current coin balance. `min` is the balance at which the
 // level starts. Progress is measured towards the next level's `min`.
 //   Starter    0 – 99
