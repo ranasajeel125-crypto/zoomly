@@ -1538,6 +1538,60 @@ function PeopleView({ me, onOpenProfile, refreshMe, onMessage, onOpenInbox }) {
 
 // ---------- profile ------------------------------------------------------------------
 
+// ---------- PWA install -------------------------------------------------------------
+// "Install app" affordance: on Chromium the button appears only when the
+// browser fires beforeinstallprompt; on iOS Safari (which has no such
+// event) a short Share → Add to Home Screen hint shows instead. Renders
+// nothing when the app is already running installed (standalone).
+export function InstallAppButton() {
+  const [deferred, setDeferred] = useState(null);
+  const [installed, setInstalled] = useState(false);
+  const [isIos] = useState(() => /iphone|ipad|ipod/i.test(window.navigator?.userAgent || ""));
+
+  useEffect(() => {
+    if (window.matchMedia?.("(display-mode: standalone)").matches || window.navigator?.standalone) setInstalled(true);
+    const onPrompt = (e) => {
+      e.preventDefault();
+      setDeferred(e);
+    };
+    const onInstalled = () => {
+      setInstalled(true);
+      setDeferred(null);
+    };
+    window.addEventListener("beforeinstallprompt", onPrompt);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onPrompt);
+      window.removeEventListener("appinstalled", onInstalled);
+    };
+  }, []);
+
+  if (installed) return null;
+  if (deferred) {
+    return (
+      <button
+        className="btn btn-primary"
+        onClick={async () => {
+          deferred.prompt();
+          try {
+            const choice = await deferred.userChoice;
+            if (choice?.outcome === "accepted") setInstalled(true);
+          } catch {
+            /* prompt dismissed */
+          }
+          setDeferred(null);
+        }}
+      >
+        📲 Install app
+      </button>
+    );
+  }
+  if (isIos) {
+    return <span className="chip" title="Install Zoomly">📲 Install: Share ⬆️ → “Add to Home Screen”</span>;
+  }
+  return null;
+}
+
 function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage }) {
   const isMe = !userId || userId === me.id;
   const [data, setData] = useState(null);
@@ -1714,6 +1768,7 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
           <button className="btn" onClick={() => setPwOpen((v) => !v)}>
             🔑 Change password
           </button>
+          <InstallAppButton />
           {profile.avatar_url && (
             <button className="btn btn-danger" onClick={removeDp} disabled={dpBusy}>
               Remove DP
