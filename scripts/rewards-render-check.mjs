@@ -16,6 +16,11 @@
 //      renders: referral code, coin packs with prices, the JazzCash
 //      number, and both leaderboards — and does NOT crash.
 //
+// Section 4 below also covers the remembered tab (owner fix 2026-10-23):
+// a page refresh used to always dump the user back on Home; the shell now
+// stores the open tab in localStorage ("zoomly_tab") and boots on it,
+// while share deep links (?v=) still win over the saved tab.
+//
 // Requires: a running server serving the built client
 //   (PORT=3102 ADMIN_USERNAME=sajeel npm start, after `npm run build`)
 //   and jsdom (dev dependency).
@@ -207,6 +212,86 @@ try {
   dom2.window.close();
 } catch (err) {
   check(`invite-link flow completed (${err.message})`, false);
+}
+
+// ---- 4. remembered tab: a refresh returns to the tab you left ----------------
+// Each scenario boots a FRESH jsdom with localStorage seeded the way a
+// previous session would have left it, using the section-1 user's token.
+function bootTab({ url = `${BASE}/`, seed = {} }) {
+  const d = new JSDOM(indexHtml, {
+    url,
+    runScripts: "dangerously",
+    pretendToBeVisual: true,
+    beforeParse(window) {
+      window.fetch = (u, o = {}) => {
+        const { signal, ...rest } = o;
+        return fetch(new URL(u, BASE), rest);
+      };
+      window.IntersectionObserver = class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      };
+      window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+      window.HTMLMediaElement.prototype.pause = () => {};
+      window.HTMLMediaElement.prototype.load = () => {};
+      window.scrollTo = () => {};
+      window.localStorage.setItem("zoomly_token", token);
+      for (const [k, v] of Object.entries(seed)) window.localStorage.setItem(k, v);
+    },
+  });
+  d.window.eval(bundle);
+  return d;
+}
+const tabText = (doc) => doc.body?.textContent || "";
+const crashed = (doc) => tabText(doc).includes("could not open");
+const isFeedView = (doc) => [...doc.querySelectorAll("button")].some((b) => (b.textContent || "").trim() === "For You");
+const isPeopleView = (doc) => Boolean(doc.querySelector('input[placeholder^="Search people"]'));
+const isRewardsView = (doc) => tabText(doc).includes("Your coin balance");
+try {
+  // (a) saved "people" tab → boots straight onto People
+  const dA = bootTab({ seed: { zoomly_tab: "people" } });
+  await waitFor("People view from saved tab", () => isPeopleView(dA.window.document) || crashed(dA.window.document));
+  check("boot with saved tab=people lands on People", isPeopleView(dA.window.document) && !crashed(dA.window.document));
+  dA.window.close();
+
+  // (b) saved "rewards" tab → boots straight onto Rewards
+  const dB = bootTab({ seed: { zoomly_tab: "rewards" } });
+  await waitFor("Rewards view from saved tab", () => isRewardsView(dB.window.document) || crashed(dB.window.document));
+  check("boot with saved tab=rewards lands on Rewards", isRewardsView(dB.window.document) && !crashed(dB.window.document));
+  dB.window.close();
+
+  // (c) no saved tab → Home (feed), as before
+  const dC = bootTab({});
+  await waitFor("feed from no saved tab", () => isFeedView(dC.window.document) || crashed(dC.window.document));
+  check("boot with NO saved tab lands on Home", isFeedView(dC.window.document) && !isPeopleView(dC.window.document));
+  dC.window.close();
+
+  // (d) stale/garbage saved value → falls back to Home
+  const dD = bootTab({ seed: { zoomly_tab: "some-old-tab" } });
+  await waitFor("feed from invalid saved tab", () => isFeedView(dD.window.document) || crashed(dD.window.document));
+  check("boot with an invalid saved tab falls back to Home", isFeedView(dD.window.document) && !crashed(dD.window.document));
+  dD.window.close();
+
+  // (e) the app itself WRITES the tab when the user navigates
+  const dE = bootTab({});
+  await waitFor("feed before navigating", () => isFeedView(dE.window.document) || crashed(dE.window.document));
+  const watchBtnE = [...dE.window.document.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("Watch"));
+  check("Watch nav button found (write-path scenario)", Boolean(watchBtnE));
+  watchBtnE.dispatchEvent(new dE.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await waitFor("tab written to storage", () => dE.window.localStorage.getItem("zoomly_tab") === "watch");
+  check("navigating stores zoomly_tab=watch (what the next refresh restores)", dE.window.localStorage.getItem("zoomly_tab") === "watch");
+  dE.window.close();
+
+  // (f) deep link wins: saved tab=rewards + ?v=<post> → feed with the pin
+  const post = await api("createPost", { token, title: "Tab Restore Shared Post", video_url: "https://example.com/tabrestore.mp4" });
+  check("post created for the deep-link scenario", post.ok === true, JSON.stringify(post).slice(0, 200));
+  const dF = bootTab({ url: `${BASE}/?v=${post.post.id}`, seed: { zoomly_tab: "rewards" } });
+  await waitFor("shared video pin despite saved tab", () => tabText(dF.window.document).includes("Shared video") || crashed(dF.window.document));
+  check("share link ?v= beats the saved tab (feed + pinned video)", tabText(dF.window.document).includes("Shared video") && !isRewardsView(dF.window.document));
+  dF.window.close();
+} catch (err) {
+  check(`remembered-tab flow completed (${err.message})`, false);
 }
 
 if (failures > 0 || jsdomError) {

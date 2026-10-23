@@ -169,6 +169,71 @@ export function captureSharedPostId() {
   return null;
 }
 
+// ---------- remembered tab -----------------------------------------------------
+// The shell remembers which main tab the user was on and returns to it
+// after a page refresh, instead of always landing on Home. Like the sound
+// preference, it is a plain localStorage value, written whenever the tab
+// changes while signed in. Deep links keep priority over the remembered
+// tab: a shared video link (?v=<id>) still opens the feed, where the
+// shared video is pinned.
+const TAB_STORAGE_KEY = "zoomly_tab";
+const PROFILE_USER_STORAGE_KEY = "zoomly_profile_user";
+const TAB_KEYS = ["feed", "watch", "people", "live", "upload", "rewards", "profile"];
+
+export function storedTab() {
+  try {
+    const t = localStorage.getItem(TAB_STORAGE_KEY);
+    return TAB_KEYS.includes(t) ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+export function storedProfileUserId() {
+  try {
+    const id = Number(localStorage.getItem(PROFILE_USER_STORAGE_KEY));
+    return Number.isInteger(id) && id > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveTab(tab, profileUserId) {
+  try {
+    if (TAB_KEYS.includes(tab)) localStorage.setItem(TAB_STORAGE_KEY, tab);
+    // Whose profile is open is part of "where you were": a refresh on
+    // someone's profile should return to that profile, not your own.
+    if (tab === "profile" && profileUserId) {
+      localStorage.setItem(PROFILE_USER_STORAGE_KEY, String(profileUserId));
+    } else {
+      localStorage.removeItem(PROFILE_USER_STORAGE_KEY);
+    }
+  } catch {
+    /* storage unavailable (private mode) — refresh just lands on Home */
+  }
+}
+
+export function clearStoredTab() {
+  try {
+    localStorage.removeItem(TAB_STORAGE_KEY);
+    localStorage.removeItem(PROFILE_USER_STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+// The tab to open on at boot: a shared video link wins (the feed pins the
+// video), then the remembered tab, then Home.
+export function initialTab() {
+  try {
+    const v = new URLSearchParams(window.location.search).get("v");
+    if (v && /^\d+$/.test(v)) return "feed";
+  } catch {
+    /* ignore */
+  }
+  return storedTab() || "feed";
+}
+
 // Web Share API when available, clipboard otherwise (used by video Share
 // buttons and profile sharing).
 export async function shareUrl({ url, text }) {
@@ -2809,13 +2874,17 @@ export function App() {
   const [booting, setBooting] = useState(true);
   const [bootFailed, setBootFailed] = useState(false);
   const [googleSetup, setGoogleSetup] = useState(false);
-  const [tab, setTab] = useState("feed");
+  // Boot on the tab the user left open (a shared video link still wins
+  // and opens the feed) so a refresh returns them to the same place.
+  const [tab, setTab] = useState(() => initialTab());
   const [showNotifs, setShowNotifs] = useState(false);
   const [chatPeer, setChatPeer] = useState(null);
   const [inboxOpen, setInboxOpen] = useState(false);
   const [sharedPostId, setSharedPostId] = useState(null);
   const [sharedUsername, setSharedUsername] = useState(null);
-  const [profileUserId, setProfileUserId] = useState(null);
+  // When the restored tab is a profile, restore whose profile it was too
+  // (null = the user's own profile).
+  const [profileUserId, setProfileUserId] = useState(() => (tab === "profile" ? storedProfileUserId() : null));
   const [feedKey, setFeedKey] = useState(0);
   const waking = useWaking();
 
@@ -2869,6 +2938,14 @@ export function App() {
     })();
   }, []);
 
+  // Remember the open tab (and whose profile is open on it) so a page
+  // refresh returns the user here instead of Home. Saved only while
+  // signed in, so a logged-out visit never overwrites the saved place.
+  useEffect(() => {
+    if (!me) return;
+    saveTab(tab, profileUserId);
+  }, [me, tab, profileUserId]);
+
   function openProfile(userId) {
     setProfileUserId(userId ?? null);
     setTab("profile");
@@ -2890,7 +2967,23 @@ export function App() {
     await call("logout", {});
     setToken("");
     setMe(null);
+    // Signing out forgets the saved place: the next sign-in on this
+    // browser starts at Home, not where the previous user left off.
+    clearStoredTab();
+    setProfileUserId(null);
     setTab("feed");
+  }
+
+  // A fresh sign-in lands where the boot state already points: the tab
+  // state holds the boot decision (shared video → feed, otherwise the
+  // remembered tab, otherwise Home), so it is deliberately left alone —
+  // only a remembered someone-else's profile is dropped, because after a
+  // fresh login the profile tab should mean YOUR profile until you open
+  // somebody else's.
+  function afterAuth(user) {
+    setGoogleSetup(false);
+    setMe(user);
+    if (profileUserId && profileUserId !== user.id) setProfileUserId(null);
   }
 
   if (bootFailed) {
@@ -2926,23 +3019,12 @@ export function App() {
     if (googleSetup) {
       return (
         <GoogleSetupView
-          onAuthed={(user) => {
-            setGoogleSetup(false);
-            setMe(user);
-            setTab("feed");
-          }}
+          onAuthed={afterAuth}
           onCancel={() => setGoogleSetup(false)}
         />
       );
     }
-    return (
-      <AuthView
-        onAuthed={(user) => {
-          setMe(user);
-          setTab("feed");
-        }}
-      />
-    );
+    return <AuthView onAuthed={afterAuth} />;
   }
 
   return (
