@@ -252,6 +252,58 @@ select {
   }
 }
 
+/* Live gift animation: when a gift lands in a live room, its emoji pops
+   big into the centre-lower stage, rises and fades over ~2.8s while the
+   "… ne 🎁 Gift bheja" label slides in under it. The client plays one
+   gift at a time from a short queue (see useGiftAnimation in Live.jsx),
+   so a burst of cheap gifts never stacks overlays on the stage. */
+.zoomly-gift-pop {
+  animation: zoomly-gift-pop 2.8s ease-out forwards;
+  will-change: transform, opacity;
+}
+@keyframes zoomly-gift-pop {
+  0% {
+    opacity: 0;
+    transform: translateY(52px) scale(0.3) rotate(-10deg);
+  }
+  14% {
+    opacity: 1;
+    transform: translateY(0) scale(1.18) rotate(3deg);
+  }
+  24% {
+    transform: translateY(-8px) scale(1) rotate(0deg);
+  }
+  78% {
+    opacity: 1;
+    transform: translateY(-30px) scale(1.03);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-56px) scale(0.95);
+  }
+}
+.zoomly-gift-label {
+  animation: zoomly-gift-label 2.8s ease-out forwards;
+  will-change: transform, opacity;
+}
+@keyframes zoomly-gift-label {
+  0% {
+    opacity: 0;
+    transform: translateY(16px) scale(0.85);
+  }
+  16% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+}
+
 /* Feed single-tap feedback: the centre play/pause glyph flashes and
    fades (a video left paused keeps its static ▶ overlay afterwards). */
 .zoomly-tap-flash {

@@ -170,7 +170,7 @@ check(
 const byKey = Object.fromEntries(detail.gifts.map((g) => [g.key, g.coins]));
 check(
   "catalog prices exact",
-  byKey.rose === 10 && byKey.chocolate === 25 && byKey.heart === 50 && byKey.giftbox === 100 && byKey.crown === 250 && byKey.rocket === 500 && byKey.diamond === 1000 && byKey.lion === 2500,
+  byKey.rose === 1 && byKey.chocolate === 25 && byKey.heart === 50 && byKey.giftbox === 100 && byKey.crown === 250 && byKey.rocket === 500 && byKey.diamond === 1000 && byKey.lion === 2500,
   JSON.stringify(byKey)
 );
 check("getLive reports my balance", detail.my_coin_balance === 6000, `bal=${detail.my_coin_balance}`);
@@ -793,6 +793,26 @@ const reused = await api("startLive", { token: creatorToken });
 check("startLive WITHOUT a title reuses the saved one", reused.ok === true && reused.session?.title === "Yaad wala title ✨", JSON.stringify(reused).slice(0, 200));
 await api("endLive", { token: creatorToken, live_session_id: reused.session.id });
 
+// ---- Rose = 1 coin (owner pricing) ----------------------------------------------
+// The flower costs exactly 1 coin now. The 70/30 split floors the
+// creator's share — floor(0.7 × 1) = 0 — so the platform keeps the
+// whole coin; that is the owner's price under the existing split
+// rules, pinned here so nobody "fixes" the rounding later. (Its own
+// no-title session, so the saved-title checks above stay untouched.)
+const started3 = await api("startLive", { token: creatorToken });
+check("rose-check startLive ok", started3.ok === true, JSON.stringify(started3).slice(0, 160));
+const viewerBeforeRose = (await api("getMe", { token: viewerToken })).user.coin_balance;
+const creatorBeforeRose = (await api("getMe", { token: creatorToken })).user.coin_balance;
+const roseGift = await api("sendGift", { token: viewerToken, live_session_id: started3.session.id, gift_key: "rose" });
+check("rose sent for exactly 1 coin", roseGift.ok === true && roseGift.gift?.coins === 1, JSON.stringify(roseGift).slice(0, 200));
+check("rose split: creator 0 / platform 1 (floor of 70%)", roseGift.creator_share === 0 && roseGift.platform_share === 1, JSON.stringify(roseGift));
+check("rose cost the sender exactly 1 coin", roseGift.my_balance === viewerBeforeRose - 1, `bal=${roseGift.my_balance} before=${viewerBeforeRose}`);
+const creatorAfterRose = (await api("getMe", { token: creatorToken })).user.coin_balance;
+check("broadcaster credited +0 for a rose", creatorAfterRose === creatorBeforeRose, `before=${creatorBeforeRose} after=${creatorAfterRose}`);
+const evRose = await dbOne("SELECT * FROM gift_events WHERE live_session_id = ? AND gift_key = 'rose'", [started3.session.id]);
+check("gift_events row: rose 1 = 0 creator + 1 platform", evRose && evRose.coins === 1 && evRose.creator_share === 0 && evRose.platform_share === 1, JSON.stringify(evRose));
+await api("endLive", { token: creatorToken, live_session_id: started3.session.id });
+
 const freshName = `newbie_${suffix}`;
 const fresh = await api("signup", { username: freshName, display_name: "Fresh Face", password: "test-pass-123" });
 check("fresh user signup", fresh.ok === true);
@@ -949,6 +969,32 @@ try {
   check("switching filters live updates the persisted choice", dom.window.localStorage.getItem("zoomly_live_filter") === "bw");
   check("broadcast room still healthy after filter switches", bodyText().includes("End Live") && !bodyText().includes("could not open"));
 
+  // Gift animation on the HOST's own stage: a gift broadcast must
+  // surface the big overlay here too — not just the chat-feed line —
+  // and a second gift must QUEUE behind the first (one at a time)
+  // instead of replacing it.
+  const llAnim = await api("listLive", { token: fh.token });
+  const myLive = llAnim.lives?.find((l) => l.broadcaster?.username === fhName);
+  check("host live session found for the gift animation check", Boolean(myLive));
+  if (myLive) {
+    const animEl = () => document.querySelector("[data-gift-animation]");
+    const roseToHost = await api("sendGift", { token: viewerToken, live_session_id: myLive.id, gift_key: "rose" });
+    check("rose gift to the jsdom host ok", roseToHost.ok === true, JSON.stringify(roseToHost).slice(0, 160));
+    await waitFor("host gift animation appears", () => Boolean(animEl()));
+    const firstAnimText = animEl()?.textContent || "";
+    check(
+      "host animation shows the rose + '@sender ne … bheja' label",
+      firstAnimText.includes("🌹") && firstAnimText.includes(`@${viewerName}`) && firstAnimText.includes("Rose") && firstAnimText.includes("bheja"),
+      firstAnimText.slice(0, 140)
+    );
+    const chocToHost = await api("sendGift", { token: viewerToken, live_session_id: myLive.id, gift_key: "chocolate" });
+    check("second gift sent while the first is animating", chocToHost.ok === true, JSON.stringify(chocToHost).slice(0, 160));
+    check("second gift QUEUES (first animation not replaced)", (animEl()?.textContent || "").includes("🌹"), (animEl()?.textContent || "").slice(0, 140));
+    await waitFor("queued gift animation plays next on the host", () => (animEl()?.textContent || "").includes("🍫"), 10000);
+    check("queued gift animates after the first (host)", (animEl()?.textContent || "").includes("🍫"));
+    check("chat feed still recorded the rose gift line (host)", bodyText().includes("sent Rose"));
+  }
+
   // Tidy up: end this host's live through the API.
   const ll = await api("listLive", { token: fh.token });
   const mine = ll.lives?.find((l) => l.broadcaster?.username === fhName);
@@ -956,6 +1002,108 @@ try {
   dom.window.close();
 } catch (err) {
   check(`jsdom host filter check (${err.message})`, false);
+}
+
+// ---- jsdom: a VIEWER sees the gift animation too --------------------------------
+// A fresh host goes live through the API; a fresh fan opens the watch
+// room in jsdom (real socket, stubbed media playback) and the suite's
+// funded viewer sends two gifts back-to-back: the first must animate
+// at once with its label, the second must QUEUE behind it, and the
+// chat feed must still record both gift lines.
+try {
+  const ahName = `animhost_${suffix}`;
+  const ah = await api("signup", { username: ahName, display_name: "Anim Host", password: "test-pass-123" });
+  check("anim host signup", ah.ok === true, JSON.stringify(ah).slice(0, 160));
+  const startedAnim = await api("startLive", { token: ah.token, title: "Gift anim show" });
+  check("anim host live via API", startedAnim.ok === true, JSON.stringify(startedAnim).slice(0, 160));
+  const animSid = startedAnim.session.id;
+  const afName = `animfan_${suffix}`;
+  const af = await api("signup", { username: afName, display_name: "Anim Fan", password: "test-pass-123" });
+  check("anim fan signup", af.ok === true, JSON.stringify(af).slice(0, 160));
+
+  const indexHtml = fs.readFileSync(path.join(DIST_DIR, "index.html"), "utf8");
+  const bundleName = fs.readdirSync(path.join(DIST_DIR, "assets")).find((f) => f.endsWith(".js"));
+  const bundle = fs.readFileSync(path.join(DIST_DIR, "assets", bundleName), "utf8");
+  check("bundle contains the gift animation overlay", bundle.includes("data-gift-animation") && bundle.includes("bheja"));
+
+  const dom = new JSDOM(indexHtml, {
+    url: `${BASE}/`,
+    runScripts: "dangerously",
+    pretendToBeVisual: true,
+    beforeParse(window) {
+      window.localStorage.setItem("zoomly_token", af.token);
+      window.fetch = (u, o = {}) => {
+        const { signal, ...rest } = o;
+        return fetch(new URL(u, BASE), rest);
+      };
+      window.IntersectionObserver = class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      };
+      window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+      window.HTMLMediaElement.prototype.pause = () => {};
+      window.HTMLMediaElement.prototype.load = () => {};
+      window.scrollTo = () => {};
+      if (!window.WebSocket) {
+        window.WebSocket = class {
+          constructor() {
+            this.readyState = 0;
+          }
+          send() {}
+          close() {
+            this.readyState = 3;
+          }
+        };
+      }
+    },
+  });
+  const { document } = dom.window;
+  const bodyText = () => document.body?.textContent || "";
+  const waitFor = async (desc, pred, timeoutMs = 25000) => {
+    const t0 = Date.now();
+    for (;;) {
+      if (pred()) return;
+      if (Date.now() - t0 > timeoutMs) throw new Error(`Timed out waiting for: ${desc}`);
+      await sleep(200);
+    }
+  };
+  const click = (el) => el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  dom.window.eval(bundle);
+  await waitFor("anim fan app boot", () => bodyText().includes("For You") || bodyText().includes("could not open"));
+  check("anim fan app boots without crash", !bodyText().includes("could not open"));
+  const liveIconBtn = document.querySelector('button[aria-label="Open Live"]');
+  check("anim fan: feed LIVE icon found", Boolean(liveIconBtn));
+  click(liveIconBtn);
+  await waitFor("anim broadcast listed", () => bodyText().includes("Gift anim show") || bodyText().includes("could not open"));
+  const watchBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Watch");
+  check("anim fan: Watch button found", Boolean(watchBtn));
+  click(watchBtn);
+  await waitFor("anim watch room chrome", () => bodyText().includes("Join Live") || bodyText().includes("could not open"));
+  check("anim watch room renders", bodyText().includes("Join Live") && !bodyText().includes("could not open"));
+
+  const animEl = () => document.querySelector("[data-gift-animation]");
+  check("no gift animation before any gift", !animEl());
+  const g1 = await api("sendGift", { token: viewerToken, live_session_id: animSid, gift_key: "rose" });
+  check("anim gift 1 sent (rose = 1 coin)", g1.ok === true && g1.gift?.coins === 1, JSON.stringify(g1).slice(0, 160));
+  await waitFor("viewer gift animation appears", () => Boolean(animEl()));
+  const viewerFirstText = animEl()?.textContent || "";
+  check(
+    "viewer animation shows the rose + '@sender ne … bheja' label",
+    viewerFirstText.includes("🌹") && viewerFirstText.includes(`@${viewerName}`) && viewerFirstText.includes("Rose") && viewerFirstText.includes("bheja"),
+    viewerFirstText.slice(0, 140)
+  );
+  const g2 = await api("sendGift", { token: viewerToken, live_session_id: animSid, gift_key: "chocolate" });
+  check("anim gift 2 sent while the first is animating", g2.ok === true, JSON.stringify(g2).slice(0, 160));
+  check("viewer: second gift QUEUES (first animation not replaced)", (animEl()?.textContent || "").includes("🌹"), (animEl()?.textContent || "").slice(0, 140));
+  await waitFor("viewer queued gift animation plays next", () => (animEl()?.textContent || "").includes("🍫"), 10000);
+  check("viewer: queued gift animates after the first", (animEl()?.textContent || "").includes("🍫"));
+  check("viewer chat feed recorded both gift lines", bodyText().includes("sent Rose") && bodyText().includes("sent Chocolate"));
+
+  await api("endLive", { token: ah.token, live_session_id: animSid });
+  dom.window.close();
+} catch (err) {
+  check(`jsdom gift animation check (${err.message})`, false);
 }
 
 console.log(failures === 0 ? "\nLIVE TEST PASSED ✔" : `\nLIVE TEST FAILED — ${failures} check(s) failed ✗`);

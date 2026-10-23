@@ -146,6 +146,10 @@ function useLiveRoom(sessionId, handlers = {}) {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
   const idRef = useRef(0);
+  // Gift animation: every gift broadcast also feeds the stage overlay
+  // queue (defined below with the overlay component), so the host, the
+  // sender, other viewers and a seated guest all see the same show.
+  const { giftAnim, enqueueGiftAnim } = useGiftAnimation();
 
   const pushMsg = useCallback((m) => {
     idRef.current += 1;
@@ -181,6 +185,7 @@ function useLiveRoom(sessionId, handlers = {}) {
             break;
           case "gift":
             pushMsg({ kind: "gift", from: msg.from, gift: msg.gift, created_at: msg.created_at });
+            enqueueGiftAnim(msg.from, msg.gift);
             h.onGift?.(msg);
             break;
           case "signal":
@@ -253,13 +258,13 @@ function useLiveRoom(sessionId, handlers = {}) {
       sock.close();
       sockRef.current = null;
     };
-  }, [sessionId, pushMsg]);
+  }, [sessionId, pushMsg, enqueueGiftAnim]);
 
   const sendChat = useCallback((text) => {
     sockRef.current?.chat(text);
   }, []);
 
-  return { sockRef, messages, pushMsg, viewerCount, liveLikes, ended, connected, authError, sendChat };
+  return { sockRef, messages, pushMsg, viewerCount, liveLikes, giftAnim, ended, connected, authError, sendChat };
 }
 
 // ---- tap-tap like hearts -------------------------------------------------------
@@ -300,6 +305,92 @@ function FloatingHearts({ hearts }) {
           ❤️
         </span>
       ))}
+    </div>
+  );
+}
+
+// ---- gift animation overlay ----------------------------------------------------
+// When a gift lands, EVERYONE in the room sees it big — not just the
+// chat-feed line: the gift's emoji pops into the centre-lower stage,
+// floats up and fades over ~2.8s (CSS: .zoomly-gift-pop / -label),
+// with a "@sender ne 🌹 Rose bheja" label under it. Gifts play ONE at
+// a time from a short queue: a burst of 1-coin flowers queues up
+// politely instead of stacking, and once the waiting queue is full
+// the extra VISUALS are dropped (the chat feed still records every
+// gift). Positioned in the lower-centre of the stage: below the PK
+// score bar (which sits across the middle seam) and above the chat.
+const GIFT_ANIM_MS = 2800;
+const GIFT_ANIM_GAP_MS = 160;
+const GIFT_ANIM_QUEUE_MAX = 5;
+let giftAnimSeq = 0;
+
+function useGiftAnimation() {
+  const [current, setCurrent] = useState(null);
+  const queueRef = useRef([]);
+  const showingRef = useRef(false);
+  const timersRef = useRef([]);
+
+  const later = useCallback((fn, ms) => {
+    timersRef.current.push(setTimeout(fn, ms));
+  }, []);
+
+  const pump = useCallback(() => {
+    if (showingRef.current) return;
+    const next = queueRef.current.shift();
+    if (!next) return;
+    showingRef.current = true;
+    setCurrent(next);
+    later(() => {
+      setCurrent(null);
+      showingRef.current = false;
+      later(pump, GIFT_ANIM_GAP_MS);
+    }, GIFT_ANIM_MS);
+  }, [later]);
+
+  const enqueueGiftAnim = useCallback(
+    (from, gift) => {
+      if (!gift) return;
+      // Waiting queue full → drop this visual only. The chat-feed line
+      // (pushMsg in useLiveRoom) has already recorded the gift.
+      if (queueRef.current.length >= GIFT_ANIM_QUEUE_MAX) return;
+      giftAnimSeq += 1;
+      queueRef.current.push({ id: giftAnimSeq, from, gift });
+      pump();
+    },
+    [pump]
+  );
+
+  useEffect(
+    () => () => {
+      timersRef.current.forEach(clearTimeout);
+      timersRef.current = [];
+    },
+    []
+  );
+
+  return { giftAnim: current, enqueueGiftAnim };
+}
+
+function GiftAnimationOverlay({ anim }) {
+  if (!anim?.gift) return null;
+  const { gift, from } = anim;
+  return (
+    <div
+      data-gift-animation=""
+      style={{ position: "absolute", left: 0, right: 0, bottom: "27%", zIndex: 5, display: "flex", justifyContent: "center", pointerEvents: "none", padding: "0 16px" }}
+    >
+      {/* key restarts the CSS animations for each gift in the queue */}
+      <div key={anim.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+        <div className="zoomly-gift-pop" style={{ fontSize: 96, lineHeight: 1, filter: "drop-shadow(0 6px 22px rgba(0,0,0,0.55))" }}>
+          {gift.emoji}
+        </div>
+        <div
+          className="zoomly-gift-label"
+          style={{ background: "rgba(0,0,0,0.62)", border: "1px solid rgba(255,255,255,0.25)", borderRadius: 999, padding: "6px 14px", fontSize: 15, color: "#fff", textShadow: "0 1px 3px rgba(0,0,0,0.8)", whiteSpace: "nowrap", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis" }}
+        >
+          <strong>@{from?.username}</strong> ne {gift.emoji} <strong>{gift.name}</strong> bheja
+        </div>
+      </div>
     </div>
   );
 }
@@ -724,7 +815,6 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
   const matchPeerIdRef = useRef(null);
   const [earned, setEarned] = useState(0);
   const [giftCount, setGiftCount] = useState(0);
-  const [lastGift, setLastGift] = useState(null);
   const [ending, setEnding] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const peakRef = useRef(0);
@@ -794,7 +884,6 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
       if (msg.gift) {
         setEarned((e) => e + (msg.gift.creator_share ?? 0));
         setGiftCount((c) => c + 1);
-        setLastGift(msg.gift);
       }
     },
     onViewerJoined: (msg) => {
@@ -1134,11 +1223,6 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
         <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
           <video ref={videoRef} autoPlay muted playsInline style={videoFillStyle} />
           {splitView && <div style={tileLabelStyle("rgba(0,0,0,0.65)")}>Tum · @{me.username}</div>}
-          {lastGift && (
-            <div key={`${lastGift.key}-${giftCount}`} style={{ position: "absolute", right: 12, top: "34%", fontSize: 52, filter: "drop-shadow(0 2px 8px rgba(0,0,0,0.6))" }}>
-              {lastGift.emoji}
-            </div>
-          )}
         </div>
         {splitView && (
           <div style={{ position: "relative", flex: 1, minHeight: 0, borderTop: "2px solid rgba(255,255,255,0.18)" }}>
@@ -1162,6 +1246,9 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
       </div>
 
       <FloatingHearts hearts={hearts} />
+
+      {/* gift animation: the room-wide overlay (host sees it too) */}
+      <GiftAnimationOverlay anim={room.giftAnim} />
 
       {/* top bar over the video */}
       <div style={topBarStyle}>
@@ -1888,6 +1975,9 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
           </div>
         )}
       </div>
+
+      {/* gift animation: the room-wide overlay (viewers + seated guest) */}
+      <GiftAnimationOverlay anim={room.giftAnim} />
 
       {/* top bar over the video */}
       <div style={topBarStyle}>

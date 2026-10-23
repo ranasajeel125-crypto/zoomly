@@ -117,7 +117,7 @@ export const LEADERBOARD_LIMIT = 50;
 // (gift_events.platform_share + live_sessions.platform_cut_coins) and
 // credited nowhere.
 export const GIFT_CATALOG = [
-  { key: "rose", name: "Rose", emoji: "🌹", coins: 10 },
+  { key: "rose", name: "Rose", emoji: "🌹", coins: 1 },
   { key: "chocolate", name: "Chocolate", emoji: "🍫", coins: 25 },
   { key: "heart", name: "Heart", emoji: "❤️", coins: 50 },
   { key: "giftbox", name: "Gift Box", emoji: "🎁", coins: 100 },
