@@ -424,6 +424,7 @@ function liveSessionDto(session, broadcaster) {
     id: session.id,
     user_id: session.userId,
     title: session.title,
+    kind: session.kind || "video",
     started_at: session.startedAt.getTime(),
     ended_at: session.endedAt ? session.endedAt.getTime() : null,
     is_live: !session.endedAt,
@@ -1291,10 +1292,11 @@ export const Actions = {
   // to reuse the saved one. With neither, a default is used (and saved),
   // so going live never blocks on typing a title.
   startLive: withValidation(
-    z.object({ token: tokenArg, title: z.string().trim().max(120).optional() }),
+    z.object({ token: tokenArg, title: z.string().trim().max(120).optional(), kind: z.enum(["video", "broad"]).optional() }),
     async (args) => {
       const user = await authUser(args.token);
       if (!user) return { ok: false, message: "Please sign in." };
+      const kind = args.kind ?? "video";
       const title = (args.title ?? "").trim() || user.liveTitle || `${user.displayName} is live 🔴`;
       if (findBannedContent(title)) return { ok: false, message: "Live title me aisi language ya link allowed nahi hai." };
       if (title !== user.liveTitle) {
@@ -1306,7 +1308,7 @@ export const Actions = {
         .from(schema.liveSessions)
         .where(and(eq(schema.liveSessions.userId, user.id), isNull(schema.liveSessions.endedAt)));
       for (const p of previous) await endLiveSession(p.id);
-      const inserted = await db.insert(schema.liveSessions).values({ userId: user.id, title }).returning();
+      const inserted = await db.insert(schema.liveSessions).values({ userId: user.id, title, kind }).returning();
       const session = inserted[0];
       if (!session) return { ok: false, message: "Could not start the live. Please try again." };
       // Tell every follower the broadcaster went live (in-app only).

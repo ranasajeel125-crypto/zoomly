@@ -133,6 +133,11 @@ function useLiveRoom(sessionId, handlers = {}) {
   const [ended, setEnded] = useState(false);
   const [connected, setConnected] = useState(false);
   const [authError, setAuthError] = useState("");
+  // Broad rooms: the session kind and the live seat snapshot (host +
+  // filled seats + free count), owned by the server and resent whole
+  // on every seat change.
+  const [roomKind, setRoomKind] = useState("video");
+  const [seats, setSeats] = useState(null);
   const sockRef = useRef(null);
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
@@ -162,6 +167,8 @@ function useLiveRoom(sessionId, handlers = {}) {
           case "joined":
             setViewerCount(msg.viewerCount ?? 0);
             if (typeof msg.likeCount === "number") setLiveLikes(msg.likeCount);
+            setRoomKind(msg.kind || "video");
+            if (msg.seats) setSeats(msg.seats);
             h.onJoined?.(msg);
             break;
           case "viewer-count":
@@ -231,6 +238,43 @@ function useLiveRoom(sessionId, handlers = {}) {
           case "guest-left":
             h.onGuestLeft?.(msg);
             break;
+          case "seats":
+            setSeats({ host: msg.host ?? null, seats: msg.seats ?? [], seatsFree: msg.seatsFree ?? 0 });
+            break;
+          case "seat-request":
+            h.onSeatRequest?.(msg);
+            break;
+          case "seat-request-cancelled":
+            h.onSeatRequestGone?.(msg);
+            break;
+          case "seat-request-expired":
+            h.onSeatRequestExpired?.(msg);
+            break;
+          case "seat-declined":
+            h.onSeatDeclined?.(msg);
+            break;
+          case "seat-seated":
+            h.onSeatSeated?.(msg);
+            break;
+          case "seat-invited":
+            h.onSeatInvited?.(msg);
+            break;
+          case "seat-invite-declined":
+            pushMsg({ kind: "system", text: `🎙️ @${msg.by?.user?.username} ne seat invite mana kar diya.` });
+            h.onSeatInviteDeclined?.(msg);
+            break;
+          case "seat-invite-expired":
+            h.onSeatInviteExpired?.(msg);
+            break;
+          case "seat-peer":
+            h.onSeatPeer?.(msg);
+            break;
+          case "seat-left":
+            h.onSeatLeft?.(msg);
+            break;
+          case "seat-host-muted":
+            h.onSeatHostMuted?.(msg);
+            break;
           case "live-ended":
             setEnded(true);
             h.onEnded?.(msg);
@@ -255,7 +299,7 @@ function useLiveRoom(sessionId, handlers = {}) {
     sockRef.current?.chat(text);
   }, []);
 
-  return { sockRef, messages, pushMsg, viewerCount, liveLikes, giftAnim, ended, connected, authError, sendChat };
+  return { sockRef, messages, pushMsg, viewerCount, liveLikes, giftAnim, ended, connected, authError, sendChat, roomKind, seats };
 }
 
 // ---- tap-tap like hearts -------------------------------------------------------
@@ -575,7 +619,7 @@ function LiveList({ me, onGoLive, onWatch, onOpenProfile }) {
       )}
       <div style={{ display: "grid", gap: 10 }}>
         {lives.map((live) => (
-          <div key={live.id} className="card" style={{ display: "flex", alignItems: "center", gap: 12, padding: 12 }}>
+          <div key={live.id} className="card" data-live-kind={live.kind || "video"} style={{ display: "flex", alignItems: "center", gap: 12, padding: 12 }}>
             <button onClick={() => live.broadcaster && onOpenProfile(live.broadcaster.id)} style={{ background: "none", border: "none", padding: 0 }} aria-label="Broadcaster profile">
               <Avatar user={live.broadcaster} size={52} />
             </button>
@@ -585,7 +629,8 @@ function LiveList({ me, onGoLive, onWatch, onOpenProfile }) {
                 <strong style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{live.title}</strong>
               </div>
               <div style={{ color: "var(--dim)", fontSize: 13, marginTop: 3 }}>
-                {live.broadcaster?.display_name} <OwnerBadge user={live.broadcaster} /> (@{live.broadcaster?.username}) · 👀 {live.viewer_count} watching
+                {live.broadcaster?.display_name} <OwnerBadge user={live.broadcaster} /> (@{live.broadcaster?.username}) · 👀 {live.viewer_count} {live.kind === "broad" ? "listening" : "watching"}
+                {live.kind === "broad" ? " · 🎙️ Broad" : ""}
                 {live.in_match ? " · ⚔️ PK Match chal raha hai" : ""}
                 {live.hidden ? " · ⏳ review me hai (sirf tumhe dikh raha hai)" : ""}
               </div>
@@ -594,7 +639,7 @@ function LiveList({ me, onGoLive, onWatch, onOpenProfile }) {
               <span className="chip">Your live</span>
             ) : (
               <button className="btn btn-primary btn-small" onClick={() => onWatch(live)}>
-                Watch
+                {live.kind === "broad" ? "🎙️ Sunno" : "Watch"}
               </button>
             )}
           </div>
@@ -613,6 +658,10 @@ function GoLiveSetup({ me, onStart, onCancel }) {
   const savedTitle = me.live_title ?? "";
   const [title, setTitle] = useState(savedTitle);
   const [editingTitle, setEditingTitle] = useState(!savedTitle);
+  // Live mode: "video" (camera live) or "broad" (audio-only voice room
+  // with seats). Switching modes throws away any captured media — a
+  // broad must never hold a camera stream.
+  const [mode, setMode] = useState("video");
   const [stream, setStream] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -635,6 +684,44 @@ function GoLiveSetup({ me, onStart, onCancel }) {
     },
     []
   );
+
+  function stopCaptured() {
+    processorRef.current?.stop();
+    processorRef.current = null;
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    setStream(null);
+  }
+
+  function pickMode(next) {
+    if (next === mode) return;
+    stopCaptured();
+    setError("");
+    setMode(next);
+  }
+
+  // Broad setup captures the MICROPHONE ONLY — no camera is ever
+  // requested in broad mode (the audio-only promise starts here).
+  async function enableMic() {
+    setError("");
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError("Is browser me microphone support nahi hai. Chrome ka latest version try karo.");
+      return;
+    }
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = s;
+      setStream(s);
+    } catch (err) {
+      if (err && (err.name === "NotAllowedError" || err.name === "SecurityError")) {
+        setError("Mic ki ijazat nahi mili. Browser ki settings me microphone Allow karo, phir dobara koshish karo.");
+      } else if (err && err.name === "NotFoundError") {
+        setError("Koi microphone nahi mila. Device check karke dobara koshish karo.");
+      } else {
+        setError("Mic khul nahi saka. Dobara koshish karo.");
+      }
+    }
+  }
 
   async function enableCamera() {
     setError("");
@@ -666,7 +753,7 @@ function GoLiveSetup({ me, onStart, onCancel }) {
   async function start(e) {
     e.preventDefault();
     if (!stream) {
-      setError("Pehle camera on karo.");
+      setError(mode === "broad" ? "Pehle mic on karo." : "Pehle camera on karo.");
       return;
     }
     setBusy(true);
@@ -675,7 +762,7 @@ function GoLiveSetup({ me, onStart, onCancel }) {
     // server reuses the saved title (or its default) — starting a live
     // never requires touching the title again.
     const typed = editingTitle ? title.trim() : "";
-    const res = await call("startLive", typed ? { title: typed } : {});
+    const res = await call("startLive", { ...(typed ? { title: typed } : {}), kind: mode });
     setBusy(false);
     if (!res.ok) {
       setError(res.message || "Live start nahi ho saki.");
@@ -701,20 +788,47 @@ function GoLiveSetup({ me, onStart, onCancel }) {
 
   return (
     <div style={{ padding: "14px 14px 20px", maxWidth: 560, margin: "0 auto" }}>
-      <h2 style={{ margin: "2px 0 12px" }}>📹 Go Live</h2>
-      <div style={{ background: "#000", borderRadius: 16, overflow: "hidden", aspectRatio: "4/3", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        {stream ? (
-          <video ref={previewRef} autoPlay muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-        ) : (
-          <div style={{ textAlign: "center", padding: 20 }}>
-            <div style={{ fontSize: 40 }}>🎥</div>
-            <p style={{ color: "var(--dim)" }}>Camera preview yahan aayega</p>
-            <button className="btn btn-primary" onClick={enableCamera}>
-              Camera on karo
-            </button>
-          </div>
-        )}
+      <h2 style={{ margin: "2px 0 12px" }}>{mode === "broad" ? "🎙️ Go Broad" : "📹 Go Live"}</h2>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }} role="group" aria-label="Live mode">
+        <button type="button" data-live-mode="video" className={mode === "video" ? "btn btn-primary" : "btn"} style={{ flex: 1, padding: "11px 10px", fontWeight: 700 }} onClick={() => pickMode("video")}>
+          📹 Video Live
+        </button>
+        <button type="button" data-live-mode="broad" className={mode === "broad" ? "btn btn-primary" : "btn"} style={{ flex: 1, padding: "11px 10px", fontWeight: 700 }} onClick={() => pickMode("broad")}>
+          🎙️ Broad (sirf awaz)
+        </button>
       </div>
+      {mode === "broad" ? (
+        <div style={{ background: "var(--surface-2, #17141f)", border: "1px solid var(--border)", borderRadius: 16, padding: 22, textAlign: "center" }}>
+          <div style={{ fontSize: 44 }}>🎙️</div>
+          {stream ? (
+            <>
+              <p style={{ fontWeight: 700, margin: "8px 0 2px" }}>Mic tayyar hai — tum live awaz me sunai doge</p>
+              <p style={{ color: "var(--dim)", margin: 0, fontSize: 13.5 }}>Broad me camera bilkul nahi chalta — sirf awaz. 6 listeners tumhare sath seat le kar baat kar sakenge; kis ko bethana hai, ye tum hi tay karoge.</p>
+            </>
+          ) : (
+            <>
+              <p style={{ color: "var(--dim)", margin: "8px 0 12px" }}>Broad = sirf awaz wala live room. Camera on nahi hoga.</p>
+              <button type="button" className="btn btn-primary" onClick={enableMic}>
+                🎙️ Mic on karo
+              </button>
+            </>
+          )}
+        </div>
+      ) : (
+        <div style={{ background: "#000", borderRadius: 16, overflow: "hidden", aspectRatio: "4/3", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          {stream ? (
+            <video ref={previewRef} autoPlay muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          ) : (
+            <div style={{ textAlign: "center", padding: 20 }}>
+              <div style={{ fontSize: 40 }}>🎥</div>
+              <p style={{ color: "var(--dim)" }}>Camera preview yahan aayega</p>
+              <button type="button" className="btn btn-primary" onClick={enableCamera}>
+                Camera on karo
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       <form onSubmit={start} style={{ display: "grid", gap: 10, marginTop: 14 }}>
         {editingTitle ? (
           <>
@@ -738,12 +852,14 @@ function GoLiveSetup({ me, onStart, onCancel }) {
             ← Back
           </button>
           <button className="btn btn-primary" type="submit" disabled={busy || !stream} style={{ flex: 2, padding: "12px 16px", fontSize: 16 }}>
-            {busy ? "Starting…" : "🔴 Start Live"}
+            {busy ? "Starting…" : mode === "broad" ? "🎙️ Start Broad" : "🔴 Start Live"}
           </button>
         </div>
       </form>
       <p style={{ color: "var(--dim)", fontSize: 13, marginTop: 10 }}>
-        Viewers tumhe gifts bhej sakte hain — har gift ke 70% coins tumhare balance me aayenge.
+        {mode === "broad"
+          ? "Listeners tumhe gifts bhej sakte hain — har gift ke 70% coins tumhare balance me aayenge. Seat lene walo ko tum khud pick karoge."
+          : "Viewers tumhe gifts bhej sakte hain — har gift ke 70% coins tumhare balance me aayenge."}
       </p>
     </div>
   );
@@ -2217,6 +2333,964 @@ function EndSummary({ summary, onClose }) {
   );
 }
 
+// ---- Broad (voice) rooms -----------------------------------------------------------
+// Audio-only live rooms: a host plus up to 6 seated speakers, everyone
+// else listening. The peer topology mirrors the video rooms' mesh —
+// publishers initiate to each member — with three simplifications:
+// no video track is ever captured or sent, one connection kind set
+// ("listener" send-only, "seat"/"seat-host" full-duplex), and remote
+// media renders as hidden <audio> elements instead of a video stage.
+// Microphones are OPEN BY DEFAULT everywhere: a speaker's mic track is
+// enabled the moment it is captured; mute is an explicit toggle.
+
+// Peer manager shared by the broad host room and the broad watch room.
+function useBroadPeers({ sockRef, getStream, onRemote, getAnswerKind }) {
+  const pcsRef = useRef(new Map());
+
+  function clearTimers(entry) {
+    for (const key of ["disconnectTimer", "renegoTimer", "giveUpTimer"]) {
+      if (entry[key]) {
+        clearTimeout(entry[key]);
+        entry[key] = null;
+      }
+    }
+  }
+
+  function closePeer(peerId) {
+    const entry = pcsRef.current.get(peerId);
+    if (entry) {
+      clearTimers(entry);
+      try {
+        entry.pc.close();
+      } catch {
+        /* ignore */
+      }
+      pcsRef.current.delete(peerId);
+    }
+    onRemote(peerId, null);
+  }
+
+  function closeAll() {
+    for (const peerId of [...pcsRef.current.keys()]) closePeer(peerId);
+  }
+
+  function wire(peerId, kind, { initiator, relayOnly = false, retried = false, broadSeat = false }) {
+    const pc = new RTCPeerConnection(peerConnectionConfig(relayOnly));
+    const entry = { pc, pendingIce: [], kind, initiator, retried, relayOnly, broadSeat, disconnectTimer: null, renegoTimer: null, giveUpTimer: null };
+    pcsRef.current.set(peerId, entry);
+    const s = getStream();
+    // Audio tracks ONLY — a broad peer never carries video, whoever
+    // publishes on it.
+    if (s) for (const track of s.getAudioTracks()) pc.addTrack(track, s);
+    pc.ontrack = (e) => {
+      if (e.streams[0]) onRemote(peerId, e.streams[0]);
+    };
+    pc.onicecandidate = (e) => {
+      if (e.candidate) sockRef.current?.signal(peerId, { kind: "ice", candidate: e.candidate.toJSON() });
+    };
+    pc.oniceconnectionstatechange = () => monitor(peerId, entry);
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "closed" && pcsRef.current.get(peerId) === entry) {
+        clearTimers(entry);
+        pcsRef.current.delete(peerId);
+        onRemote(peerId, null);
+      }
+    };
+    return entry;
+  }
+
+  async function offer(peerId, entry, { relay = false } = {}) {
+    try {
+      const desc = await entry.pc.createOffer();
+      await entry.pc.setLocalDescription(desc);
+      sockRef.current?.signal(peerId, {
+        kind: "offer",
+        description: entry.pc.localDescription?.toJSON() ?? desc,
+        ...(relay ? { relay: true } : {}),
+        ...(entry.broadSeat ? { broadSeat: true } : {}),
+      });
+    } catch {
+      /* peer already gone */
+    }
+  }
+
+  // Initiate a connection to a member (replaces any existing one).
+  function connect(peerId, kind, { broadSeat = false } = {}) {
+    closePeer(peerId);
+    const entry = wire(peerId, kind, { initiator: true, broadSeat });
+    void offer(peerId, entry);
+  }
+
+  function onPeerIceFailed(peerId) {
+    const entry = pcsRef.current.get(peerId);
+    if (!entry) return;
+    clearTimers(entry);
+    if (entry.retried) {
+      reportIce({ role: "broad", kind: entry.kind, state: "failed", relay: entry.relayOnly });
+      closePeer(peerId);
+      return;
+    }
+    entry.retried = true;
+    if (entry.initiator) {
+      const { kind, broadSeat } = entry;
+      closePeer(peerId);
+      const fresh = wire(peerId, kind, { initiator: true, relayOnly: true, retried: true, broadSeat });
+      void offer(peerId, fresh, { relay: true });
+    } else {
+      entry.renegoTimer = setTimeout(() => {
+        if (pcsRef.current.get(peerId) !== entry) return;
+        sockRef.current?.signal(peerId, { kind: "renegotiate", relay: true });
+        entry.giveUpTimer = setTimeout(() => {
+          if (pcsRef.current.get(peerId) === entry) closePeer(peerId);
+        }, 12000);
+      }, 600);
+    }
+  }
+
+  function monitor(peerId, entry) {
+    if (pcsRef.current.get(peerId) !== entry) return;
+    const st = entry.pc.iceConnectionState;
+    if (st === "connected" || st === "completed") {
+      clearTimers(entry);
+    } else if (st === "disconnected") {
+      clearTimeout(entry.disconnectTimer);
+      entry.disconnectTimer = setTimeout(() => {
+        if (pcsRef.current.get(peerId) === entry && entry.pc.iceConnectionState === "disconnected") onPeerIceFailed(peerId);
+      }, 4000);
+    } else if (st === "failed") {
+      onPeerIceFailed(peerId);
+    }
+  }
+
+  async function handleSignal(msg) {
+    const data = msg.data;
+    if (!data) return;
+    if (data.kind === "offer" && data.description) {
+      // An incoming offer always replaces whatever we held to that peer
+      // (this is also how a dropped speaker falls back to a plain
+      // listener connection from the host's re-offer).
+      const kind = getAnswerKind(msg.from, data);
+      closePeer(msg.from);
+      const entry = wire(msg.from, kind, { initiator: false, relayOnly: !!data.relay });
+      try {
+        await entry.pc.setRemoteDescription(data.description);
+        for (const c of entry.pendingIce.splice(0)) {
+          try {
+            await entry.pc.addIceCandidate(c);
+          } catch {
+            /* stale candidate */
+          }
+        }
+        const answer = await entry.pc.createAnswer();
+        await entry.pc.setLocalDescription(answer);
+        sockRef.current?.signal(msg.from, { kind: "answer", description: entry.pc.localDescription?.toJSON() ?? answer });
+      } catch {
+        /* peer vanished mid-negotiation */
+      }
+    } else if (data.kind === "answer" && data.description) {
+      const entry = pcsRef.current.get(msg.from);
+      if (entry) {
+        try {
+          await entry.pc.setRemoteDescription(data.description);
+          for (const c of entry.pendingIce.splice(0)) {
+            try {
+              await entry.pc.addIceCandidate(c);
+            } catch {
+              /* stale candidate */
+            }
+          }
+        } catch {
+          /* already answered */
+        }
+      }
+    } else if (data.kind === "ice" && data.candidate) {
+      const entry = pcsRef.current.get(msg.from);
+      if (entry) {
+        if (entry.pc.remoteDescription) {
+          try {
+            await entry.pc.addIceCandidate(data.candidate);
+          } catch {
+            /* stale candidate */
+          }
+        } else {
+          entry.pendingIce.push(data.candidate);
+        }
+      }
+    } else if (data.kind === "renegotiate") {
+      const entry = pcsRef.current.get(msg.from);
+      if (entry) {
+        const { kind, broadSeat } = entry;
+        closePeer(msg.from);
+        const fresh = wire(msg.from, kind, { initiator: true, relayOnly: true, retried: true, broadSeat });
+        void offer(msg.from, fresh, { relay: true });
+      }
+    }
+  }
+
+  return { pcsRef, connect, closePeer, closeAll, handleSignal };
+}
+
+// Hidden <audio> sinks for every remote publisher in a broad room.
+function BroadAudios({ audios, muted }) {
+  return (
+    <div aria-hidden="true" style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", opacity: 0, pointerEvents: "none" }}>
+      {audios.map((a) => (
+        <audio
+          key={a.peerId}
+          data-broad-audio={a.peerId}
+          autoPlay
+          playsInline
+          muted={muted}
+          ref={(el) => {
+            if (el && el.srcObject !== a.stream) {
+              el.srcObject = a.stream;
+              el.play?.().catch(() => {});
+            }
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function useRemoteAudios() {
+  const [audios, setAudios] = useState([]);
+  const onRemote = useCallback((peerId, stream) => {
+    setAudios((prev) => {
+      const rest = prev.filter((a) => a.peerId !== peerId);
+      return stream ? [...rest, { peerId, stream }] : rest;
+    });
+  }, []);
+  return { audios, onRemote };
+}
+
+// The seats stage shared by both broad rooms: the host seat pinned
+// first (full-width), then the 6 guest seats in a grid. Filled seats
+// show DP + @name + mic state; empty seats a placeholder. Follow
+// buttons ride along for anyone the viewer does not follow yet.
+// Speaking glow: v1 renders the mic state (open = accent, muted =
+// red slash) rather than a live level analyser.
+function BroadStage({ seats, me, myPeerId, followed, onFollow, onSeatTap, isHostView }) {
+  const host = seats?.host ?? null;
+  const bySeat = new Map((seats?.seats ?? []).map((s) => [s.seat, s]));
+  const followBtn = (user) =>
+    user && user.id !== me.id && followed[user.id] === false ? (
+      <button
+        type="button"
+        className="btn btn-primary btn-small"
+        data-follow-user={user.id}
+        style={{ padding: "3px 12px", fontSize: 12.5, borderRadius: 999 }}
+        onClick={(e) => {
+          e.stopPropagation();
+          onFollow(user);
+        }}
+      >
+        Follow
+      </button>
+    ) : null;
+  const micBadge = (mutedState) =>
+    mutedState ? <span title="Mic band hai">🔇</span> : <span title="Mic khula hai">🎙️</span>;
+  return (
+    <div data-broad-stage="true">
+      <div
+        data-broad-host="true"
+        data-seat-muted={host?.muted ? "true" : "false"}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          padding: "12px 14px",
+          borderRadius: 16,
+          border: "1.5px solid var(--accent)",
+          background: "rgba(255,255,255,0.05)",
+          marginBottom: 10,
+        }}
+      >
+        <Avatar user={host?.user ?? { username: "?", display_name: "Host" }} size={54} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 800, fontSize: 16, display: "flex", gap: 6, alignItems: "center" }}>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{host?.user?.display_name ?? "Host"}</span>
+            <OwnerBadge user={host?.user} />
+            <span style={{ fontSize: 15 }}>{micBadge(host?.muted)}</span>
+          </div>
+          <div style={{ color: "var(--dim)", fontSize: 13 }}>
+            @{host?.user?.username} · 👑 Host {host?.peerId === myPeerId ? "· Tum" : ""}
+          </div>
+        </div>
+        {followBtn(host?.user)}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+        {[1, 2, 3, 4, 5, 6].map((n) => {
+          const s = bySeat.get(n);
+          if (!s) {
+            return (
+              <button
+                key={n}
+                type="button"
+                data-broad-seat={n}
+                data-seat-state="empty"
+                onClick={() => onSeatTap?.(null, n)}
+                style={{
+                  border: "1.5px dashed var(--border)",
+                  borderRadius: 16,
+                  background: "transparent",
+                  color: "var(--dim)",
+                  padding: "16px 6px",
+                  textAlign: "center",
+                  cursor: onSeatTap ? "pointer" : "default",
+                }}
+              >
+                <div style={{ fontSize: 24 }}>🪑</div>
+                <div style={{ fontSize: 12.5, marginTop: 4 }}>{isHostView ? "Khali seat — listener ko invite karo" : "Khali seat"}</div>
+              </button>
+            );
+          }
+          const isMe = s.peerId === myPeerId;
+          return (
+            <div
+              key={n}
+              data-broad-seat={n}
+              data-seat-state="filled"
+              data-seat-peer={s.peerId}
+              data-seat-muted={s.muted ? "true" : "false"}
+              onClick={() => onSeatTap?.(s, n)}
+              style={{
+                border: `1.5px solid ${isMe ? "var(--accent)" : "var(--border)"}`,
+                borderRadius: 16,
+                background: "rgba(255,255,255,0.04)",
+                padding: "12px 6px",
+                textAlign: "center",
+                cursor: onSeatTap ? "pointer" : "default",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "center" }}>
+                <Avatar user={s.user} size={46} />
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 700, marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                @{s.user.username} {isMe ? "(Tum)" : ""}
+              </div>
+              <div style={{ fontSize: 15, marginTop: 2 }}>{micBadge(s.muted)}</div>
+              {followBtn(s.user)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Follow-state helper for the broad rooms: seeds the host from the
+// getLive payload and lazily resolves seat users via getProfile so the
+// stage can offer (and retire) Follow buttons accurately.
+function useBroadFollows(me) {
+  const [followed, setFollowed] = useState({});
+  const askedRef = useRef(new Set());
+  const ensure = useCallback(
+    (user) => {
+      if (!user || user.id === me.id || askedRef.current.has(user.id)) return;
+      askedRef.current.add(user.id);
+      call("getProfile", { user_id: user.id }).then((res) => {
+        if (res.ok) setFollowed((prev) => ({ ...prev, [user.id]: Boolean(res.profile?.followed_by_me) }));
+      });
+    },
+    [me.id]
+  );
+  const follow = useCallback((user) => {
+    if (!user) return;
+    setFollowed((prev) => ({ ...prev, [user.id]: true }));
+    call("toggleFollow", { user_id: user.id }).then((res) => {
+      if (res.ok) setFollowed((prev) => ({ ...prev, [user.id]: Boolean(res.following) }));
+    });
+  }, []);
+  return { followed, ensure, follow, setFollowed };
+}
+
+// ---- Broad host room ---------------------------------------------------------------
+// The broadcaster's side of a voice room: publishes its mic to every
+// member, runs the seats (requests, invites, drop, seat-mute), and
+// reads chat/gifts like the video host. Ending the broad goes through
+// the same endLive RPC + summary as a video live.
+
+function BroadHostRoom({ me, session, stream, onDone }) {
+  const [myPeerId, setMyPeerId] = useState(null);
+  const [viewers, setViewers] = useState({}); // peerId -> user (listeners + speakers)
+  const [seatRequests, setSeatRequests] = useState([]);
+  const [selectedSeat, setSelectedSeat] = useState(null); // seat no. the host tapped
+  const [myMuted, setMyMuted] = useState(false); // host mic — OPEN by default
+  const [ending, setEnding] = useState(false);
+  const [earned, setEarned] = useState(0);
+  const streamRef = useRef(stream);
+  const endHandledRef = useRef(false);
+  const peakRef = useRef(0);
+  const { audios, onRemote } = useRemoteAudios();
+  const follows = useBroadFollows(me);
+
+  const room = useLiveRoom(session.id, {
+    onJoined: () => setMyPeerId(sockRef.current?.peerId ?? null),
+    onViewerJoined: (msg) => {
+      setViewers((prev) => ({ ...prev, [msg.peerId]: msg.user }));
+      peers.connect(msg.peerId, "listener");
+    },
+    onViewerLeft: (msg) => {
+      setViewers((prev) => {
+        const next = { ...prev };
+        delete next[msg.peerId];
+        return next;
+      });
+      peers.closePeer(msg.peerId);
+    },
+    onSignal: (msg) => void peers.handleSignal(msg),
+    onSeatRequest: (msg) => {
+      setSeatRequests((prev) => (prev.some((r) => r.requestId === msg.requestId) ? prev : [...prev, msg]));
+    },
+    onSeatRequestGone: (msg) => {
+      setSeatRequests((prev) => prev.filter((r) => r.requestId !== msg.requestId));
+    },
+    onSeatPeer: (msg) => {
+      if (msg.initiate) peers.connect(msg.peerId, "seat");
+    },
+    onSeatLeft: (msg) => {
+      peers.closePeer(msg.peerId);
+    },
+    onGift: (msg) => {
+      if (msg.gift && typeof msg.gift.creator_share === "number") setEarned((prev) => prev + msg.gift.creator_share);
+    },
+    onEnded: () => {
+      if (!endHandledRef.current) {
+        endHandledRef.current = true;
+        onDone({
+          live_session_id: session.id,
+          duration_seconds: Math.floor((Date.now() - session.started_at) / 1000),
+          peak_viewers: peakRef.current,
+          total_gift_coins: 0,
+          creator_earned_coins: earned,
+          platform_cut_coins: 0,
+        });
+      }
+    },
+  });
+  const { sockRef } = room;
+  if (room.viewerCount > peakRef.current) peakRef.current = room.viewerCount;
+
+  const peers = useBroadPeers({
+    sockRef,
+    getStream: () => streamRef.current,
+    onRemote,
+    getAnswerKind: (from) => (room.seats?.seats?.some((s) => s.peerId === from) ? "seat" : "listener"),
+  });
+  const peersRef = useRef(peers);
+  peersRef.current = peers;
+
+  // Leaving the room tears the mesh down and stops the mic.
+  useEffect(
+    () => () => {
+      peersRef.current?.closeAll();
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    },
+    []
+  );
+
+  // Follow state for everyone on stage.
+  useEffect(() => {
+    if (room.seats?.host?.user) follows.ensure(room.seats.host.user);
+    for (const s of room.seats?.seats ?? []) follows.ensure(s.user);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room.seats]);
+
+  function toggleMyMute() {
+    const next = !myMuted;
+    setMyMuted(next);
+    for (const t of streamRef.current?.getAudioTracks() ?? []) t.enabled = !next;
+    sockRef.current?.send({ type: "seat-mute", muted: next });
+  }
+
+  function respondSeat(requestId, accept) {
+    sockRef.current?.send({ type: "seat-respond", requestId, accept });
+    setSeatRequests((prev) => prev.filter((r) => r.requestId !== requestId));
+  }
+
+  function inviteListener(peerId) {
+    sockRef.current?.send({ type: "seat-invite", toPeerId: peerId });
+    room.pushMsg({ kind: "system", text: "🎙️ Seat invite bhej diya — listener ke jawab ka intezar hai." });
+  }
+
+  async function endLive() {
+    if (endHandledRef.current) return;
+    endHandledRef.current = true;
+    setEnding(true);
+    const res = await call("endLive", { live_session_id: session.id });
+    const summary = res.ok
+      ? res.summary
+      : {
+          live_session_id: session.id,
+          duration_seconds: Math.floor((Date.now() - session.started_at) / 1000),
+          peak_viewers: peakRef.current,
+          total_gift_coins: 0,
+          creator_earned_coins: earned,
+          platform_cut_coins: 0,
+        };
+    onDone(summary);
+  }
+
+  const seatList = room.seats?.seats ?? [];
+  const seatedPeers = new Set(seatList.map((s) => s.peerId));
+  const listeners = Object.entries(viewers).filter(([peerId]) => !seatedPeers.has(peerId));
+  const selected = selectedSeat != null ? seatList.find((s) => s.seat === selectedSeat) ?? null : null;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 40, background: "var(--bg, #0b0a10)", color: "var(--text)", display: "flex", flexDirection: "column" }}>
+      <BroadAudios audios={audios} muted={false} />
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px 8px" }}>
+        <LiveBadge />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 800, fontSize: 16.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🎙️ {session.title}</div>
+          <div style={{ color: "var(--dim)", fontSize: 12.5 }}>
+            👀 {room.viewerCount} listening · ❤️ {room.liveLikes} · 🪙 kamai {earned}
+            {!room.connected ? " · reconnect ho raha hai…" : ""}
+          </div>
+        </div>
+        <button className="btn" onClick={toggleMyMute} style={{ borderRadius: 999, padding: "9px 13px", fontWeight: 700 }} aria-label="Apna mic mute/unmute">
+          {myMuted ? "🔇 Mic band" : "🎙️ Mic khula"}
+        </button>
+        <button className="btn btn-danger" onClick={endLive} disabled={ending} style={{ borderRadius: 999, padding: "10px 15px", fontWeight: 800 }}>
+          {ending ? "Ending…" : "End Broad"}
+        </button>
+      </div>
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "4px 14px 10px", position: "relative" }}>
+        <BroadStage
+          seats={room.seats}
+          me={me}
+          myPeerId={myPeerId}
+          followed={follows.followed}
+          onFollow={follows.follow}
+          isHostView
+          onSeatTap={(entry) => {
+            if (entry) setSelectedSeat(entry.seat);
+          }}
+        />
+        <GiftAnimationOverlay anim={room.giftAnim} bottom="4%" />
+        {selected && (
+          <div className="card" data-seat-actions={selected.seat} style={{ marginTop: 10, padding: 12, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <strong style={{ flex: 1, minWidth: 120 }}>@{selected.user.username} ki seat</strong>
+            <button className="btn btn-small" onClick={() => sockRef.current?.send({ type: "seat-host-mute", peerId: selected.peerId, muted: !selected.muted })}>
+              {selected.muted ? "🎙️ Unmute karo" : "🔇 Mute karo"}
+            </button>
+            <button className="btn btn-small btn-danger" onClick={() => { sockRef.current?.send({ type: "seat-drop", peerId: selected.peerId }); setSelectedSeat(null); }}>
+              ⬇️ Seat se hatao (Drop)
+            </button>
+            <button className="btn btn-small" onClick={() => setSelectedSeat(null)}>✕</button>
+          </div>
+        )}
+        {seatRequests.map((r) => (
+          <div key={r.requestId} className="card" data-seat-request={r.requestId} style={{ marginTop: 10, padding: 12, display: "flex", alignItems: "center", gap: 10 }}>
+            <Avatar user={r.from.user} size={38} />
+            <div style={{ flex: 1, minWidth: 0, fontSize: 14 }}>
+              <strong>@{r.from.user.username}</strong> seat lena chahta hai 🎙️
+            </div>
+            <button className="btn btn-primary btn-small" onClick={() => respondSeat(r.requestId, true)}>✔️ Accept</button>
+            <button className="btn btn-small" onClick={() => respondSeat(r.requestId, false)}>✖️ Decline</button>
+          </div>
+        ))}
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 6 }}>🎧 Listeners ({listeners.length})</div>
+          {listeners.length === 0 && <p style={{ color: "var(--dim)", fontSize: 13, margin: 0 }}>Abhi koi listener nahi — apna link share karo!</p>}
+          <div style={{ display: "grid", gap: 6 }}>
+            {listeners.map(([peerId, user]) => (
+              <div key={peerId} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Avatar user={user} size={30} />
+                <span style={{ flex: 1, minWidth: 0, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>@{user.username}</span>
+                {follows.followed[user.id] === false && (
+                  <button className="btn btn-small" data-follow-user={user.id} onClick={() => follows.follow(user)}>Follow</button>
+                )}
+                <button className="btn btn-small" data-invite-peer={peerId} disabled={(room.seats?.seatsFree ?? 0) <= 0} onClick={() => inviteListener(peerId)}>
+                  🎙️ Seat do
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ borderTop: "1px solid var(--border)", padding: "8px 14px calc(10px + env(safe-area-inset-bottom))", background: "var(--surface)" }}>
+        <ChatFeed messages={room.messages} compact />
+        <ChatInput onSend={room.sendChat} />
+      </div>
+    </div>
+  );
+}
+
+// ---- Broad watch (listener) room ---------------------------------------------------
+// Joining a broad = listening: the host and every seated speaker send
+// their audio to you. Taking a seat (request or host invite) starts
+// your microphone — OPEN BY DEFAULT, no unmute gate — and you publish
+// audio only to the whole room. Gifts, chat, likes and follows work
+// exactly like the video watch room.
+
+function BroadWatchRoom({ me, session, refreshMe, onBack }) {
+  const [detail, setDetail] = useState(null);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [myPeerId, setMyPeerId] = useState(null);
+  const [hostPeerId, setHostPeerId] = useState(null);
+  const [seatPending, setSeatPending] = useState(false);
+  const [seatInvite, setSeatInvite] = useState(null); // { inviteId, from }
+  const [myMuted, setMyMuted] = useState(false); // my mic — OPEN by default once seated
+  const [soundMuted, setSoundMuted] = useState(() => {
+    try {
+      return window.localStorage.getItem("zoomly-viewer-sound-muted") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [showGifts, setShowGifts] = useState(false);
+  const [giftBusy, setGiftBusy] = useState("");
+  const [balance, setBalance] = useState(0);
+  const [hearts, setHearts] = useState([]);
+  const micStreamRef = useRef(null);
+  const seatedRef = useRef(false);
+  const pendingAnswerKindRef = useRef(new Map()); // peerId -> kind for the next offer
+  const heartIdRef = useRef(0);
+  const { audios, onRemote } = useRemoteAudios();
+  const follows = useBroadFollows(me);
+
+  const room = useLiveRoom(session.id, {
+    onJoined: (msg) => {
+      setMyPeerId(sockRef.current?.peerId ?? null);
+      setHostPeerId(msg.broadcasterPeerId ?? null);
+    },
+    onBroadcasterJoined: (msg) => setHostPeerId(msg.peerId),
+    onViewerJoined: (msg) => {
+      // I am a seated speaker: publish my audio to the new member.
+      if (msg.seatPublisher && seatedRef.current) {
+        peers.connect(msg.peerId, "seat", { broadSeat: true });
+      }
+    },
+    onViewerLeft: (msg) => peers.closePeer(msg.peerId),
+    onSignal: (msg) => void peers.handleSignal(msg),
+    onSeatSeated: () => {
+      void startPublishing();
+    },
+    onSeatPeer: (msg) => {
+      // The host will offer on a full-duplex seat connection; remember
+      // to answer it with my mic attached.
+      if (!msg.initiate) pendingAnswerKindRef.current.set(msg.peerId, "seat-host");
+    },
+    onSeatDeclined: () => {
+      setSeatPending(false);
+      room.pushMsg({ kind: "system", text: "🎙️ Host ne seat request mana kar di — tum listener hi rahoge." });
+    },
+    onSeatRequestExpired: () => {
+      setSeatPending(false);
+      room.pushMsg({ kind: "system", text: "🎙️ Seat request ka time khatam — host ne jawab nahi diya." });
+    },
+    onSeatInvited: (msg) => setSeatInvite({ inviteId: msg.inviteId, from: msg.from }),
+    onSeatInviteExpired: () => setSeatInvite(null),
+    onSeatLeft: (msg) => {
+      if (msg.peerId === sockRef.current?.peerId) {
+        stopPublishing();
+        if (msg.removed) room.pushMsg({ kind: "system", text: "🎙️ Host ne tumhe seat se hata diya — ab tum listener ho." });
+      } else {
+        peers.closePeer(msg.peerId);
+      }
+    },
+    onLiveLikes: () => spawnHeart(),
+    onSeatHostMuted: (msg) => {
+      // Host authority over my seat: apply it to the actual mic track.
+      setMyMuted(msg.muted);
+      for (const t of micStreamRef.current?.getAudioTracks() ?? []) t.enabled = !msg.muted;
+      room.pushMsg({ kind: "system", text: msg.muted ? "🔇 Host ne tumhara mic band kar diya hai." : "🎙️ Host ne tumhara mic khol diya hai." });
+    },
+  });
+  const { sockRef } = room;
+
+  const peers = useBroadPeers({
+    sockRef,
+    getStream: () => micStreamRef.current,
+    onRemote,
+    getAnswerKind: (from, data) => {
+      const pending = pendingAnswerKindRef.current.get(from);
+      if (pending) {
+        pendingAnswerKindRef.current.delete(from);
+        return pending;
+      }
+      if (from === hostPeerId) return seatedRef.current ? "seat-host" : "main";
+      if (seatedRef.current && data.broadSeat) return "seat";
+      return "listen";
+    },
+  });
+
+  const peersRef = useRef(peers);
+  peersRef.current = peers;
+
+  // Leaving the room stops the mic and tears the mesh down.
+  useEffect(
+    () => () => {
+      peersRef.current?.closeAll();
+      micStreamRef.current?.getTracks().forEach((t) => t.stop());
+      micStreamRef.current = null;
+    },
+    []
+  );
+
+  // Session detail (gift catalog, balance, follow state) like the
+  // video watch room.
+  useEffect(() => {
+    let cancelled = false;
+    call("getLive", { live_session_id: session.id }).then((res) => {
+      if (cancelled) return;
+      if (res.ok) {
+        setDetail(res);
+        if (typeof res.my_coin_balance === "number") setBalance(res.my_coin_balance);
+        const b = res.session?.broadcaster;
+        if (b) follows.setFollowed((prev) => ({ ...prev, [b.id]: Boolean(res.broadcaster_followed) }));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.id]);
+
+  // Follow state for everyone on stage.
+  useEffect(() => {
+    if (room.seats?.host?.user) follows.ensure(room.seats.host.user);
+    for (const s of room.seats?.seats ?? []) follows.ensure(s.user);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room.seats]);
+
+  const iAmSeated = Boolean(myPeerId && room.seats?.seats?.some((s) => s.peerId === myPeerId));
+  seatedRef.current = iAmSeated;
+  const mySeatMuted = room.seats?.seats?.find((s) => s.peerId === myPeerId)?.muted ?? myMuted;
+
+  async function startPublishing() {
+    if (micStreamRef.current) {
+      sockRef.current?.send({ type: "seat-ready" });
+      return;
+    }
+    try {
+      // AUDIO ONLY — a broad speaker never captures video.
+      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = s;
+      // Mic OPEN by default: the track starts enabled.
+      for (const t of s.getAudioTracks()) t.enabled = !myMuted;
+      sockRef.current?.send({ type: "seat-ready" });
+    } catch {
+      room.pushMsg({ kind: "system", text: "🎙️ Mic ki ijazat nahi mili — seat mili thi lekin tum bol nahi sakte. Browser settings me mic Allow karo." });
+    }
+  }
+
+  function stopPublishing() {
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current = null;
+    setMyMuted(false);
+    setSeatPending(false);
+    for (const [peerId, entry] of [...peers.pcsRef.current.entries()]) {
+      if (entry.kind === "seat" || entry.kind === "seat-host") peers.closePeer(peerId);
+    }
+  }
+
+  function toggleMyMute() {
+    const next = !mySeatMuted;
+    setMyMuted(next);
+    for (const t of micStreamRef.current?.getAudioTracks() ?? []) t.enabled = !next;
+    sockRef.current?.send({ type: "seat-mute", muted: next });
+  }
+
+  function toggleSound() {
+    setSoundMuted((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem("zoomly-viewer-sound-muted", next ? "1" : "0");
+      } catch {
+        /* storage unavailable */
+      }
+      return next;
+    });
+  }
+
+  function spawnHeart() {
+    heartIdRef.current += 1;
+    const id = heartIdRef.current;
+    const heart = {
+      id,
+      x: 72 + Math.random() * 18,
+      y: 62,
+      drift: Math.round(Math.random() * 70) - 35,
+      rot: Math.round(Math.random() * 36) - 18,
+      size: 26 + Math.round(Math.random() * 16),
+    };
+    setHearts((prev) => [...prev.slice(-24), heart]);
+    setTimeout(() => setHearts((prev) => prev.filter((h) => h.id !== id)), 1600);
+  }
+
+  async function sendGift(gift) {
+    if (room.ended) return;
+    setGiftBusy(gift.key);
+    setError("");
+    setNotice("");
+    const res = await call("sendGift", { live_session_id: session.id, gift_key: gift.key });
+    setGiftBusy("");
+    if (!res.ok) {
+      setError(res.message || "Gift nahi bheja ja saka.");
+      if (typeof res.my_balance === "number") setBalance(res.my_balance);
+      return;
+    }
+    setNotice(res.message);
+    if (typeof res.my_balance === "number") setBalance(res.my_balance);
+    refreshMe?.();
+  }
+
+  function leaveSeatOrBack() {
+    if (iAmSeated) {
+      sockRef.current?.send({ type: "seat-leave" });
+      stopPublishing();
+    } else {
+      onBack();
+    }
+  }
+
+  const gifts = detail?.gifts ?? [];
+  const broadcaster = detail?.session?.broadcaster ?? session.broadcaster;
+  const seatsFree = room.seats?.seatsFree ?? 0;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 40, background: "var(--bg, #0b0a10)", color: "var(--text)", display: "flex", flexDirection: "column" }}>
+      <BroadAudios audios={audios} muted={soundMuted} />
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px 8px" }}>
+        <button className="btn btn-small" onClick={onBack} aria-label="Back">←</button>
+        <LiveBadge />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 800, fontSize: 16.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🎙️ {session.title}</div>
+          <div style={{ color: "var(--dim)", fontSize: 12.5 }}>
+            @{broadcaster?.username} · 👀 {room.viewerCount} listening · ❤️ {room.liveLikes}
+            {!room.connected ? " · reconnect ho raha hai…" : ""}
+          </div>
+        </div>
+        <button className="btn" onClick={toggleSound} style={{ borderRadius: 999, padding: "9px 13px", fontWeight: 700 }} aria-label="Awaz on/off">
+          {soundMuted ? "🔇 Awaz band" : "🔊 Awaz on"}
+        </button>
+      </div>
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "4px 14px 10px", position: "relative" }}>
+        <BroadStage
+          seats={room.seats}
+          me={me}
+          myPeerId={myPeerId}
+          followed={follows.followed}
+          onFollow={follows.follow}
+          isHostView={false}
+          onSeatTap={(entry, seatNo) => {
+            if (!entry && !iAmSeated && !seatPending) {
+              setSeatPending(true);
+              sockRef.current?.send({ type: "seat-request" });
+            }
+          }}
+        />
+        <FloatingHearts hearts={hearts} />
+        <GiftAnimationOverlay anim={room.giftAnim} bottom="4%" />
+        {seatInvite && !iAmSeated && (
+          <div className="card" data-seat-invite={seatInvite.inviteId} style={{ marginTop: 10, padding: 12, display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 22 }}>🎙️</span>
+            <div style={{ flex: 1, fontSize: 14 }}>
+              <strong>@{seatInvite.from.user.username}</strong> tumhe seat par bula raha hai — mic khula hoga!
+            </div>
+            <button className="btn btn-primary btn-small" onClick={() => { sockRef.current?.send({ type: "seat-invite-respond", inviteId: seatInvite.inviteId, accept: true }); setSeatInvite(null); }}>✔️ Beth jao</button>
+            <button className="btn btn-small" onClick={() => { sockRef.current?.send({ type: "seat-invite-respond", inviteId: seatInvite.inviteId, accept: false }); setSeatInvite(null); }}>✖️ Mana</button>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+          {iAmSeated ? (
+            <>
+              <button className="btn" onClick={toggleMyMute} style={{ borderRadius: 999, padding: "10px 15px", fontWeight: 700 }}>
+                {mySeatMuted ? "🔇 Mic band hai — kholo" : "🎙️ Mic khula hai"}
+              </button>
+              <button className="btn" onClick={leaveSeatOrBack} style={{ borderRadius: 999, padding: "10px 15px", fontWeight: 700 }}>
+                ⬇️ Seat chhoro
+              </button>
+            </>
+          ) : (
+            <button
+              className="btn btn-primary"
+              data-seat-cta="true"
+              disabled={seatPending || seatsFree <= 0}
+              onClick={() => {
+                setSeatPending(true);
+                sockRef.current?.send({ type: "seat-request" });
+              }}
+              style={{ borderRadius: 999, padding: "11px 18px", fontWeight: 800 }}
+            >
+              {seatPending ? "⏳ Host ke jawab ka intezar…" : seatsFree <= 0 ? "🪑 Seats full hain" : "✋ Seat lo"}
+            </button>
+          )}
+          <button className="btn" onClick={() => { spawnHeart(); sockRef.current?.like(1); }} style={{ borderRadius: 999, padding: "10px 15px", fontWeight: 700 }} aria-label="Like">
+            ❤️
+          </button>
+          <button className="btn" onClick={() => setShowGifts((v) => !v)} style={{ borderRadius: 999, padding: "10px 15px", fontWeight: 700 }}>
+            🎁 Gift
+          </button>
+        </div>
+        {room.ended && (
+          <p style={{ color: "var(--dim)", marginTop: 12 }}>Ye broad khatam ho gaya hai. <button className="btn btn-small" onClick={onBack}>Wapas jao</button></p>
+        )}
+      </div>
+
+      <div style={{ borderTop: "1px solid var(--border)", padding: "8px 14px calc(10px + env(safe-area-inset-bottom))", background: "var(--surface)", position: "relative" }}>
+        <ChatFeed messages={room.messages} compact />
+        <ChatInput onSend={room.sendChat} />
+      </div>
+
+      {showGifts && !room.ended && gifts.length > 0 && (
+        <>
+          <div onClick={() => setShowGifts(false)} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 7 }} />
+          <div
+            style={{
+              position: "absolute",
+              left: 0,
+              right: 0,
+              bottom: 0,
+              zIndex: 8,
+              background: "var(--surface)",
+              borderTop: "1px solid var(--border)",
+              borderRadius: "18px 18px 0 0",
+              padding: "14px 14px calc(14px + env(safe-area-inset-bottom))",
+              animation: "zoomly-sheet-up 0.22s ease-out",
+              maxHeight: "62dvh",
+              overflowY: "auto",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <strong style={{ fontSize: 16, flex: 1 }}>🎁 Gift bhejo</strong>
+              <span className="chip">🪙 {balance}</span>
+              <button type="button" className="btn btn-small" onClick={() => setShowGifts(false)} aria-label="Close gifts">✕</button>
+            </div>
+            <div style={{ fontSize: 13, color: "var(--dim)", margin: "8px 0 10px" }}>
+              Gift ke 70% coins host ko jayenge. Tumhara balance: <strong style={{ color: "var(--text)" }}>🪙 {balance}</strong>
+            </div>
+            <Notice text={error} bad />
+            <Notice text={notice} />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginTop: 6 }}>
+              {gifts.map((gift) => (
+                <button
+                  key={gift.key}
+                  className="card"
+                  onClick={() => sendGift(gift)}
+                  disabled={giftBusy === gift.key}
+                  style={{ padding: "8px 4px", textAlign: "center", cursor: "pointer", color: "var(--text)", opacity: giftBusy && giftBusy !== gift.key ? 0.6 : 1 }}
+                >
+                  <div style={{ fontSize: 24 }}>{gift.emoji}</div>
+                  <div style={{ fontSize: 12, fontWeight: 700 }}>{gift.name}</div>
+                  <div style={{ fontSize: 12, color: "var(--dim)" }}>🪙 {gift.coins.toLocaleString()}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ---- Live tab root -----------------------------------------------------------------
 
 export function LiveView({ me, refreshMe, onOpenProfile }) {
@@ -2235,6 +3309,19 @@ export function LiveView({ me, refreshMe, onOpenProfile }) {
     );
   }
   if (screen.kind === "broadcast") {
+    if (screen.session.kind === "broad") {
+      return (
+        <BroadHostRoom
+          me={me}
+          session={screen.session}
+          stream={screen.stream}
+          onDone={(summary) => {
+            refreshMe?.();
+            setScreen({ kind: "summary", summary });
+          }}
+        />
+      );
+    }
     return (
       <BroadcastRoom
         me={me}
@@ -2249,6 +3336,9 @@ export function LiveView({ me, refreshMe, onOpenProfile }) {
     );
   }
   if (screen.kind === "watch") {
+    if (screen.session.kind === "broad") {
+      return <BroadWatchRoom me={me} session={screen.session} refreshMe={refreshMe} onBack={() => setScreen({ kind: "list" })} />;
+    }
     return <WatchRoom me={me} session={screen.session} refreshMe={refreshMe} onBack={() => setScreen({ kind: "list" })} />;
   }
   if (screen.kind === "summary") {

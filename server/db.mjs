@@ -190,6 +190,7 @@ export async function initDb() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       title TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'video',
       started_at INTEGER NOT NULL,
       ended_at INTEGER,
       hidden INTEGER NOT NULL DEFAULT 0,
@@ -259,4 +260,5 @@ export async function initDb() {
   const liveCols = await client.execute("PRAGMA table_info(live_sessions)");
   const liveColNames = new Set(liveCols.rows.map((r) => r.name));
   if (!liveColNames.has("hidden")) await client.execute("ALTER TABLE live_sessions ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0");
+  if (!liveColNames.has("kind")) await client.execute("ALTER TABLE live_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'");
 }

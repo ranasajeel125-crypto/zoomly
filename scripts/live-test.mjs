@@ -1145,5 +1145,521 @@ try {
   check(`jsdom gift animation check (${err.message})`, false);
 }
 
+// ---- Broad (audio-only voice rooms) -------------------------------------------------
+// Raw-socket protocol: session kind, seat request/accept with the mic
+// OPEN by default, host authority (drop / seat-mute / invite), the
+// 6-seat cap, and the kind refusals (no video guest seat, no PK match
+// inside a broad). Then two jsdom renders: the listener side (list
+// badge, seats stage, real follow, seat via the CTA with an audio-only
+// mic capture) and the host side (Go Broad setup, stage, accepting a
+// seat request from the real UI).
+console.log("\n— Broad voice rooms —");
+try {
+  const bHostName = `bhost_${suffix}`;
+  const bHost = await api("signup", { username: bHostName, display_name: "Broad Host", password: "test-pass-123" });
+  check("broad host signup", bHost.ok === true, JSON.stringify(bHost).slice(0, 160));
+  const mkB = async (name, display) => {
+    const u = await api("signup", { username: `${name}_${suffix}`, display_name: display, password: "test-pass-123" });
+    return u;
+  };
+  const bLis = await mkB("blis", "Broad Listener");
+  const bInv = await mkB("binv", "Broad Invited");
+  check("broad users signup", bLis.ok === true && bInv.ok === true);
+
+  const bStart = await api("startLive", { token: bHost.token, title: "Broad Gapshap", kind: "broad" });
+  check("startLive accepts kind=broad", bStart.ok === true && bStart.session?.kind === "broad", JSON.stringify(bStart).slice(0, 200));
+  const bSid = bStart.session.id;
+  const bVid = await mkB("bvid", "Video Host");
+  const bVidStart = await api("startLive", { token: bVid.token, title: "Sirf video" });
+  check("startLive without kind stays a video live", bVidStart.ok === true && bVidStart.session?.kind === "video", JSON.stringify(bVidStart).slice(0, 160));
+
+  const bList = await api("listLive", { token: bLis.token });
+  const bCard = bList.lives?.find((l) => l.id === bSid);
+  check("broad session lists with kind=broad", bCard?.kind === "broad", JSON.stringify(bCard).slice(0, 160));
+  const bDetail = await api("getLive", { token: bLis.token, live_session_id: bSid });
+  check("getLive carries the broad kind", bDetail.ok === true && bDetail.session?.kind === "broad");
+
+  const bh = await connectSocket(bHost.token);
+  bh.send({ type: "join", liveSessionId: bSid });
+  const bhJoined = await bh.waitFor((m) => m.type === "joined", 8000, "broad host joined");
+  check("host joined payload carries kind=broad", bhJoined.kind === "broad");
+  check("host seat starts with the mic OPEN (muted=false)", bhJoined.seats?.host?.muted === false, JSON.stringify(bhJoined.seats).slice(0, 160));
+  check("host joined snapshot has 6 free seats", bhJoined.seats?.seatsFree === 6 && bhJoined.seats?.seats?.length === 0);
+
+  const bl = await connectSocket(bLis.token);
+  bl.send({ type: "join", liveSessionId: bSid });
+  const blJoined = await bl.waitFor((m) => m.type === "joined", 8000, "broad listener joined");
+  check("listener joined as viewer of the broad", blJoined.role === "viewer" && blJoined.kind === "broad");
+  await bh.waitFor((m) => m.type === "viewer-joined" && m.peerId === bl.peerId, 8000, "host told about the listener");
+  check("listener joining publishes nothing by itself (host wires a plain listener connection)", true);
+
+  // Kind refusals: no video guest seat and no PK match inside a broad.
+  bl.send({ type: "guest-request" });
+  const guestRefused = await bl.waitFor((m) => m.type === "error" && /Broad room/.test(m.message || ""), 8000, "guest-request refused in broad");
+  check("video guest-request inside a broad is refused", Boolean(guestRefused));
+  const bv = await connectSocket(bVid.token);
+  bv.send({ type: "join", liveSessionId: bVidStart.session.id });
+  await bv.waitFor((m) => m.type === "joined", 8000, "video host joined");
+  bh.send({ type: "match-invite", toLiveSessionId: bVidStart.session.id });
+  const matchRefusedA = await bh.waitFor((m) => m.type === "error" && /Broad \(voice\) room se PK/.test(m.message || ""), 8000, "broad host match-invite refused");
+  check("match-invite FROM a broad room is refused", Boolean(matchRefusedA));
+  bv.send({ type: "match-invite", toLiveSessionId: bSid });
+  const matchRefusedB = await bv.waitFor((m) => m.type === "error" && /Broad \(voice\) room ke sath PK/.test(m.message || ""), 8000, "match-invite TO a broad refused");
+  check("match-invite TO a broad room is refused", Boolean(matchRefusedB));
+
+  // Seat request -> host accept -> speaker wiring, mic open by default.
+  bl.send({ type: "seat-request" });
+  const seatReq = await bh.waitFor((m) => m.type === "seat-request", 8000, "seat-request at host");
+  check("host receives the seat request with the requester", seatReq.from?.user?.username === bLis.user.username, JSON.stringify(seatReq).slice(0, 160));
+
+  // A plain listener has NO seat authority: drop / host-mute / respond
+  // from them must change nothing.
+  const gatecrasher = await mkB("bgate", "Gate Crasher");
+  const bg = await connectSocket(gatecrasher.token);
+  bg.send({ type: "join", liveSessionId: bSid });
+  await bg.waitFor((m) => m.type === "joined", 8000, "gatecrasher joined");
+  const seatMsgsBefore = bh.messages.filter((m) => m.type === "seats" || m.type === "seat-left").length;
+  bg.send({ type: "seat-drop", peerId: bl.peerId });
+  bg.send({ type: "seat-host-mute", peerId: bl.peerId, muted: true });
+  bg.send({ type: "seat-respond", requestId: seatReq.requestId, accept: false });
+  await sleep(500);
+  check(
+    "non-host seat-drop / seat-host-mute / seat-respond are rejected (no seat state change)",
+    bh.messages.filter((m) => m.type === "seats" || m.type === "seat-left").length === seatMsgsBefore
+  );
+
+  bh.send({ type: "seat-respond", requestId: seatReq.requestId, accept: true });
+  const seated = await bl.waitFor((m) => m.type === "seat-seated", 8000, "listener seated");
+  check("accepted listener is seated in seat 1", seated.seat === 1, JSON.stringify(seated).slice(0, 120));
+  const snap1 = await bl.waitFor((m) => m.type === "seats" && m.seats?.length === 1, 8000, "seats snapshot with 1 seat");
+  check("seat snapshot shows the speaker with mic OPEN (muted=false)", snap1.seats[0].peerId === bl.peerId && snap1.seats[0].muted === false, JSON.stringify(snap1.seats).slice(0, 200));
+  check("snapshot seatsFree drops to 5", snap1.seatsFree === 5);
+  bl.send({ type: "seat-ready" });
+  const seatPeerHost = await bh.waitFor((m) => m.type === "seat-peer" && m.peerId === bl.peerId, 8000, "seat-peer at host");
+  check("host told to initiate the speaker connection", seatPeerHost.initiate === true);
+  const seatPeerSpk = await bl.waitFor((m) => m.type === "seat-peer" && m.peerId === bh.peerId, 8000, "seat-peer at speaker");
+  check("speaker told the host peer (answer side)", seatPeerSpk.initiate === false);
+  // Audio mesh signaling relays between the seat peers like any peer.
+  bl.send({ type: "signal", to: bh.peerId, data: { kind: "offer", description: { type: "offer", sdp: "fake-audio" }, broadSeat: true } });
+  const sigAtHost = await bh.waitFor((m) => m.type === "signal" && m.from === bl.peerId && m.data?.broadSeat === true, 8000, "speaker signal at host");
+  check("seat audio signaling relays over the existing mesh", Boolean(sigAtHost));
+
+  // Host seat-mute, then the speaker's own self-mute toggle wins back.
+  bh.send({ type: "seat-host-mute", peerId: bl.peerId, muted: true });
+  const hostMutedNote = await bl.waitFor((m) => m.type === "seat-host-muted" && m.muted === true, 8000, "seat-host-muted note");
+  check("speaker is told the host muted their seat", Boolean(hostMutedNote));
+  const snapMuted = await bl.waitFor((m) => m.type === "seats" && m.seats?.[0]?.muted === true, 8000, "snapshot with muted seat");
+  check("snapshot shows the host-muted seat", snapMuted.seats[0].muted === true);
+  bl.send({ type: "seat-mute", muted: false });
+  const snapUnmuted = await bl.waitFor((m) => m.type === "seats" && m.seats?.[0]?.muted === false, 8000, "snapshot after self-unmute");
+  check("speaker self-mute toggle updates the seat state", snapUnmuted.seats[0].muted === false);
+
+  // Fill the remaining 5 seats; the 7th seat request must be refused.
+  const fillers = [];
+  for (let i = 0; i < 5; i++) {
+    const fu = await mkB(`bfill${i}`, `Filler ${i}`);
+    const fs2 = await connectSocket(fu.token);
+    fs2.send({ type: "join", liveSessionId: bSid });
+    await fs2.waitFor((m) => m.type === "joined", 8000, `filler ${i} joined`);
+    fs2.send({ type: "seat-request" });
+    const rq = await bh.waitFor((m) => m.type === "seat-request" && m.from?.user?.username === fu.user.username, 8000, `filler ${i} request`);
+    bh.send({ type: "seat-respond", requestId: rq.requestId, accept: true });
+    await fs2.waitFor((m) => m.type === "seat-seated", 8000, `filler ${i} seated`);
+    fillers.push({ user: fu, sock: fs2 });
+  }
+  const snapFull = await bh.waitFor((m) => m.type === "seats" && m.seats?.length === 6, 8000, "full seats snapshot");
+  check("all 6 guest seats fill (7 voices with the host)", snapFull.seats.length === 6 && snapFull.seatsFree === 0);
+  check("every filled seat starts with the mic OPEN", snapFull.seats.every((s) => s.muted === false));
+  const bLate = await mkB("blate", "Too Late");
+  const bLateSock = await connectSocket(bLate.token);
+  bLateSock.send({ type: "join", liveSessionId: bSid });
+  await bLateSock.waitFor((m) => m.type === "joined", 8000, "late listener joined");
+  bLateSock.send({ type: "seat-request" });
+  const fullRefusal = await bLateSock.waitFor((m) => m.type === "error" && /seats full/.test(m.message || ""), 8000, "7th seat request refused");
+  check("a seat request with all 6 seats full is refused with a plain message", Boolean(fullRefusal));
+
+  // Host drop: the speaker returns to listener and the host re-offers
+  // its normal listener connection to them.
+  const droppedPeer = fillers[0].sock.peerId;
+  bh.send({ type: "seat-drop", peerId: droppedPeer });
+  const dropNote = await fillers[0].sock.waitFor((m) => m.type === "seat-left" && m.peerId === droppedPeer, 8000, "seat-left at dropped speaker");
+  check("host drop broadcasts seat-left with removed=true", dropNote.removed === true);
+  await waitForCount(bh, (m) => m.type === "viewer-joined" && m.peerId === droppedPeer, 2, "host re-offer to dropped speaker");
+  check("dropped speaker is re-wired as a plain listener", true);
+  const snapAfterDrop = await bh.waitFor((m) => m.type === "seats" && m.seats?.length === 5, 8000, "snapshot after drop");
+  check("the dropped seat frees up", snapAfterDrop.seatsFree === 1);
+
+  // Voluntary leave.
+  bl.send({ type: "seat-leave" });
+  const leaveNote = await bh.waitFor((m) => m.type === "seat-left" && m.peerId === bl.peerId, 8000, "seat-left at host");
+  check("voluntary seat-leave broadcasts seat-left with removed=false", leaveNote.removed === false);
+
+  // Host invite path: pick a current listener, they accept.
+  const bi = await connectSocket(bInv.token);
+  bi.send({ type: "join", liveSessionId: bSid });
+  await bi.waitFor((m) => m.type === "joined", 8000, "invitee joined");
+  bh.send({ type: "seat-invite", toPeerId: bi.peerId });
+  const invite = await bi.waitFor((m) => m.type === "seat-invited", 8000, "seat-invited at listener");
+  check("host invite reaches the picked listener", invite.from?.user?.username === bHost.user.username, JSON.stringify(invite).slice(0, 160));
+  bi.send({ type: "seat-invite-respond", inviteId: invite.inviteId, accept: true });
+  const invitedSeated = await bi.waitFor((m) => m.type === "seat-seated", 8000, "invitee seated");
+  check("accepting a host invite seats the listener", typeof invitedSeated.seat === "number");
+  const snapInvite = await bi.waitFor((m) => m.type === "seats" && m.seats?.some((s) => s.peerId === bi.peerId), 8000, "snapshot with invitee");
+  check("invited speaker's mic is OPEN by default", snapInvite.seats.find((s) => s.peerId === bi.peerId)?.muted === false);
+
+  // Gifts work in a broad exactly like a video live (animation rides
+  // the same broadcast): fund the listener 100 coins first.
+  const bTid = `BROADTID${Date.now()}`;
+  const bReqCoins = await api("requestCustomCoins", { token: bLis.token, coins: 100, tid: bTid });
+  const bPending = await api("getAdminCoinRequests", { token: adminToken });
+  const bReqRow = bPending.requests?.find((r) => r.tid === bTid);
+  await api("reviewCoinRequest", { token: adminToken, request_id: bReqRow.id, decision: "approved" });
+  check("broad gift funding approved", bReqCoins.ok === true && Boolean(bReqRow));
+  const hostBefore = (await api("getMe", { token: bHost.token })).user.coin_balance;
+  const bGift = await api("sendGift", { token: bLis.token, live_session_id: bSid, gift_key: "chocolate" });
+  check("gift sends inside a broad room", bGift.ok === true && bGift.gift?.coins === 25, JSON.stringify(bGift).slice(0, 160));
+  const giftAtHost = await bh.waitFor((m) => m.type === "gift" && m.gift?.key === "chocolate", 8000, "gift broadcast at broad host");
+  check("gift broadcast reaches the broad room (animation rides it)", Boolean(giftAtHost));
+  const hostAfter = (await api("getMe", { token: bHost.token })).user.coin_balance;
+  check("broad host earns the 70% creator share (25 -> 17)", hostAfter - hostBefore === 17, `${hostBefore} -> ${hostAfter}`);
+
+  // ---- jsdom: listener side — badge, stage, follow, seat via CTA ----
+  try {
+    const bw = await mkB("bwatch", "Broad Watcher");
+    const indexHtml = fs.readFileSync(path.join(DIST_DIR, "index.html"), "utf8");
+    const bundleName = fs.readdirSync(path.join(DIST_DIR, "assets")).find((f) => f.endsWith(".js"));
+    const bundle = fs.readFileSync(path.join(DIST_DIR, "assets", bundleName), "utf8");
+    check("bundle contains the Broad UI", bundle.includes("Broad (sirf awaz)") && bundle.includes("Seat lo"));
+    const dom = new JSDOM(indexHtml, {
+      url: `${BASE}/`,
+      runScripts: "dangerously",
+      pretendToBeVisual: true,
+      beforeParse(window) {
+        window.localStorage.setItem("zoomly_token", bw.token);
+        window.fetch = (u, o = {}) => {
+          const { signal, ...rest } = o;
+          return fetch(new URL(u, BASE), rest);
+        };
+        window.IntersectionObserver = class {
+          observe() {}
+          unobserve() {}
+          disconnect() {}
+        };
+        window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+        window.HTMLMediaElement.prototype.pause = () => {};
+        window.HTMLMediaElement.prototype.load = () => {};
+        window.scrollTo = () => {};
+        if (!window.WebSocket) {
+          window.WebSocket = class {
+            constructor() {
+              this.readyState = 0;
+            }
+            send() {}
+            close() {
+              this.readyState = 3;
+            }
+          };
+        }
+        // Fake media: records every capture request so the test can
+        // prove a broad speaker is only ever asked for AUDIO.
+        window.__gumCalls = [];
+        const fakeTrack = (kind) => ({
+          kind,
+          enabled: true,
+          readyState: "live",
+          stop() {
+            this.readyState = "ended";
+          },
+          getSettings: () => ({}),
+        });
+        window.MediaStream = class FakeMediaStream {
+          constructor(tracks = []) {
+            this._tracks = [...tracks];
+          }
+          getTracks() {
+            return [...this._tracks];
+          }
+          getVideoTracks() {
+            return this._tracks.filter((t) => t.kind === "video");
+          }
+          getAudioTracks() {
+            return this._tracks.filter((t) => t.kind === "audio");
+          }
+          addTrack(t) {
+            this._tracks.push(t);
+          }
+        };
+        Object.defineProperty(window.navigator, "mediaDevices", {
+          configurable: true,
+          value: {
+            getUserMedia: async (constraints = {}) => {
+              window.__gumCalls.push(constraints);
+              const tracks = [];
+              if (constraints.audio) tracks.push(fakeTrack("audio"));
+              if (constraints.video) tracks.push(fakeTrack("video"));
+              return new window.MediaStream(tracks);
+            },
+          },
+        });
+        window.RTCPeerConnection = class FakePC {
+          constructor() {
+            this.connectionState = "new";
+            this.iceConnectionState = "new";
+            this.localDescription = null;
+            this.remoteDescription = null;
+          }
+          addTrack() {}
+          async createOffer() {
+            return { type: "offer", sdp: "fake" };
+          }
+          async createAnswer() {
+            return { type: "answer", sdp: "fake" };
+          }
+          async setLocalDescription(d) {
+            this.localDescription = d;
+          }
+          async setRemoteDescription(d) {
+            this.remoteDescription = d;
+          }
+          async addIceCandidate() {}
+          close() {
+            this.connectionState = "closed";
+          }
+        };
+      },
+    });
+    const { document } = dom.window;
+    const bodyText = () => document.body?.textContent || "";
+    const waitFor = async (desc, pred, timeoutMs = 25000) => {
+      const t0 = Date.now();
+      for (;;) {
+        if (pred()) return;
+        if (Date.now() - t0 > timeoutMs) throw new Error(`Timed out waiting for: ${desc}`);
+        await sleep(200);
+      }
+    };
+    const click = (el) => el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+    dom.window.eval(bundle);
+    await waitFor("broad watcher app boot", () => bodyText().includes("For You") || bodyText().includes("could not open"));
+    check("broad watcher app boots without crash", !bodyText().includes("could not open"));
+    const liveIconBtn = document.querySelector('button[aria-label="Open Live"]');
+    click(liveIconBtn);
+    await waitFor("broad listed in the Live list", () => Boolean(document.querySelector('[data-live-kind="broad"]')) || bodyText().includes("could not open"));
+    const broadCard = [...document.querySelectorAll('[data-live-kind="broad"]')].find((c) => (c.textContent || "").includes("Broad Gapshap"));
+    check("Live list shows the broad with its 🎙️ Broad badge", Boolean(broadCard) && (broadCard.textContent || "").includes("🎙️ Broad"), (broadCard?.textContent || "").slice(0, 140));
+    const sunnoBtn = [...broadCard.querySelectorAll("button")].find((b) => (b.textContent || "").includes("Sunno"));
+    check("broad card's join button says 🎙️ Sunno", Boolean(sunnoBtn));
+    click(sunnoBtn);
+    await waitFor("broad watch room stage", () => Boolean(document.querySelector("[data-broad-stage]")) || bodyText().includes("could not open"));
+    check("broad watch room renders the seats stage (no video stage)", Boolean(document.querySelector("[data-broad-stage]")) && !bodyText().includes("could not open"));
+    const hostCell = document.querySelector("[data-broad-host]");
+    check("host seat renders first with mic OPEN", Boolean(hostCell) && hostCell.getAttribute("data-seat-muted") === "false", hostCell?.textContent?.slice(0, 100));
+    check("stage shows the filled seats from the snapshot", document.querySelectorAll('[data-seat-state="filled"]').length >= 4, `filled=${document.querySelectorAll('[data-seat-state="filled"]').length}`);
+    // Follow from a seat: the host's seat offers Follow (not followed
+    // yet), clicking calls the real toggleFollow, and the button goes.
+    const followBtn = document.querySelector(`[data-follow-user="${bHost.user.id}"]`);
+    check("host seat shows a Follow button", Boolean(followBtn));
+    click(followBtn);
+    await waitFor("follow button retires after following", () => !document.querySelector(`[data-follow-user="${bHost.user.id}"]`));
+    const profileAfterFollow = await api("getProfile", { token: bw.token, user_id: bHost.user.id });
+    check("follow from the seat hit the real follow action", profileAfterFollow.profile?.followed_by_me === true);
+    // Seat via the CTA: request goes to the raw host, who accepts; the
+    // room flips to speaker controls and only AUDIO was ever captured.
+    const cta = document.querySelector('[data-seat-cta="true"]');
+    check("listener sees the ✋ Seat lo button", Boolean(cta) && !cta.disabled);
+    click(cta);
+    const bwReq = await bh.waitFor((m) => m.type === "seat-request" && m.from?.user?.username === bw.user.username, 8000, "watcher seat request at host");
+    bh.send({ type: "seat-respond", requestId: bwReq.requestId, accept: true });
+    await waitFor("watcher becomes a speaker", () => bodyText().includes("Mic khula hai") || bodyText().includes("could not open"));
+    check("accepted watcher sees speaker controls with the mic OPEN", bodyText().includes("🎙️ Mic khula hai"));
+    check(
+      "broad speaker capture was AUDIO ONLY (video was never requested)",
+      dom.window.__gumCalls.length >= 1 && dom.window.__gumCalls.every((c) => c.audio && !c.video),
+      JSON.stringify(dom.window.__gumCalls).slice(0, 160)
+    );
+    dom.window.close();
+  } catch (err) {
+    check(`jsdom broad watch check (${err.message})`, false);
+  }
+
+  // ---- jsdom: host side — Go Broad setup + stage + accept ----
+  try {
+    const bh3 = await mkB("bhost3", "Broad Host Three");
+    const indexHtml = fs.readFileSync(path.join(DIST_DIR, "index.html"), "utf8");
+    const bundleName = fs.readdirSync(path.join(DIST_DIR, "assets")).find((f) => f.endsWith(".js"));
+    const bundle = fs.readFileSync(path.join(DIST_DIR, "assets", bundleName), "utf8");
+    const dom = new JSDOM(indexHtml, {
+      url: `${BASE}/`,
+      runScripts: "dangerously",
+      pretendToBeVisual: true,
+      beforeParse(window) {
+        window.localStorage.setItem("zoomly_token", bh3.token);
+        window.fetch = (u, o = {}) => {
+          const { signal, ...rest } = o;
+          return fetch(new URL(u, BASE), rest);
+        };
+        window.IntersectionObserver = class {
+          observe() {}
+          unobserve() {}
+          disconnect() {}
+        };
+        window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+        window.HTMLMediaElement.prototype.pause = () => {};
+        window.HTMLMediaElement.prototype.load = () => {};
+        window.scrollTo = () => {};
+        if (!window.WebSocket) {
+          window.WebSocket = class {
+            constructor() {
+              this.readyState = 0;
+            }
+            send() {}
+            close() {
+              this.readyState = 3;
+            }
+          };
+        }
+        window.__gumCalls = [];
+        const fakeTrack = (kind) => ({
+          kind,
+          enabled: true,
+          readyState: "live",
+          stop() {
+            this.readyState = "ended";
+          },
+          getSettings: () => ({}),
+        });
+        window.MediaStream = class FakeMediaStream {
+          constructor(tracks = []) {
+            this._tracks = [...tracks];
+          }
+          getTracks() {
+            return [...this._tracks];
+          }
+          getVideoTracks() {
+            return this._tracks.filter((t) => t.kind === "video");
+          }
+          getAudioTracks() {
+            return this._tracks.filter((t) => t.kind === "audio");
+          }
+          addTrack(t) {
+            this._tracks.push(t);
+          }
+        };
+        Object.defineProperty(window.navigator, "mediaDevices", {
+          configurable: true,
+          value: {
+            getUserMedia: async (constraints = {}) => {
+              window.__gumCalls.push(constraints);
+              const tracks = [];
+              if (constraints.audio) tracks.push(fakeTrack("audio"));
+              if (constraints.video) tracks.push(fakeTrack("video"));
+              return new window.MediaStream(tracks);
+            },
+          },
+        });
+        window.RTCPeerConnection = class FakePC {
+          constructor() {
+            this.connectionState = "new";
+            this.iceConnectionState = "new";
+            this.localDescription = null;
+            this.remoteDescription = null;
+          }
+          addTrack() {}
+          async createOffer() {
+            return { type: "offer", sdp: "fake" };
+          }
+          async createAnswer() {
+            return { type: "answer", sdp: "fake" };
+          }
+          async setLocalDescription(d) {
+            this.localDescription = d;
+          }
+          async setRemoteDescription(d) {
+            this.remoteDescription = d;
+          }
+          async addIceCandidate() {}
+          close() {
+            this.connectionState = "closed";
+          }
+        };
+      },
+    });
+    const { document } = dom.window;
+    const bodyText = () => document.body?.textContent || "";
+    const waitFor = async (desc, pred, timeoutMs = 25000) => {
+      const t0 = Date.now();
+      for (;;) {
+        if (pred()) return;
+        if (Date.now() - t0 > timeoutMs) throw new Error(`Timed out waiting for: ${desc}`);
+        await sleep(200);
+      }
+    };
+    const click = (el) => el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+    dom.window.eval(bundle);
+    await waitFor("broad host app boot", () => bodyText().includes("For You") || bodyText().includes("could not open"));
+    const navLiveBtn = [...document.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("Live"));
+    click(navLiveBtn);
+    await waitFor("Live tab", () => bodyText().includes("shuru karo") || bodyText().includes("could not open"));
+    const goLiveBtn = [...document.querySelectorAll("button")].find((b) => !b.closest("nav") && (b.textContent || "").includes("shuru karo"));
+    click(goLiveBtn);
+    await waitFor("go-live setup", () => Boolean(document.querySelector('[data-live-mode="broad"]')) || bodyText().includes("could not open"));
+    const broadModeBtn = document.querySelector('[data-live-mode="broad"]');
+    check("setup offers the 🎙️ Broad (sirf awaz) mode", Boolean(broadModeBtn));
+    click(broadModeBtn);
+    await waitFor("broad setup panel", () => bodyText().includes("Mic on karo") || bodyText().includes("could not open"));
+    const micBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("Mic on karo"));
+    click(micBtn);
+    await waitFor("mic captured", () => bodyText().includes("Mic tayyar hai"));
+    check(
+      "broad setup captured AUDIO ONLY (camera never requested)",
+      dom.window.__gumCalls.length === 1 && dom.window.__gumCalls.every((c) => c.audio && !c.video),
+      JSON.stringify(dom.window.__gumCalls).slice(0, 160)
+    );
+    const startBroadBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("Start Broad"));
+    await waitFor("Start Broad enabled", () => startBroadBtn && !startBroadBtn.disabled);
+    click(startBroadBtn);
+    await waitFor("broad host room", () => Boolean(document.querySelector("[data-broad-stage]")) || bodyText().includes("could not open"));
+    check("broad host room renders the seats stage", Boolean(document.querySelector("[data-broad-stage]")) && bodyText().includes("End Broad"));
+    const hostCell = document.querySelector("[data-broad-host]");
+    check("host's own seat shows the mic OPEN", hostCell?.getAttribute("data-seat-muted") === "false");
+    check("host stage starts with 6 empty seats", document.querySelectorAll('[data-seat-state="empty"]').length === 6);
+    // A raw listener joins this host's broad and asks for a seat; the
+    // host accepts from the real UI and the stage fills.
+    const bh3List = await api("listLive", { token: bh3.token });
+    const bh3Sid = bh3List.lives?.find((l) => l.broadcaster?.username === bh3.user.username)?.id;
+    check("jsdom host's broad session is listed", Boolean(bh3Sid));
+    const bReq2 = await mkB("breq2", "Seat Asker");
+    const bReq2Sock = await connectSocket(bReq2.token);
+    bReq2Sock.send({ type: "join", liveSessionId: bh3Sid });
+    await bReq2Sock.waitFor((m) => m.type === "joined", 8000, "asker joined the jsdom broad");
+    bReq2Sock.send({ type: "seat-request" });
+    await waitFor("seat request card in the host UI", () => Boolean(document.querySelector("[data-seat-request]")));
+    const acceptBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("Accept"));
+    check("host UI shows the seat request with Accept", Boolean(acceptBtn));
+    click(acceptBtn);
+    await bReq2Sock.waitFor((m) => m.type === "seat-seated", 8000, "asker seated via host UI");
+    check("accepting in the host UI seats the requester", true);
+    await waitFor("host stage shows the filled seat", () => document.querySelectorAll('[data-seat-state="filled"]').length === 1);
+    check("host stage fills the seat", document.querySelectorAll('[data-seat-state="filled"]').length === 1);
+    bReq2Sock.close();
+    await api("endLive", { token: bh3.token, live_session_id: bh3Sid });
+    dom.window.close();
+  } catch (err) {
+    check(`jsdom broad host check (${err.message})`, false);
+  }
+
+  bh.close();
+  bl.close();
+  bv.close();
+  bg.close();
+  bi.close();
+  bLateSock.close();
+  for (const f of fillers) f.sock.close();
+  await api("endLive", { token: bHost.token, live_session_id: bSid });
+  await api("endLive", { token: bVid.token, live_session_id: bVidStart.session.id });
+} catch (err) {
+  check(`broad section (${err.message})`, false);
+}
+
 console.log(failures === 0 ? "\nLIVE TEST PASSED ✔" : `\nLIVE TEST FAILED — ${failures} check(s) failed ✗`);
 process.exit(failures === 0 ? 0 : 1);

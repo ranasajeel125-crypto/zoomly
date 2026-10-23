@@ -53,6 +53,32 @@
 // in the room (and vice versa) — v1 keeps the stage to two publishers
 // of one kind at a time.
 //
+// Broad rooms (session kind "broad", audio-only) seat up to 6 speakers
+// next to the host instead — same request/invite pattern, seats instead
+// of one guest, every publisher audio-only:
+//   S->C  {type:"joined", kind:"broad", seats:<snapshot>}
+//   S->C  {type:"seats", host:{peerId,user,muted}, seats:[{seat,peerId,user,muted}], seatsFree}
+//   C->S  {type:"seat-request"}                     (listener asks)
+//   S->C  {type:"seat-request", requestId, from, expiresAt}        (host)
+//   C->S  {type:"seat-respond", requestId, accept}                 (host)
+//   S->C  {type:"seat-seated", seat} | {type:"seat-declined", requestId} |
+//         {type:"seat-request-expired", requestId} | {type:"seat-request-cancelled", requestId}
+//   C->S  {type:"seat-ready"}    (speaker has its mic — always live — and can publish)
+//   S->C  {type:"seat-peer", peerId, initiate}       (host<->speaker wiring)
+//   C->S  {type:"seat-invite", toPeerId}             (host invites a listener)
+//   S->C  {type:"seat-invited", inviteId, from, expiresAt}         (listener)
+//   C->S  {type:"seat-invite-respond", inviteId, accept}           (listener)
+//   S->C  {type:"seat-invite-declined", inviteId, by} | {type:"seat-invite-expired", inviteId}
+//   C->S  {type:"seat-leave"}                        (speaker steps down)
+//   C->S  {type:"seat-drop", peerId}                 (host drops a speaker)
+//   C->S  {type:"seat-mute", muted}                  (self-mute: host or speaker)
+//   C->S  {type:"seat-host-mute", peerId, muted}     (host mutes a seat)
+//   S->C  {type:"seat-host-muted", muted}            (the muted speaker)
+//   S->C  {type:"seat-left", peerId, removed}        (whole room)
+// Mics are OPEN BY DEFAULT: every seat (host included) starts
+// muted === false; muting is a choice, never a gate. Broad rooms
+// refuse PK matches and the video guest seat (kind checks).
+//
 // PK matches (two broadcasters, one shared 5-minute battle):
 //   C->S  {type:"match-invite", toLiveSessionId}
 //   S->C  {type:"match-invite", inviteId, from:{liveSessionId,title,user}}
@@ -75,19 +101,63 @@ import { MATCH_DURATION_MS, MATCH_INVITE_TTL_MS, findBannedContent, isAdminUser 
 const AUTH_TIMEOUT_MS = 10_000;
 const MAX_CHAT_CHARS = 500;
 
-const rooms = new Map(); // sessionId -> { broadcaster, viewers: Map, guest, guestRequests: Map, likes }
+const rooms = new Map(); // sessionId -> { broadcaster, viewers: Map, guest, guestRequests: Map, likes, kind, seats: Map, seatRequests: Map, seatInvites: Map, hostMuted }
 
 // Tap-tap likes: per-user rate limit — at most this many taps are
 // counted per second, however fast they tap or batch.
 const MAX_LIKES_PER_SECOND = 10;
 
+// Broad (audio-only voice rooms): the host plus at most this many
+// seated speakers — 7 voices in total.
+const BROAD_MAX_SEATS = 6;
+const SEAT_REQUEST_TTL_MS = 30_000;
+
 function roomFor(sessionId) {
   let room = rooms.get(sessionId);
   if (!room) {
-    room = { broadcaster: null, viewers: new Map(), guest: null, guestWired: false, guestRequests: new Map(), likes: 0, sessionId };
+    room = {
+      broadcaster: null,
+      viewers: new Map(),
+      guest: null,
+      guestWired: false,
+      guestRequests: new Map(),
+      likes: 0,
+      sessionId,
+      kind: "video",
+      seats: new Map(), // broad: seatNo -> { peerId, user, muted, wired }
+      seatRequests: new Map(), // broad: requestId -> { fromPeerId, timer }
+      seatInvites: new Map(), // broad: inviteId -> { toPeerId, timer }
+      hostMuted: false, // broad: the host's own mic state (open by default)
+    };
     rooms.set(sessionId, room);
   }
   return room;
+}
+
+// The broad seat state the whole room renders from: the host seat
+// (pinned first) plus every filled guest seat. Microphones are OPEN
+// by default — `muted` starts false for the host and every speaker;
+// it only turns true when that person (or the host, for a speaker)
+// mutes. Sent as a full snapshot on every change.
+function seatsSnapshot(room) {
+  return {
+    host: room.broadcaster ? { peerId: room.broadcaster.peerId, user: publicUser(room.broadcaster.user), muted: room.hostMuted } : null,
+    seats: [...room.seats.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([seat, s]) => ({ seat, peerId: s.peerId, user: s.user, muted: s.muted })),
+    seatsFree: BROAD_MAX_SEATS - room.seats.size,
+  };
+}
+
+function broadcastSeats(room) {
+  broadcastRoom(room.sessionId, { type: "seats", liveSessionId: room.sessionId, ...seatsSnapshot(room) });
+}
+
+function seatOfPeer(room, peerId) {
+  for (const [seat, s] of room.seats.entries()) {
+    if (s.peerId === peerId) return { seat, entry: s };
+  }
+  return null;
 }
 
 function publicUser(user) {
@@ -166,6 +236,10 @@ export async function endLiveSession(sessionId, { notify = true } = {}) {
     if (notify) broadcastRoom(sessionId, { type: "live-ended", liveSessionId: sessionId });
     for (const req of room.guestRequests.values()) clearTimeout(req.timer);
     room.guestRequests.clear();
+    for (const req of room.seatRequests.values()) clearTimeout(req.timer);
+    room.seatRequests.clear();
+    for (const inv of room.seatInvites.values()) clearTimeout(inv.timer);
+    room.seatInvites.clear();
     for (const conn of roomConns(room)) conn.sessionId = null;
     rooms.delete(sessionId);
   }
@@ -357,6 +431,10 @@ async function handleMatchInvite(conn, toLiveSessionId) {
     return;
   }
   const myRoom = rooms.get(conn.sessionId);
+  if (myRoom?.kind === "broad") {
+    send(conn, { type: "error", message: "Broad (voice) room se PK match nahi hota." });
+    return;
+  }
   if (myRoom?.guest) {
     send(conn, { type: "error", message: "Tumhare live me guest betha hai — match abhi nahi ho sakta." });
     return;
@@ -364,6 +442,10 @@ async function handleMatchInvite(conn, toLiveSessionId) {
   const targetRoom = rooms.get(toLiveSessionId);
   if (!targetRoom?.broadcaster) {
     send(conn, { type: "error", message: "Woh broadcaster ab live nahi hai." });
+    return;
+  }
+  if (targetRoom.kind === "broad") {
+    send(conn, { type: "error", message: "Broad (voice) room ke sath PK match nahi hota." });
     return;
   }
   if (targetRoom.guest) {
@@ -417,6 +499,11 @@ async function handleMatchRespond(conn, inviteId, accept) {
   }
   if (fromRoom.guest || rooms.get(invite.toSessionId)?.guest) {
     send(conn, { type: "error", message: "Kisi ek live me guest betha hai — match abhi nahi ho sakta." });
+    if (fromRoom?.broadcaster) send(fromRoom.broadcaster, { type: "match-declined", by: publicUser(conn.user) });
+    return;
+  }
+  if (fromRoom.kind === "broad" || rooms.get(invite.toSessionId)?.kind === "broad") {
+    send(conn, { type: "error", message: "Broad (voice) room ke sath PK match nahi hota." });
     if (fromRoom?.broadcaster) send(fromRoom.broadcaster, { type: "match-declined", by: publicUser(conn.user) });
     return;
   }
@@ -475,6 +562,10 @@ async function handleGuestRequest(conn) {
     return;
   }
   const room = rooms.get(conn.sessionId);
+  if (room?.kind === "broad") {
+    send(conn, { type: "error", message: "Broad room me video guest seat nahi hoti — wahan ✋ Seat lo se sirf awaz ke liye bethte hain." });
+    return;
+  }
   if (!room?.broadcaster) {
     send(conn, { type: "error", message: "Broadcaster ab live nahi hai." });
     return;
@@ -570,6 +661,283 @@ function handleGuestRemove(conn) {
   if (room?.guest) unseatGuest(room, { removed: true });
 }
 
+// ---- Broad seats (audio-only voice rooms) -----------------------------------
+// The model mirrors the video guest seat, multiplied: up to
+// BROAD_MAX_SEATS listeners can sit as speakers next to the host, every
+// one publishing AUDIO ONLY over the same mesh signaling (broad clients
+// never capture video at all). The host holds the authority — seat
+// requests are answered by the host, the host can invite a listener
+// directly, drop a speaker back to listener, and mute a seat — while
+// every speaker controls their own mic too. Microphones are OPEN by
+// default: a seat is created with muted === false and the mic is live
+// the moment the speaker is wired; there is no tap-to-unmute gate.
+
+// Puts a viewer into the lowest free seat (mic open) and tells the room.
+function seatSpeaker(room, conn) {
+  let seatNo = 0;
+  for (let n = 1; n <= BROAD_MAX_SEATS; n++) {
+    if (!room.seats.has(n)) {
+      seatNo = n;
+      break;
+    }
+  }
+  if (!seatNo) return false;
+  room.seats.set(seatNo, { peerId: conn.peerId, user: publicUser(conn.user), muted: false, wired: false });
+  send(conn, { type: "seat-seated", liveSessionId: room.sessionId, seat: seatNo });
+  broadcastSeats(room);
+  return true;
+}
+
+// Called once the freshly seated speaker has its mic ("seat-ready"):
+// the host initiates the full-duplex host<->speaker connection, and the
+// speaker is told to publish to every other member (other speakers get
+// a full-duplex pair; plain listeners receive only). The host is not in
+// the viewers map, so it never appears in that list.
+function wireSeatSpeaker(room, speakerConn) {
+  const found = seatOfPeer(room, speakerConn.peerId);
+  if (!found || found.entry.wired) return;
+  found.entry.wired = true;
+  if (room.broadcaster) {
+    send(room.broadcaster, { type: "seat-peer", liveSessionId: room.sessionId, peerId: speakerConn.peerId, initiate: true });
+    send(speakerConn, { type: "seat-peer", liveSessionId: room.sessionId, peerId: room.broadcaster.peerId, initiate: false });
+  }
+  for (const member of room.viewers.values()) {
+    if (member.peerId === speakerConn.peerId) continue;
+    send(speakerConn, {
+      type: "viewer-joined",
+      peerId: member.peerId,
+      user: publicUser(member.user),
+      seatPublisher: true,
+      seatPeer: Boolean(seatOfPeer(room, member.peerId)),
+    });
+  }
+}
+
+// Returns a speaker to the listener pool (voluntary leave, host drop,
+// or seat cleanup). Everyone hears "seat-left" and closes that peer's
+// speaker connections; the host re-offers its normal send-only listener
+// connection so the ex-speaker keeps hearing the host.
+function unseatSpeaker(room, peerId, { removed }) {
+  const found = seatOfPeer(room, peerId);
+  if (!found) return;
+  room.seats.delete(found.seat);
+  broadcastRoom(room.sessionId, { type: "seat-left", liveSessionId: room.sessionId, peerId, removed });
+  broadcastSeats(room);
+  const back = room.viewers.get(peerId);
+  if (back && room.broadcaster) {
+    send(room.broadcaster, { type: "viewer-joined", peerId, user: publicUser(back.user) });
+  }
+}
+
+async function handleSeatRequest(conn) {
+  if (!conn.sessionId || conn.role !== "viewer") return;
+  const room = rooms.get(conn.sessionId);
+  if (!room || room.kind !== "broad") {
+    send(conn, { type: "error", message: "Seat sirf Broad (voice) rooms me milti hai." });
+    return;
+  }
+  if (!room.broadcaster) {
+    send(conn, { type: "error", message: "Host abhi connected nahi hai — thodi dair baad koshish karo." });
+    return;
+  }
+  if (seatOfPeer(room, conn.peerId)) {
+    send(conn, { type: "error", message: "Tum pehle se seat par bethay ho." });
+    return;
+  }
+  if (room.seats.size >= BROAD_MAX_SEATS) {
+    send(conn, { type: "error", message: "Saari 6 seats full hain — abhi koi seat khali nahi hai." });
+    return;
+  }
+  for (const r of room.seatRequests.values()) {
+    if (r.fromPeerId === conn.peerId) {
+      send(conn, { type: "error", message: "Tumhari seat request host ke paas pehle se hai." });
+      return;
+    }
+  }
+  // A block in either direction means no seat next to this host.
+  const blockRows = await db
+    .select({ id: schema.blocks.id })
+    .from(schema.blocks)
+    .where(
+      or(
+        and(eq(schema.blocks.userId, conn.user.id), eq(schema.blocks.blockedId, room.broadcaster.user.id)),
+        and(eq(schema.blocks.userId, room.broadcaster.user.id), eq(schema.blocks.blockedId, conn.user.id)),
+      ),
+    )
+    .limit(1);
+  if (blockRows.length > 0) {
+    send(conn, { type: "error", message: "Seat request nahi bhej sakte." });
+    return;
+  }
+  const requestId = crypto.randomBytes(8).toString("hex");
+  const timer = setTimeout(() => {
+    if (room.seatRequests.delete(requestId)) {
+      send(conn, { type: "seat-request-expired", liveSessionId: room.sessionId, requestId });
+      if (room.broadcaster) send(room.broadcaster, { type: "seat-request-cancelled", liveSessionId: room.sessionId, requestId });
+    }
+  }, SEAT_REQUEST_TTL_MS);
+  room.seatRequests.set(requestId, { fromPeerId: conn.peerId, timer });
+  send(room.broadcaster, {
+    type: "seat-request",
+    liveSessionId: room.sessionId,
+    requestId,
+    from: { peerId: conn.peerId, user: publicUser(conn.user) },
+    expiresAt: Date.now() + SEAT_REQUEST_TTL_MS,
+  });
+  send(conn, { type: "seat-request-sent", liveSessionId: room.sessionId, requestId });
+}
+
+function handleSeatRespond(conn, requestId, accept) {
+  if (!conn.sessionId || conn.role !== "broadcaster") return;
+  const room = rooms.get(conn.sessionId);
+  if (!room || room.kind !== "broad" || typeof requestId !== "string") return;
+  const req = room.seatRequests.get(requestId);
+  if (!req) return;
+  clearTimeout(req.timer);
+  room.seatRequests.delete(requestId);
+  const requester = room.viewers.get(req.fromPeerId);
+  if (!accept) {
+    if (requester) send(requester, { type: "seat-declined", liveSessionId: room.sessionId, requestId });
+    return;
+  }
+  if (!requester || seatOfPeer(room, requester.peerId)) return;
+  if (!seatSpeaker(room, requester)) {
+    send(requester, { type: "error", message: "Seats full ho gayi hain — seat nahi mil saki." });
+    send(conn, { type: "error", message: "Seats full ho gayi hain." });
+  }
+}
+
+function handleSeatReady(conn) {
+  if (!conn.sessionId || conn.role !== "viewer") return;
+  const room = rooms.get(conn.sessionId);
+  if (!room || room.kind !== "broad") return;
+  if (seatOfPeer(room, conn.peerId)) wireSeatSpeaker(room, conn);
+}
+
+// Host taps an empty seat and invites a specific current listener.
+function handleSeatInvite(conn, toPeerId) {
+  if (!conn.sessionId || conn.role !== "broadcaster") return;
+  const room = rooms.get(conn.sessionId);
+  if (!room || room.kind !== "broad" || typeof toPeerId !== "string") return;
+  const target = room.viewers.get(toPeerId);
+  if (!target) return;
+  if (seatOfPeer(room, toPeerId)) {
+    send(conn, { type: "error", message: "Ye listener pehle se seat par hai." });
+    return;
+  }
+  if (room.seats.size >= BROAD_MAX_SEATS) {
+    send(conn, { type: "error", message: "Saari 6 seats full hain — pehle kisi ko drop karo." });
+    return;
+  }
+  for (const inv of room.seatInvites.values()) {
+    if (inv.toPeerId === toPeerId) {
+      send(conn, { type: "error", message: "Is listener ko invite pehle se bheja hua hai." });
+      return;
+    }
+  }
+  const inviteId = crypto.randomBytes(8).toString("hex");
+  const timer = setTimeout(() => {
+    if (room.seatInvites.delete(inviteId)) {
+      send(target, { type: "seat-invite-expired", liveSessionId: room.sessionId, inviteId });
+      send(conn, { type: "seat-invite-cancelled", liveSessionId: room.sessionId, inviteId });
+    }
+  }, SEAT_REQUEST_TTL_MS);
+  room.seatInvites.set(inviteId, { toPeerId, timer });
+  send(target, {
+    type: "seat-invited",
+    liveSessionId: room.sessionId,
+    inviteId,
+    from: { peerId: conn.peerId, user: publicUser(conn.user) },
+    expiresAt: Date.now() + SEAT_REQUEST_TTL_MS,
+  });
+  send(conn, { type: "seat-invite-sent", liveSessionId: room.sessionId, inviteId, toPeerId });
+}
+
+function handleSeatInviteRespond(conn, inviteId, accept) {
+  if (!conn.sessionId || conn.role !== "viewer") return;
+  const room = rooms.get(conn.sessionId);
+  if (!room || room.kind !== "broad" || typeof inviteId !== "string") return;
+  const inv = room.seatInvites.get(inviteId);
+  if (!inv || inv.toPeerId !== conn.peerId) return;
+  clearTimeout(inv.timer);
+  room.seatInvites.delete(inviteId);
+  if (!accept) {
+    if (room.broadcaster) {
+      send(room.broadcaster, { type: "seat-invite-declined", liveSessionId: room.sessionId, inviteId, by: { peerId: conn.peerId, user: publicUser(conn.user) } });
+    }
+    return;
+  }
+  if (seatOfPeer(room, conn.peerId)) return;
+  if (!seatSpeaker(room, conn)) {
+    send(conn, { type: "error", message: "Seats full ho gayi hain — seat nahi mil saki." });
+    if (room.broadcaster) send(room.broadcaster, { type: "error", message: "Seats full ho gayi hain." });
+  }
+}
+
+function handleSeatLeave(conn) {
+  if (!conn.sessionId || conn.role !== "viewer") return;
+  const room = rooms.get(conn.sessionId);
+  if (!room || room.kind !== "broad") return;
+  unseatSpeaker(room, conn.peerId, { removed: false });
+}
+
+function handleSeatDrop(conn, peerId) {
+  if (!conn.sessionId || conn.role !== "broadcaster") return;
+  const room = rooms.get(conn.sessionId);
+  if (!room || room.kind !== "broad" || typeof peerId !== "string") return;
+  unseatSpeaker(room, peerId, { removed: true });
+}
+
+// Self-mute: the host toggles the host seat; a seated speaker toggles
+// their own seat. The new state is broadcast with the seats snapshot.
+function handleSeatMute(conn, muted) {
+  if (!conn.sessionId) return;
+  const room = rooms.get(conn.sessionId);
+  if (!room || room.kind !== "broad") return;
+  if (conn.role === "broadcaster") {
+    room.hostMuted = muted === true;
+    broadcastSeats(room);
+    return;
+  }
+  const found = seatOfPeer(room, conn.peerId);
+  if (found) {
+    found.entry.muted = muted === true;
+    broadcastSeats(room);
+  }
+}
+
+// Host authority: mute/unmute someone else's seat. The target's client
+// gets a direct note so it actually silences its microphone track.
+function handleSeatHostMute(conn, peerId, muted) {
+  if (!conn.sessionId || conn.role !== "broadcaster") return;
+  const room = rooms.get(conn.sessionId);
+  if (!room || room.kind !== "broad" || typeof peerId !== "string") return;
+  const found = seatOfPeer(room, peerId);
+  if (!found) return;
+  found.entry.muted = muted === true;
+  const target = room.viewers.get(peerId);
+  if (target) send(target, { type: "seat-host-muted", liveSessionId: room.sessionId, muted: found.entry.muted });
+  broadcastSeats(room);
+}
+
+// Drops a departing viewer's pending seat requests/invites (and frees
+// any seat they held — handled by the caller via unseatSpeaker).
+function dropSeatPendingFrom(room, peerId) {
+  for (const [requestId, req] of [...room.seatRequests.entries()]) {
+    if (req.fromPeerId === peerId) {
+      room.seatRequests.delete(requestId);
+      clearTimeout(req.timer);
+      if (room.broadcaster) send(room.broadcaster, { type: "seat-request-cancelled", liveSessionId: room.sessionId, requestId });
+    }
+  }
+  for (const [inviteId, inv] of [...room.seatInvites.entries()]) {
+    if (inv.toPeerId === peerId) {
+      room.seatInvites.delete(inviteId);
+      clearTimeout(inv.timer);
+    }
+  }
+}
+
 // Drops a departing viewer's pending guest requests (the broadcaster's
 // request card must not outlive the requester).
 function dropGuestRequestsFrom(room, peerId) {
@@ -602,6 +970,16 @@ function removeFromRoom(conn) {
       room.guest = null;
       room.guestWired = false;
       broadcastRoom(sessionId, { type: "guest-left", liveSessionId: sessionId, guestPeerId: conn.peerId, removed: false });
+    }
+    // Broad: a departing speaker's seat frees up and their pending
+    // seat requests/invites die with them.
+    if (room.kind === "broad") {
+      if (seatOfPeer(room, conn.peerId)) {
+        room.seats.delete(seatOfPeer(room, conn.peerId).seat);
+        broadcastRoom(sessionId, { type: "seat-left", liveSessionId: sessionId, peerId: conn.peerId, removed: false });
+        broadcastSeats(room);
+      }
+      dropSeatPendingFrom(room, conn.peerId);
     }
     dropGuestRequestsFrom(room, conn.peerId);
     if (room.broadcaster) send(room.broadcaster, { type: "viewer-left", peerId: conn.peerId });
@@ -636,6 +1014,7 @@ async function handleJoin(conn, sessionId) {
   conn.sessionId = sessionId;
   conn.role = role;
   const room = roomFor(sessionId);
+  room.kind = session.kind || "video";
 
   if (role === "broadcaster") {
     // A reconnecting broadcaster replaces the stale connection.
@@ -653,11 +1032,13 @@ async function handleJoin(conn, sessionId) {
       type: "joined",
       liveSessionId: sessionId,
       role,
+      kind: room.kind,
       viewerCount: room.viewers.size,
       likeCount: room.likes,
       broadcasterPeerId: conn.peerId,
       guestPeerId: room.guest?.peerId ?? null,
       guest: room.guest?.user ?? null,
+      seats: room.kind === "broad" ? seatsSnapshot(room) : null,
     });
     // Introduce the broadcaster to viewers who were already waiting, and
     // tell the broadcaster about each of them so it can send its offers.
@@ -672,6 +1053,18 @@ async function handleJoin(conn, sessionId) {
       const guestConn = room.viewers.get(room.guest.peerId);
       if (guestConn) wireGuest(room, guestConn);
     }
+    // Broad: a reconnecting host re-wires every seated speaker (their
+    // seat state survived; the peer connections did not).
+    if (room.kind === "broad") {
+      for (const s of room.seats.values()) {
+        const sc = room.viewers.get(s.peerId);
+        if (sc) {
+          s.wired = false;
+          wireSeatSpeaker(room, sc);
+        }
+      }
+      broadcastSeats(room);
+    }
   } else {
     // A seat holder who reconnects arrives as a brand-new viewer with a
     // new peer id — the old seat cannot follow them, so it ends here.
@@ -681,16 +1074,27 @@ async function handleJoin(conn, sessionId) {
       room.guestWired = false;
       broadcastRoom(sessionId, { type: "guest-left", liveSessionId: sessionId, guestPeerId: stalePeerId, removed: false });
     }
+    // Broad: same stale-seat rule for speakers — a reconnected speaker's
+    // old seat (keyed by the dead peer id) is freed before they land.
+    if (room.kind === "broad") {
+      for (const s of [...room.seats.values()]) {
+        if (s.user.id === conn.user.id && s.peerId !== conn.peerId) {
+          unseatSpeaker(room, s.peerId, { removed: false });
+        }
+      }
+    }
     room.viewers.set(conn.peerId, conn);
     send(conn, {
       type: "joined",
       liveSessionId: sessionId,
       role,
+      kind: room.kind,
       viewerCount: room.viewers.size,
       likeCount: room.likes,
       broadcasterPeerId: room.broadcaster?.peerId ?? null,
       guestPeerId: room.guest?.peerId ?? null,
       guest: room.guest?.user ?? null,
+      seats: room.kind === "broad" ? seatsSnapshot(room) : null,
     });
     if (room.broadcaster) {
       send(room.broadcaster, { type: "viewer-joined", peerId: conn.peerId, user: publicUser(conn.user) });
@@ -699,6 +1103,15 @@ async function handleJoin(conn, sessionId) {
     if (room.guest && room.guest.peerId !== conn.peerId) {
       const guestConn = room.viewers.get(room.guest.peerId);
       if (guestConn) send(guestConn, { type: "viewer-joined", peerId: conn.peerId, user: publicUser(conn.user), guestPublisher: true });
+    }
+    // Broad mid-joiner: every seated speaker must publish to them too
+    // (they are a plain listener for now — seatPeer false).
+    if (room.kind === "broad") {
+      for (const s of room.seats.values()) {
+        if (s.peerId === conn.peerId) continue;
+        const sc = room.viewers.get(s.peerId);
+        if (sc) send(sc, { type: "viewer-joined", peerId: conn.peerId, user: publicUser(conn.user), seatPublisher: true, seatPeer: false });
+      }
     }
     broadcastViewerCount(sessionId);
     void notePeakViewers(sessionId, room.viewers.size);
@@ -881,6 +1294,33 @@ export function attachLiveServer(httpServer, { authenticate }) {
             break;
           case "guest-remove":
             handleGuestRemove(conn);
+            break;
+          case "seat-request":
+            await handleSeatRequest(conn);
+            break;
+          case "seat-respond":
+            handleSeatRespond(conn, msg.requestId, msg.accept === true);
+            break;
+          case "seat-ready":
+            handleSeatReady(conn);
+            break;
+          case "seat-invite":
+            handleSeatInvite(conn, msg.toPeerId);
+            break;
+          case "seat-invite-respond":
+            handleSeatInviteRespond(conn, msg.inviteId, msg.accept === true);
+            break;
+          case "seat-leave":
+            handleSeatLeave(conn);
+            break;
+          case "seat-drop":
+            handleSeatDrop(conn, msg.peerId);
+            break;
+          case "seat-mute":
+            handleSeatMute(conn, msg.muted === true);
+            break;
+          case "seat-host-mute":
+            handleSeatHostMute(conn, msg.peerId, msg.muted === true);
             break;
           default:
             break;

@@ -136,6 +136,7 @@ export const liveSessions = sqliteTable("live_sessions", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   title: text("title").notNull(),
+  kind: text("kind").notNull().default("video"), // "video" | "broad" (audio-only voice room)
   startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
   endedAt: integer("ended_at", { mode: "timestamp_ms" }),
   hidden: integer("hidden").notNull().default(0), // 1 = auto-hidden by reports / owner moderation
