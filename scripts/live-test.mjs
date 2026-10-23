@@ -344,6 +344,46 @@ await sleep(400);
 const peakRow = await dbOne("SELECT peak_viewers FROM live_sessions WHERE id = ?", [sid]);
 check("peak_viewers recorded (1)", peakRow?.peak_viewers === 1, JSON.stringify(peakRow));
 
+// ---- Tap-tap likes -------------------------------------------------------------
+// Viewers tap the stage to like; the server owns the running total and
+// broadcasts it to the whole room. Viewers only (the host can't like
+// their own stream), batches clamped to 10, ~10 counted per second.
+check("joined payloads seed the like count (0)", hostJoined.likeCount === 0 && fanJoined.likeCount === 0, JSON.stringify({ h: hostJoined.likeCount, f: fanJoined.likeCount }));
+fanSock.send({ type: "live-like", n: 3 });
+const likeAtHost = await hostSock.waitFor((m) => m.type === "live-likes" && m.total === 3, 8000, "like total 3 at host");
+check("viewer likes broadcast to the host (total 3)", likeAtHost.n === 3 && likeAtHost.fromPeerId === fanSock.peerId, JSON.stringify(likeAtHost));
+const likeAtFan = await fanSock.waitFor((m) => m.type === "live-likes" && m.total === 3, 8000, "like total 3 at viewer");
+check("viewer likes broadcast back to viewers (total 3)", likeAtFan.total === 3);
+// The host's own like must be refused: if it were counted, the next
+// total would jump by 5 first — the fan's +1 must land exactly on 4.
+hostSock.send({ type: "live-like", n: 5 });
+fanSock.send({ type: "live-like", n: 1 });
+const likeTotal4 = await hostSock.waitFor((m) => m.type === "live-likes" && m.total === 4, 8000, "like total 4");
+check("host cannot like their own stream (fan's +1 lands on 4, not 9)", likeTotal4.total === 4);
+// Batch clamp: in a fresh rate window, an oversized batch counts 10.
+await sleep(1100);
+fanSock.send({ type: "live-like", n: 500 });
+const likeTotal14 = await hostSock.waitFor((m) => m.type === "live-likes" && m.total === 14, 8000, "like total 14");
+check("oversized like batch clamped to +10 (total 14)", likeTotal14.n === 10, JSON.stringify(likeTotal14));
+// Rate limit: a full second batch inside the same window counts 0 —
+// no further broadcast may arrive.
+await sleep(1100);
+fanSock.send({ type: "live-like", n: 10 });
+const likeTotal24 = await hostSock.waitFor((m) => m.type === "live-likes" && m.total === 24, 8000, "like total 24");
+check("fresh window counts again (total 24)", likeTotal24.total === 24);
+const likesSeenAtHost = hostSock.messages.filter((m) => m.type === "live-likes").length;
+fanSock.send({ type: "live-like", n: 10 });
+await sleep(600);
+const likesSeenAfter = hostSock.messages.filter((m) => m.type === "live-likes").length;
+check("second batch inside the same second is rate-limited (no new broadcast)", likesSeenAfter === likesSeenAtHost, `before=${likesSeenAtHost} after=${likesSeenAfter}`);
+// Client wiring (source shape): socket helper, stage tap handler, the
+// heart animation and the ❤️ counter in both rooms.
+check(
+  "live-like client wiring (socket helper + stage tap + counter)",
+  liveJsSrc.includes('"live-like"') && liveJsxSrc.includes("handleStageTap") && liveJsxSrc.includes("data-live-likes") && liveJsxSrc.includes("room.liveLikes")
+);
+check("live-like hearts spawn at the tap point and for remote likes", liveJsxSrc.includes("spawnHeart") && liveJsxSrc.includes("zoomly-live-heart") && liveJsxSrc.includes("FloatingHearts"));
+
 // An unauthenticated socket must be rejected.
 let unauthRejected = false;
 try {
@@ -874,6 +914,7 @@ try {
   click(startBtn());
   await waitFor("broadcast room", () => bodyText().includes("End Live") || bodyText().includes("could not open"));
   check("broadcast room renders", bodyText().includes("End Live") && !bodyText().includes("could not open"));
+  check("host screen shows the tap-tap like counter (❤️ 0)", Boolean(document.querySelector("[data-live-likes]")) && bodyText().includes("❤️ 0"));
   const stageVideo = [...document.querySelectorAll("video")].find((v) => v.srcObject && typeof v.srcObject.getVideoTracks === "function");
   check("stage preview shows a (processed) stream", Boolean(stageVideo));
   check("stage preview stream's video track is the canvas capture", stageVideo?.srcObject.getVideoTracks().length === 1 && dom.window.__canvasCaptures >= 1);

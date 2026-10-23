@@ -197,3 +197,28 @@ select {
     opacity: 1;
   }
 }
+
+/* Live tap-tap hearts: spawn at the tap point (or the stage's right
+   side for other viewers' likes) and float up, fading out. --drift and
+   --rot are per-heart inline custom properties. */
+.zoomly-live-heart {
+  position: absolute;
+  transform: translate(-50%, 0);
+  animation: zoomly-heart-float 1.25s ease-out forwards;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+  will-change: transform, opacity;
+  line-height: 1;
+}
+@keyframes zoomly-heart-float {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 0) scale(0.5) rotate(0deg);
+  }
+  12% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--drift, 0px)), -44dvh) scale(1.1) rotate(var(--rot, 8deg));
+  }
+}

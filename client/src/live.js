@@ -223,6 +223,9 @@ export function openLiveSocket(handlers = {}) {
     chat(text) {
       api.send({ type: "chat", text });
     },
+    like(n = 1) {
+      api.send({ type: "live-like", n });
+    },
     signal(to, data) {
       api.send({ type: "signal", to, data });
     },

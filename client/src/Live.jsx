@@ -135,6 +135,10 @@ const tileLabelStyle = (bg) => ({
 function useLiveRoom(sessionId, handlers = {}) {
   const [messages, setMessages] = useState([]);
   const [viewerCount, setViewerCount] = useState(0);
+  // Tap-tap likes: the room's running total, owned by the server (it
+  // broadcasts every accepted batch). Seeded from the joined payload so
+  // late joiners — and a reconnecting host — see the current count.
+  const [liveLikes, setLiveLikes] = useState(0);
   const [ended, setEnded] = useState(false);
   const [connected, setConnected] = useState(false);
   const [authError, setAuthError] = useState("");
@@ -162,10 +166,15 @@ function useLiveRoom(sessionId, handlers = {}) {
         switch (msg.type) {
           case "joined":
             setViewerCount(msg.viewerCount ?? 0);
+            if (typeof msg.likeCount === "number") setLiveLikes(msg.likeCount);
             h.onJoined?.(msg);
             break;
           case "viewer-count":
             setViewerCount(msg.count ?? 0);
+            break;
+          case "live-likes":
+            if (typeof msg.total === "number") setLiveLikes(msg.total);
+            h.onLiveLikes?.(msg);
             break;
           case "chat":
             pushMsg({ kind: "chat", from: msg.from, text: msg.text, created_at: msg.created_at });
@@ -250,7 +259,49 @@ function useLiveRoom(sessionId, handlers = {}) {
     sockRef.current?.chat(text);
   }, []);
 
-  return { sockRef, messages, pushMsg, viewerCount, ended, connected, authError, sendChat };
+  return { sockRef, messages, pushMsg, viewerCount, liveLikes, ended, connected, authError, sendChat };
+}
+
+// ---- tap-tap like hearts -------------------------------------------------------
+// Floating hearts over the live stage: the tapper's hearts spawn at the
+// tap point; everyone else's likes spawn one heart each on the stage's
+// right side as the broadcasts arrive. Purely visual — the count itself
+// comes from the server's live-likes broadcasts.
+let heartSeq = 0;
+function useFloatingHearts() {
+  const [hearts, setHearts] = useState([]);
+  const spawnHeart = useCallback((xPct, yPct) => {
+    heartSeq += 1;
+    const id = heartSeq;
+    const heart = {
+      id,
+      x: xPct,
+      y: yPct,
+      drift: Math.round(Math.random() * 70) - 35,
+      rot: Math.round(Math.random() * 36) - 18,
+      size: 26 + Math.round(Math.random() * 16),
+    };
+    setHearts((prev) => [...prev.slice(-23), heart]);
+    setTimeout(() => setHearts((prev) => prev.filter((h) => h.id !== id)), 1400);
+  }, []);
+  return { hearts, spawnHeart };
+}
+
+function FloatingHearts({ hearts }) {
+  if (hearts.length === 0) return null;
+  return (
+    <div style={{ position: "absolute", inset: 0, overflow: "hidden", pointerEvents: "none", zIndex: 5 }}>
+      {hearts.map((h) => (
+        <span
+          key={h.id}
+          className="zoomly-live-heart"
+          style={{ left: `${h.x}%`, top: `${h.y}%`, fontSize: h.size, "--drift": `${h.drift}px`, "--rot": `${h.rot}deg` }}
+        >
+          ❤️
+        </span>
+      ))}
+    </div>
+  );
 }
 
 // ---- chat / gift feed (overlay versions for the full-screen stage) -------------
@@ -695,6 +746,9 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
   // processor's canvas — the published track never changes.
   const [filterKey, setFilterKey] = useState(() => processor?.filter ?? getLiveFilter());
   const [showFilters, setShowFilters] = useState(false);
+  // Tap-tap likes: viewers' hearts float up the right side of my stage
+  // as their like broadcasts arrive (the count itself is in the top bar).
+  const { hearts, spawnHeart } = useFloatingHearts();
   // Set when the filter pipeline stalls mid-broadcast and the room has
   // fallen back to publishing the raw camera track (see the effect).
   // The ref mirror is what wirePeer reads when later peers connect.
@@ -733,6 +787,9 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
   }, [processor, stream, processorDead]);
 
   const room = useLiveRoom(session.id, {
+    onLiveLikes: () => {
+      spawnHeart(76 + Math.random() * 16, 66);
+    },
     onGift: (msg) => {
       if (msg.gift) {
         setEarned((e) => e + (msg.gift.creator_share ?? 0));
@@ -1104,12 +1161,17 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
         )}
       </div>
 
+      <FloatingHearts hearts={hearts} />
+
       {/* top bar over the video */}
       <div style={topBarStyle}>
         <LiveBadge />
         <strong style={{ flex: 1, minWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#fff", textShadow: "0 1px 4px rgba(0,0,0,0.9)" }}>{session.title}</strong>
         <span className="chip" style={darkChipStyle}>
           👀 {room.viewerCount}
+        </span>
+        <span className="chip" style={darkChipStyle} data-live-likes="">
+          ❤️ {room.liveLikes}
         </span>
         <span className="chip" style={darkChipStyle}>
           ⏱ {formatDuration(elapsed)}
@@ -1252,6 +1314,37 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
   // Face filter (only while I am the seated guest).
   const [guestFilterKey, setGuestFilterKey] = useState(() => getLiveFilter());
   const [showGuestFilters, setShowGuestFilters] = useState(false);
+  // Tap-tap likes: hearts at my tap points + a batched sender (taps are
+  // counted locally and flushed to the server every 250ms, so a fast
+  // tapper sends one small message per burst, not one per tap — the
+  // server clamps and rate-limits regardless).
+  const { hearts, spawnHeart } = useFloatingHearts();
+  const pendingLikesRef = useRef(0);
+  const likeFlushRef = useRef(0);
+
+  function queueLike() {
+    pendingLikesRef.current += 1;
+    if (!likeFlushRef.current) {
+      likeFlushRef.current = setTimeout(() => {
+        likeFlushRef.current = 0;
+        const n = pendingLikesRef.current;
+        pendingLikesRef.current = 0;
+        if (n > 0) sockRef.current?.like(Math.min(n, 10));
+      }, 250);
+    }
+  }
+
+  // A tap on the broadcaster's video = a like (TikTok-style). The host
+  // never likes their own stream (the server also refuses broadcaster
+  // sockets); a seated guest CAN like — they are a viewer of the host.
+  function handleStageTap(e) {
+    if (room.ended || detail?.is_mine) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = rect.width ? ((e.clientX - rect.left) / rect.width) * 100 : 50;
+    const y = rect.height ? ((e.clientY - rect.top) / rect.height) * 100 : 50;
+    spawnHeart(x, y);
+    queueLike();
+  }
 
   function pickGuestFilter(key) {
     setGuestFilterKey(key);
@@ -1274,6 +1367,13 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
   const [matchResult, setMatchResult] = useState(null);
 
   const room = useLiveRoom(session.id, {
+    onLiveLikes: (msg) => {
+      // Someone else's likes: one heart floats up the right side. (My
+      // own taps already spawned hearts at the tap points.)
+      if (msg.fromPeerId && msg.fromPeerId !== sockRef.current?.peerId) {
+        spawnHeart(76 + Math.random() * 16, 66);
+      }
+    },
     onJoined: (msg) => {
       if (msg.broadcasterPeerId) mainPeerRef.current = msg.broadcasterPeerId;
       if (msg.guestPeerId) {
@@ -1383,6 +1483,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
     () => () => {
       closeAllPcs();
       stopGuestCapture();
+      if (likeFlushRef.current) clearTimeout(likeFlushRef.current);
     },
     []
   );
@@ -1720,15 +1821,17 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
       {/* video layer: the broadcaster fills the stage; in a PK match the
           stage splits — host on top, opponent below */}
       <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
-        <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+        <div style={{ position: "relative", flex: 1, minHeight: 0 }} onClick={handleStageTap}>
           <video ref={videoRef} autoPlay playsInline muted={muted} style={videoFillStyle} />
+          <FloatingHearts hearts={hearts} />
           {room.ended ? (
             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.7)", fontSize: 18, fontWeight: 700, color: "#fff" }}>
               📴 {ENDED_TEXT}
             </div>
           ) : needsTap ? (
             <button
-              onClick={() => {
+              onClick={(e) => {
+                e.stopPropagation();
                 const v = videoRef.current;
                 if (v && !viewerMuted()) {
                   v.muted = false;
@@ -1745,7 +1848,10 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
           ) : null}
           {forcedMute && !room.ended && (
             <button
-              onClick={soundOn}
+              onClick={(e) => {
+                e.stopPropagation();
+                soundOn();
+              }}
               style={{
                 position: "absolute",
                 left: "50%",
@@ -1796,6 +1902,9 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
         <strong style={{ flex: 1, minWidth: 90, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#fff", textShadow: "0 1px 4px rgba(0,0,0,0.9)" }}>{session.title}</strong>
         <span className="chip" style={darkChipStyle}>
           👀 {room.viewerCount}
+        </span>
+        <span className="chip" style={darkChipStyle} data-live-likes="">
+          ❤️ {room.liveLikes}
         </span>
         <span className="chip" style={darkChipStyle}>
           🪙 {balance}

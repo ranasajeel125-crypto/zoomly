@@ -26,6 +26,10 @@
 //   S->C  {type:"broadcaster-joined", peerId}   (to waiting viewers)
 //   S->C  {type:"viewer-count", liveSessionId, count}
 //   C->S  {type:"chat", text}   S->C {type:"chat", from, text, created_at}
+//   C->S  {type:"live-like", n}  (viewers tap the stage to like; n is a
+//          small batch count, clamped + rate-limited server-side)
+//   S->C  {type:"live-likes", total, n, fromPeerId}  (running room total;
+//          in-memory only — a live's likes reset when the live ends)
 //   C->S  {type:"signal", to, data}   S->C {type:"signal", from, data}
 //   S->C  {type:"gift", ...}    (broadcast by the sendGift RPC action)
 //   S->C  {type:"live-ended", liveSessionId}
@@ -71,12 +75,16 @@ import { MATCH_DURATION_MS, MATCH_INVITE_TTL_MS, findBannedContent, isAdminUser 
 const AUTH_TIMEOUT_MS = 10_000;
 const MAX_CHAT_CHARS = 500;
 
-const rooms = new Map(); // sessionId -> { broadcaster, viewers: Map, guest, guestRequests: Map }
+const rooms = new Map(); // sessionId -> { broadcaster, viewers: Map, guest, guestRequests: Map, likes }
+
+// Tap-tap likes: per-user rate limit — at most this many taps are
+// counted per second, however fast they tap or batch.
+const MAX_LIKES_PER_SECOND = 10;
 
 function roomFor(sessionId) {
   let room = rooms.get(sessionId);
   if (!room) {
-    room = { broadcaster: null, viewers: new Map(), guest: null, guestWired: false, guestRequests: new Map(), sessionId };
+    room = { broadcaster: null, viewers: new Map(), guest: null, guestWired: false, guestRequests: new Map(), likes: 0, sessionId };
     rooms.set(sessionId, room);
   }
   return room;
@@ -646,6 +654,7 @@ async function handleJoin(conn, sessionId) {
       liveSessionId: sessionId,
       role,
       viewerCount: room.viewers.size,
+      likeCount: room.likes,
       broadcasterPeerId: conn.peerId,
       guestPeerId: room.guest?.peerId ?? null,
       guest: room.guest?.user ?? null,
@@ -678,6 +687,7 @@ async function handleJoin(conn, sessionId) {
       liveSessionId: sessionId,
       role,
       viewerCount: room.viewers.size,
+      likeCount: room.likes,
       broadcasterPeerId: room.broadcaster?.peerId ?? null,
       guestPeerId: room.guest?.peerId ?? null,
       guest: room.guest?.user ?? null,
@@ -799,6 +809,35 @@ export function attachLiveServer(httpServer, { authenticate }) {
               from: publicUser(conn.user),
               text,
               created_at: Date.now(),
+            });
+            break;
+          }
+          case "live-like": {
+            // Tap-tap likes. Viewers only: the broadcaster's own socket
+            // carries role "broadcaster" and is rejected here, so a host
+            // can never inflate their own count (a seated guest is a
+            // viewer-role conn and may like the host's stream). The
+            // sender must actually be a joined viewer of this room.
+            if (!conn.sessionId || conn.role !== "viewer") return;
+            const room = rooms.get(conn.sessionId);
+            if (!room || room.viewers.get(conn.peerId) !== conn) return;
+            // Batch clamp + per-user rate limit (10 counted / second).
+            let n = Number.isInteger(msg.n) ? msg.n : 1;
+            n = Math.max(1, Math.min(MAX_LIKES_PER_SECOND, n));
+            const now = Date.now();
+            if (!conn.likeWindow || now - conn.likeWindow.start >= 1000) {
+              conn.likeWindow = { start: now, count: 0 };
+            }
+            const allowed = Math.min(n, MAX_LIKES_PER_SECOND - conn.likeWindow.count);
+            if (allowed <= 0) return;
+            conn.likeWindow.count += allowed;
+            room.likes += allowed;
+            broadcastRoom(conn.sessionId, {
+              type: "live-likes",
+              liveSessionId: conn.sessionId,
+              total: room.likes,
+              n: allowed,
+              fromPeerId: conn.peerId,
             });
             break;
           }
