@@ -83,6 +83,7 @@ export async function initDb() {
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       pack_coins INTEGER NOT NULL,
       price_pkr INTEGER NOT NULL,
+      is_custom INTEGER NOT NULL DEFAULT 0,
       tid TEXT NOT NULL UNIQUE,
       status TEXT NOT NULL DEFAULT 'pending',
       reviewed_by INTEGER REFERENCES users(id),
@@ -144,4 +145,7 @@ export async function initDb() {
   if (!colNames.has("email")) await client.execute("ALTER TABLE users ADD COLUMN email TEXT");
   if (!colNames.has("live_title")) await client.execute("ALTER TABLE users ADD COLUMN live_title TEXT");
   await client.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id)");
+  const crCols = await client.execute("PRAGMA table_info(coin_requests)");
+  const crColNames = new Set(crCols.rows.map((r) => r.name));
+  if (!crColNames.has("is_custom")) await client.execute("ALTER TABLE coin_requests ADD COLUMN is_custom INTEGER NOT NULL DEFAULT 0");
 }

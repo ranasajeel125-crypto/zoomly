@@ -8,6 +8,14 @@ export const COIN_PACKS = [
   { coins: 14000, pricePkr: 10000 },
 ];
 
+// Custom coin buy: besides the packs, a user can buy any amount of coins at
+// exactly 1 coin = Rs.1 (the server derives price_pkr == coins itself; a
+// client-supplied price is never trusted), with this minimum.
+export const CUSTOM_BUY_MIN_COINS = 10;
+
+// Withdrawals: users cash out coins at 1 coin = Rs.1, with this minimum.
+export const WITHDRAW_MIN_COINS = 10;
+
 // Coin levels, by current coin balance. `min` is the balance at which the
 // level starts. Progress is measured towards the next level's `min`.
 //   Starter    0 – 99

@@ -64,6 +64,8 @@ export const coinRequests = sqliteTable("coin_requests", {
   userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   packCoins: integer("pack_coins").notNull(),
   pricePkr: integer("price_pkr").notNull(),
+  // 1 when the buyer chose a custom amount (1 coin = Rs.1) instead of a pack.
+  isCustom: integer("is_custom").notNull().default(0),
   tid: text("tid").notNull().unique(), // JazzCash transaction id — unique, duplicates rejected
   status: text("status", { enum: ["pending", "approved", "rejected"] }).notNull().default("pending"),
   reviewedBy: integer("reviewed_by").references(() => users.id),

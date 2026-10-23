@@ -8,6 +8,7 @@ import { db } from "./db.mjs";
 import * as schema from "./schema.mjs";
 import {
   COIN_PACKS,
+  CUSTOM_BUY_MIN_COINS,
   GIFT_CATALOG,
   ICE_SERVERS,
   JAZZCASH,
@@ -611,7 +612,7 @@ export const Actions = {
       referral_count: counts.get(user.id) ?? 0,
       packs: COIN_PACKS,
       jazzcash: JAZZCASH,
-      my_requests: myRequests.map((r) => ({ id: r.id, pack_coins: r.packCoins, price_pkr: r.pricePkr, tid: r.tid, status: r.status, created_at: r.createdAt.getTime() })),
+      my_requests: myRequests.map((r) => ({ id: r.id, pack_coins: r.packCoins, price_pkr: r.pricePkr, is_custom: Boolean(r.isCustom), tid: r.tid, status: r.status, created_at: r.createdAt.getTime() })),
       leaderboards: {
         top_coins: byCoins.slice(0, LEADERBOARD_LIMIT).map((u, i) => ({ rank: i + 1, ...boardRow(u) })),
         top_referrals: byReferrals.slice(0, LEADERBOARD_LIMIT).map((u, i) => ({ rank: i + 1, ...boardRow(u) })),
@@ -634,6 +635,31 @@ export const Actions = {
         return { ok: false, message: "This TID was already submitted. Each JazzCash transaction can only be used once." };
       }
       return { ok: true, message: `Request sent: ${pack.coins} coins for Rs.${pack.pricePkr}. The owner will verify your JazzCash payment and approve it.` };
+    }
+  ),
+
+  // Custom coin buy: any amount >= CUSTOM_BUY_MIN_COINS at exactly
+  // 1 coin = Rs.1. The price is derived here (price_pkr == coins) and never
+  // taken from the client. The request lands in the same coin_requests
+  // table (flagged is_custom) and goes through the same owner flow.
+  requestCustomCoins: withValidation(
+    z.object({ token: tokenArg, coins: z.number().int().min(1).max(1000000), tid: z.string().trim().min(4).max(80) }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      if (args.coins < CUSTOM_BUY_MIN_COINS) return { ok: false, message: `Kam az kam ${CUSTOM_BUY_MIN_COINS} coins khareed sakte hain.` };
+      const existing = await db.select({ id: schema.coinRequests.id }).from(schema.coinRequests).where(eq(schema.coinRequests.tid, args.tid)).limit(1);
+      if (existing.length > 0) return { ok: false, message: "This TID was already submitted. Each JazzCash transaction can only be used once." };
+      try {
+        const inserted = await db
+          .insert(schema.coinRequests)
+          .values({ userId: user.id, packCoins: args.coins, pricePkr: args.coins, isCustom: 1, tid: args.tid })
+          .returning();
+        if (!inserted[0]) return { ok: false, message: "Request could not be created." };
+      } catch {
+        return { ok: false, message: "This TID was already submitted. Each JazzCash transaction can only be used once." };
+      }
+      return { ok: true, message: `Request sent: ${args.coins} coins for Rs.${args.coins}. The owner will verify your JazzCash payment and approve it.` };
     }
   ),
 
@@ -865,6 +891,7 @@ export const Actions = {
         id: r.request.id,
         pack_coins: r.request.packCoins,
         price_pkr: r.request.pricePkr,
+        is_custom: Boolean(r.request.isCustom),
         tid: r.request.tid,
         status: r.request.status,
         created_at: r.request.createdAt.getTime(),

@@ -123,6 +123,22 @@ check("level after 100 coins is Bronze", bAfter.level === "Bronze", bAfter.level
 const reReview = await api("reviewCoinRequest", { token: adminToken, request_id: myReq.id, decision: "approved" });
 check("double approve rejected", reReview.ok === false);
 
+// ---- Custom coin buy (any amount >= 10 at 1 coin = Rs.1) ----------------------
+const customTid = `CUSTOM-${Date.now()}`;
+const customReq = await api("requestCustomCoins", { token: bToken, coins: 37, tid: customTid });
+check("custom coin request ok", customReq.ok === true, JSON.stringify(customReq));
+const tooSmall = await api("requestCustomCoins", { token: bToken, coins: 5, tid: `SMALL-${Date.now()}` });
+check("custom request under 10 coins rejected", tooSmall.ok === false, JSON.stringify(tooSmall));
+const dupCustom = await api("requestCustomCoins", { token: bToken, coins: 50, tid: customTid });
+check("custom request duplicate TID rejected", dupCustom.ok === false);
+const pendingCustom = await api("getAdminCoinRequests", { token: adminToken });
+const myCustom = pendingCustom.requests?.find((r) => r.tid === customTid);
+check("admin sees custom request (37 coins = Rs.37, flagged custom)", Boolean(myCustom) && myCustom.pack_coins === 37 && myCustom.price_pkr === 37 && myCustom.is_custom === true, JSON.stringify(myCustom));
+const reviewCustom = await api("reviewCoinRequest", { token: adminToken, request_id: myCustom.id, decision: "approved" });
+check("admin approve custom ok", reviewCustom.ok === true, JSON.stringify(reviewCustom));
+const bAfterCustom = (await api("getMe", { token: bToken })).user;
+check("custom coins credited after approve (137)", bAfterCustom.coin_balance === 137, `balance=${bAfterCustom.coin_balance}`);
+
 // Rewards + leaderboards shape
 const rewards = await api("getRewards", { token: bToken });
 check("rewards ok", rewards.ok === true, JSON.stringify(rewards).slice(0, 200));

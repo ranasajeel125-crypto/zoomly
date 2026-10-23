@@ -1244,6 +1244,7 @@ function AdminSection({ refreshMe }) {
               <div style={{ flex: 1 }}>
                 <strong>
                   {r.pack_coins} coins · Rs.{r.price_pkr}
+                  {r.is_custom ? " · custom" : ""}
                 </strong>
                 <div style={{ color: "var(--dim)", fontSize: 13 }}>
                   {r.buyer.display_name} (@{r.buyer.username}) · {timeAgo(r.created_at)}
@@ -1271,7 +1272,7 @@ function AdminSection({ refreshMe }) {
             {reviewed.slice(0, 10).map((r) => (
               <div key={r.id} style={{ fontSize: 14, color: "var(--dim)", display: "flex", justifyContent: "space-between" }}>
                 <span>
-                  {r.pack_coins} coins · Rs.{r.price_pkr} · @{r.buyer.username} · TID {r.tid}
+                  {r.pack_coins} coins · Rs.{r.price_pkr}{r.is_custom ? " · custom" : ""} · @{r.buyer.username} · TID {r.tid}
                 </span>
                 <strong style={{ color: r.status === "approved" ? "var(--accent)" : "var(--bad)" }}>{r.status}</strong>
               </div>
@@ -1289,6 +1290,8 @@ function RewardsView({ me, refreshMe }) {
   const [board, setBoard] = useState("coins");
   const [claimCode, setClaimCode] = useState("");
   const [packIndex, setPackIndex] = useState(0);
+  const [buyMode, setBuyMode] = useState("pack");
+  const [customCoins, setCustomCoins] = useState("");
   const [tid, setTid] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -1369,7 +1372,10 @@ function RewardsView({ me, refreshMe }) {
     setBusy(true);
     setError("");
     setNotice("");
-    const res = await call("requestCoins", { pack_index: packIndex, tid });
+    const res =
+      buyMode === "custom"
+        ? await call("requestCustomCoins", { coins: Math.floor(Number(customCoins) || 0), tid })
+        : await call("requestCoins", { pack_index: packIndex, tid });
     setBusy(false);
     if (!res.ok) {
       setError(res.message || "Could not send the request.");
@@ -1392,6 +1398,8 @@ function RewardsView({ me, refreshMe }) {
   }
   if (!data) return <p style={{ padding: 20, color: "var(--dim)" }}>{waking ? WAKING_TEXT : "Loading rewards…"}</p>;
   const selectedPack = data.packs[packIndex] || data.packs[0];
+  const customCoinsNum = Math.max(0, Math.floor(Number(customCoins) || 0));
+  const payAmount = buyMode === "custom" ? customCoinsNum : selectedPack.pricePkr;
 
   return (
     <div style={{ padding: "14px 14px 20px", maxWidth: 640, margin: "0 auto" }}>
@@ -1455,22 +1463,44 @@ function RewardsView({ me, refreshMe }) {
           2) Enter the Transaction ID (TID) from your JazzCash receipt below.
           <br />
           3) The owner verifies it and approves — coins land in your account.
+          <br />
+          Ya ✏️ <strong style={{ color: "var(--text)" }}>Custom</strong> choose karke apni marzi ke coins bhi le sakte ho (kam az kam 10 — 1 coin = Rs.1).
         </p>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(104px, 1fr))", gap: 8 }}>
           {data.packs.map((pack, i) => (
             <button
               key={pack.coins}
-              onClick={() => setPackIndex(i)}
+              onClick={() => {
+                setPackIndex(i);
+                setBuyMode("pack");
+              }}
               className="card"
-              style={{ padding: 10, textAlign: "center", cursor: "pointer", borderColor: i === packIndex ? "var(--accent)" : "var(--border)", color: "var(--text)" }}
+              style={{ padding: 10, textAlign: "center", cursor: "pointer", borderColor: buyMode === "pack" && i === packIndex ? "var(--accent)" : "var(--border)", color: "var(--text)" }}
             >
               <div style={{ fontWeight: 900, fontSize: 17 }}>🪙 {pack.coins.toLocaleString()}</div>
               <div style={{ color: "var(--dim)", fontSize: 13 }}>Rs.{Number(pack.pricePkr ?? 0).toLocaleString()}</div>
             </button>
           ))}
+          <button
+            onClick={() => setBuyMode("custom")}
+            className="card"
+            style={{ padding: 10, textAlign: "center", cursor: "pointer", borderColor: buyMode === "custom" ? "var(--accent)" : "var(--border)", color: "var(--text)" }}
+          >
+            <div style={{ fontWeight: 900, fontSize: 17 }}>✏️ Custom</div>
+            <div style={{ color: "var(--dim)", fontSize: 13 }}>1 coin = Rs.1</div>
+          </button>
         </div>
+        {buyMode === "custom" && (
+          <div style={{ marginTop: 10 }}>
+            <label style={{ fontSize: 13, color: "var(--dim)" }}>Kitne coins chahiye? (kam az kam 10)</label>
+            <input className="input" type="number" min="10" step="1" placeholder="e.g. 250" value={customCoins} onChange={(e) => setCustomCoins(e.target.value)} style={{ marginTop: 4 }} />
+            <p style={{ fontSize: 14, margin: "6px 0 0" }}>
+              Pay <strong>Rs.{customCoinsNum.toLocaleString()}</strong> by JazzCash for <strong>🪙 {customCoinsNum.toLocaleString()} coins</strong>, then enter the TID below.
+            </p>
+          </div>
+        )}
         <form onSubmit={buy} style={{ display: "flex", gap: 8, marginTop: 12 }}>
-          <input className="input" placeholder={`JazzCash TID for the Rs.${selectedPack.pricePkr} payment`} value={tid} onChange={(e) => setTid(e.target.value)} required />
+          <input className="input" placeholder={`JazzCash TID for the Rs.${payAmount} payment`} value={tid} onChange={(e) => setTid(e.target.value)} required />
           <button className="btn btn-primary" type="submit" disabled={busy}>
             Submit
           </button>
@@ -1482,7 +1512,7 @@ function RewardsView({ me, refreshMe }) {
               {data.my_requests.map((r) => (
                 <div key={r.id} style={{ fontSize: 14, display: "flex", justifyContent: "space-between" }}>
                   <span>
-                    🪙 {r.pack_coins} · Rs.{r.price_pkr} · TID {r.tid}
+                    🪙 {r.pack_coins} · Rs.{r.price_pkr}{r.is_custom ? " · custom" : ""} · TID {r.tid}
                   </span>
                   <strong style={{ color: r.status === "approved" ? "var(--accent)" : r.status === "rejected" ? "var(--bad)" : "var(--dim)" }}>{r.status}</strong>
                 </div>
