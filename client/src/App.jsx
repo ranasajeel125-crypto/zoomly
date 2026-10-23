@@ -957,7 +957,7 @@ function StoriesRow({ me }) {
   );
 }
 
-function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications, sharedPostId }) {
+function FeedView({ me, onOpenProfile, refreshMe, onOpenNotifications, sharedPostId }) {
   const [stream, setStream] = useState("foryou");
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1022,26 +1022,6 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
             For You
           </button>
         </div>
-        <button
-          onClick={onGoLive}
-          aria-label="Open Live"
-          title="Watch live broadcasts"
-          style={{
-            background: "#e0245e",
-            color: "#fff",
-            border: "none",
-            borderRadius: 999,
-            padding: "7px 13px",
-            fontWeight: 800,
-            fontSize: 13,
-            cursor: "pointer",
-            boxShadow: "0 4px 14px rgba(224,36,94,0.45)",
-            whiteSpace: "nowrap",
-            flexShrink: 0,
-          }}
-        >
-          🔴 LIVE
-        </button>
         <button onClick={onOpenNotifications} aria-label="Notifications" title="Notifications" style={{ position: "relative", background: "none", border: "none", fontSize: 21, cursor: "pointer", padding: 2, flexShrink: 0 }}>
           🔔
           {(me?.unread_notifications ?? 0) + (me?.unread_messages ?? 0) > 0 && (
@@ -2939,7 +2919,7 @@ export function App() {
   return (
     <div style={{ height: "100dvh", display: "flex", flexDirection: "column", maxWidth: 860, margin: "0 auto" }}>
       <div style={{ flex: 1, minHeight: 0, overflowY: tab === "feed" ? "hidden" : "auto" }} className={tab === "feed" ? "" : "no-scrollbar"}>
-        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} onOpenNotifications={() => setShowNotifs(true)} sharedPostId={sharedPostId} />}
+        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onOpenNotifications={() => setShowNotifs(true)} sharedPostId={sharedPostId} />}
         {tab === "watch" && <WatchView onOpenProfile={openProfile} />}
         {tab === "live" && <LiveView me={me} refreshMe={refreshMe} onOpenProfile={openProfile} />}
         {tab === "upload" && (

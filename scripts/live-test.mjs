@@ -553,16 +553,18 @@ try {
   dom.window.eval(bundle);
   await waitForText("app boot", (t) => t.includes("Live") || t.includes("could not open"));
   check("app boots without crash", !bodyText().includes("could not open"));
-  // The For You feed carries its own 🔴 LIVE shortcut (TikTok-style) that
-  // jumps straight to the Live tab — separate from the bottom nav button.
-  const feedLiveBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("LIVE"));
-  check("feed has a 🔴 LIVE shortcut button", Boolean(feedLiveBtn));
-  feedLiveBtn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
-  await waitForText("Live tab opened from the feed LIVE button", (t) => t.includes("Go Live") || t.includes("could not open"));
-  check("feed LIVE button opens the Live tab", bodyText().includes("Go Live"));
+  // The owner removed the 🔴 LIVE pill from the feed header: the feed must
+  // have NO live shortcut of its own. The raised centre button in the bottom
+  // nav is the one route to the Live tab.
+  const feedPill = document.querySelector('button[aria-label="Open Live"]');
+  check("feed header has NO 🔴 LIVE pill", !feedPill);
+  const strayLiveBtn = [...document.querySelectorAll("button")].find((b) => !b.closest("nav") && (b.textContent || "").includes("LIVE"));
+  check("no LIVE shortcut button outside the bottom nav", !strayLiveBtn);
   const liveBtn = [...document.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("Live"));
-  check("Live nav button found", Boolean(liveBtn));
+  check("raised centre nav LIVE button found", Boolean(liveBtn));
   liveBtn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await waitForText("Live tab opened from the centre nav LIVE button", (t) => t.includes("Go Live") || t.includes("could not open"));
+  check("centre nav LIVE button opens the Live tab", bodyText().includes("Go Live"));
   await waitForText("live list shows the running broadcast", (t) => t.includes("Live test show") || t.includes("could not open"), 25000);
   const t = bodyText();
   check("Live tab did NOT crash the app", !t.includes("could not open"));
