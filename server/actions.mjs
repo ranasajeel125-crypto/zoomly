@@ -280,6 +280,10 @@ async function meDto(user) {
     .select({ count: sql`count(*)`.mapWith(Number) })
     .from(schema.notifications)
     .where(and(eq(schema.notifications.userId, user.id), eq(schema.notifications.read, 0)));
+  const unreadMsgRows = await db
+    .select({ count: sql`count(*)`.mapWith(Number) })
+    .from(schema.messages)
+    .where(and(eq(schema.messages.recipientId, user.id), isNull(schema.messages.readAt)));
   return {
     ...publicUserDto(user, counts.get(user.id) ?? 0),
     referral_code: user.referralCode,
@@ -289,6 +293,7 @@ async function meDto(user) {
     following_count: fc.following,
     is_admin: isAdminUser(user),
     unread_notifications: unreadRows[0]?.count ?? 0,
+    unread_messages: unreadMsgRows[0]?.count ?? 0,
   };
 }
 
@@ -1597,6 +1602,92 @@ export const Actions = {
     await db.delete(schema.stories).where(eq(schema.stories.id, story.id));
     if (story.mediaPublicId) await destroyFromCloudinary(story.mediaPublicId, story.mediaType === "video" ? "video" : "image");
     return { ok: true, message: "Story deleted." };
+  }),
+
+  // ---- Direct messages (1-to-1, polled delivery) --------------------------------
+  sendMessage: withValidation(
+    z.object({ token: tokenArg, user_id: z.number().int().positive(), body: z.string().trim().min(1).max(1000) }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      if (args.user_id === user.id) return { ok: false, message: "You can't message yourself." };
+      const target = (await db.select().from(schema.users).where(eq(schema.users.id, args.user_id)).limit(1))[0];
+      if (!target) return { ok: false, message: "User not found." };
+      if (await blockExistsBetween(user.id, target.id)) return { ok: false, message: "Messaging is not available with this user." };
+      if (findBannedContent(args.body)) return { ok: false, message: "Message me aisi language ya link allowed nahi hai — message nahi bheja gaya." };
+      const inserted = await db.insert(schema.messages).values({ senderId: user.id, recipientId: target.id, body: args.body }).returning();
+      const msg = inserted[0];
+      if (!msg) return { ok: false, message: "Message could not be sent." };
+      await notify({ userId: target.id, type: "dm", actorId: user.id, text: `@${user.username} sent you a message ✉️` });
+      return {
+        ok: true,
+        message: "Message sent.",
+        chat_message: { id: msg.id, body: msg.body, created_at: msg.createdAt.getTime(), is_mine: true, read: false },
+      };
+    }
+  ),
+
+  // Conversation list: latest message + unread count per counterpart.
+  getConversations: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const rows = await db
+      .select()
+      .from(schema.messages)
+      .where(or(eq(schema.messages.senderId, user.id), eq(schema.messages.recipientId, user.id)))
+      .orderBy(desc(schema.messages.createdAt))
+      .limit(500);
+    const byPeer = new Map();
+    for (const m of rows) {
+      const peerId = m.senderId === user.id ? m.recipientId : m.senderId;
+      if (!byPeer.has(peerId)) byPeer.set(peerId, { peerId, latest: m, unread: 0 });
+      const entry = byPeer.get(peerId);
+      if (m.recipientId === user.id && !m.readAt) entry.unread += 1;
+    }
+    const peerIds = [...byPeer.keys()];
+    const peers = peerIds.length ? await db.select().from(schema.users).where(inArray(schema.users.id, peerIds)) : [];
+    const peerMap = new Map(peers.map((p) => [p.id, p]));
+    const conversations = [...byPeer.values()]
+      .filter((e) => peerMap.has(e.peerId))
+      .map((e) => ({
+        user: authorDto(peerMap.get(e.peerId)),
+        latest: { body: e.latest.body, created_at: e.latest.createdAt.getTime(), is_mine: e.latest.senderId === user.id },
+        unread: e.unread,
+      }))
+      .sort((a, b) => b.latest.created_at - a.latest.created_at);
+    return { ok: true, conversations };
+  }),
+
+  // One thread: the latest 100 messages between the two users, oldest
+  // first. Fetching a thread marks the peer's messages as read.
+  getMessages: withValidation(z.object({ token: tokenArg, user_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const peer = (await db.select({ id: schema.users.id }).from(schema.users).where(eq(schema.users.id, args.user_id)).limit(1))[0];
+    if (!peer) return { ok: false, message: "User not found." };
+    await db
+      .update(schema.messages)
+      .set({ readAt: new Date() })
+      .where(and(eq(schema.messages.recipientId, user.id), eq(schema.messages.senderId, args.user_id), isNull(schema.messages.readAt)));
+    const rows = await db
+      .select()
+      .from(schema.messages)
+      .where(
+        or(
+          and(eq(schema.messages.senderId, user.id), eq(schema.messages.recipientId, args.user_id)),
+          and(eq(schema.messages.senderId, args.user_id), eq(schema.messages.recipientId, user.id)),
+        ),
+      )
+      .orderBy(desc(schema.messages.createdAt))
+      .limit(100);
+    const thread = rows.reverse().map((m) => ({
+      id: m.id,
+      body: m.body,
+      created_at: m.createdAt.getTime(),
+      is_mine: m.senderId === user.id,
+      read: Boolean(m.readAt) || m.recipientId === user.id, // freshly marked above for incoming
+    }));
+    return { ok: true, messages: thread };
   }),
 
   // Owner moderation queue: reports grouped by target, with the reported

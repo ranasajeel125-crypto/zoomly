@@ -207,3 +207,16 @@ export const storyViews = sqliteTable("story_views", {
   viewerId: integer("viewer_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
+
+// A 1-to-1 direct message. Conversations are derived from these rows
+// (latest message per counterpart); readAt is set when the recipient
+// fetches the thread. Delivery to an open chat screen is by polling —
+// the WebSocket hub is broadcast-room based and is not used for DMs.
+export const messages = sqliteTable("messages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  senderId: integer("sender_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  recipientId: integer("recipient_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  body: text("body").notNull(),
+  readAt: integer("read_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
