@@ -222,3 +222,51 @@ select {
     transform: translate(calc(-50% + var(--drift, 0px)), -44dvh) scale(1.1) rotate(var(--rot, 8deg));
   }
 }
+
+/* Feed double-tap heart: bursts at the tap point and fades away. */
+.zoomly-heart-burst {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  font-size: 84px;
+  line-height: 1;
+  pointer-events: none;
+  z-index: 4;
+  text-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+  animation: zoomly-heart-burst 0.75s ease-out forwards;
+}
+@keyframes zoomly-heart-burst {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.3) rotate(-8deg);
+  }
+  18% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.12) rotate(3deg);
+  }
+  40% {
+    transform: translate(-50%, -54%) scale(0.96);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -70%) scale(1.05) rotate(0deg);
+  }
+}
+
+/* Feed single-tap feedback: the centre play/pause glyph flashes and
+   fades (a video left paused keeps its static ▶ overlay afterwards). */
+.zoomly-tap-flash {
+  animation: zoomly-tap-flash 0.65s ease-out forwards;
+}
+@keyframes zoomly-tap-flash {
+  0% {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  25% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.15);
+  }
+}

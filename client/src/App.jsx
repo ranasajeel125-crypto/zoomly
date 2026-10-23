@@ -729,6 +729,23 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
   const [menuOpen, setMenuOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [shareNote, setShareNote] = useState("");
+  // Feed tap gestures (owner spec): ONE tap toggles play/pause, a
+  // DOUBLE tap likes. The single tap is deferred ~300ms so a double
+  // tap can cancel it — the two never fight. `flash` is the brief
+  // centre glyph for the tap action; `bursts` are double-tap hearts.
+  const [flash, setFlash] = useState(null); // "play" | "pause" | null
+  const [bursts, setBursts] = useState([]);
+  const tapTimerRef = useRef(0);
+  const flashTimerRef = useRef(0);
+  const burstSeqRef = useRef(0);
+
+  useEffect(
+    () => () => {
+      clearTimeout(tapTimerRef.current);
+      clearTimeout(flashTimerRef.current);
+    },
+    []
+  );
 
   async function shareVideo() {
     const url = `${window.location.origin}/?v=${post.id}`;
@@ -798,6 +815,44 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
     }
   }
 
+  function showTapFlash(kind) {
+    setFlash(kind);
+    clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = setTimeout(() => setFlash(null), 650);
+  }
+
+  function burstAt(e) {
+    const rect = cardRef.current?.getBoundingClientRect();
+    burstSeqRef.current += 1;
+    const id = burstSeqRef.current;
+    const heart = { id, x: rect ? e.clientX - rect.left : 0, y: rect ? e.clientY - rect.top : 0 };
+    setBursts((prev) => [...prev.slice(-5), heart]);
+    setTimeout(() => setBursts((prev) => prev.filter((b) => b.id !== id)), 780);
+  }
+
+  // Tap disambiguation on the video itself. First tap starts the
+  // window; a second tap inside it is a DOUBLE tap: burst a heart and
+  // like — a like-only path (on an already-liked post it changes
+  // nothing, it never unlikes). If the window expires, the tap was
+  // single: toggle play/pause and flash the action glyph. Caption taps
+  // land on the caption block (a separate element), and the rail
+  // buttons are their own targets — neither reaches this handler.
+  function handleVideoTap(e) {
+    if (tapTimerRef.current) {
+      clearTimeout(tapTimerRef.current);
+      tapTimerRef.current = 0;
+      burstAt(e);
+      if (!post.liked_by_me) onLike(post);
+      return;
+    }
+    tapTimerRef.current = setTimeout(() => {
+      tapTimerRef.current = 0;
+      const willPlay = videoRef.current ? videoRef.current.paused : true;
+      togglePlay();
+      showTapFlash(willPlay ? "play" : "pause");
+    }, 300);
+  }
+
   // The speaker button is the viewer's own control: whatever they pick
   // becomes the persisted default for every player.
   function toggleMute() {
@@ -830,14 +885,23 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
         muted={muted}
         playsInline
         preload="metadata"
-        onClick={togglePlay}
-        onDoubleClick={() => onLike(post)}
+        onClick={handleVideoTap}
       />
-      {paused && (
-        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none", fontSize: 64, opacity: 0.8 }}>
-          ▶
+      {(flash || paused) && (
+        <div
+          data-tap-flash={flash ?? undefined}
+          data-paused-overlay={!flash && paused ? "" : undefined}
+          className={flash ? "zoomly-tap-flash" : undefined}
+          style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none", fontSize: 64, opacity: 0.8 }}
+        >
+          {flash === "pause" ? "⏸" : "▶"}
         </div>
       )}
+      {bursts.map((b) => (
+        <span key={b.id} className="zoomly-heart-burst" style={{ left: b.x, top: b.y }}>
+          ❤️
+        </span>
+      ))}
       {badge && (
         <div style={{ position: "absolute", top: 10, left: 10, background: "rgba(10,10,10,0.78)", color: "#fff", borderRadius: 999, padding: "5px 11px", fontSize: 12.5, fontWeight: 700, zIndex: 4 }}>{badge}</div>
       )}

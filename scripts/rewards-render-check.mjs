@@ -159,6 +159,9 @@ try {
   const longText = longCard?.querySelector("[data-caption-text]");
   const longToggle = () => longCard?.querySelector("button[data-caption-toggle]");
   check("long caption starts collapsed (data-expanded=false)", longText?.getAttribute("data-expanded") === "false");
+  // The toggle renders after CaptionBlock's overflow measurement effect
+  // settles — wait for it rather than racing the effect.
+  await waitFor("'… more' toggle appears", () => Boolean(longToggle()));
   check("long caption shows the '… more' toggle", longToggle()?.textContent.includes("… more") ?? false);
   check("short caption has NO toggle", !shortCard?.querySelector("button[data-caption-toggle]"));
   // Expand via the toggle: full text reachable in a capped scroll area.
@@ -183,6 +186,84 @@ try {
   clickEl(shortText);
   await sleep(300);
   check("short caption stays plain after a tap (no toggle, not expanded)", !shortCard?.querySelector("button[data-caption-toggle]") && shortText?.getAttribute("data-expanded") === "false");
+
+  // ---- feed tap gestures: single tap = play/pause, double tap = like -------
+  // Owner spec 2026-10-23: one tap on a For You video pauses/plays it,
+  // a double tap likes (and can never unlike). jsdom's media elements
+  // never change `paused` on their own, so for THIS section the media
+  // prototype gets an honest play/pause flag; originals are restored
+  // afterwards so no other section sees a difference.
+  const mediaProto = dom.window.HTMLMediaElement.prototype;
+  const savedPlay = mediaProto.play;
+  const savedPause = mediaProto.pause;
+  const savedPausedDesc = Object.getOwnPropertyDescriptor(mediaProto, "paused");
+  Object.defineProperty(mediaProto, "paused", {
+    configurable: true,
+    get() {
+      return this._tapPaused !== false;
+    },
+  });
+  mediaProto.play = function () {
+    this._tapPaused = false;
+    return Promise.resolve();
+  };
+  mediaProto.pause = function () {
+    this._tapPaused = true;
+  };
+  try {
+    const shortVideo = shortCard?.querySelector("video");
+    check("feed tap target (short post video) found", Boolean(shortVideo));
+    const likeCountOf = (card) => {
+      const b = card?.querySelector('button[aria-label="Like"]');
+      const m = (b?.textContent || "").match(/\d+/);
+      return m ? parseInt(m[0], 10) : NaN;
+    };
+    const flashOf = () => shortCard?.querySelector("[data-tap-flash]")?.getAttribute("data-tap-flash") ?? null;
+    check("short post starts unliked (count 0)", likeCountOf(shortCard) === 0, `count=${likeCountOf(shortCard)}`);
+    // Single tap on a paused video: plays, flashes the ▶ glyph, no like.
+    clickEl(shortVideo);
+    await waitFor("single tap flashes play", () => flashOf() === "play");
+    check("single tap flashes the play glyph", flashOf() === "play");
+    await sleep(600);
+    check("single tap does NOT like", likeCountOf(shortCard) === 0, `count=${likeCountOf(shortCard)}`);
+    await waitFor("play flash clears with no paused overlay", () => !shortCard?.querySelector("[data-tap-flash]") && !shortCard?.querySelector("[data-paused-overlay]"));
+    check("after the play tap the video is playing (no paused overlay)", !shortCard?.querySelector("[data-paused-overlay]"));
+    // Single tap on the playing video: pauses (flash ⏸, then the static
+    // paused ▶ overlay stays), still no like.
+    clickEl(shortVideo);
+    await waitFor("single tap flashes pause", () => flashOf() === "pause");
+    check("single tap on a playing video flashes the pause glyph", flashOf() === "pause");
+    await waitFor("paused overlay stays after the flash", () => !shortCard?.querySelector("[data-tap-flash]") && Boolean(shortCard?.querySelector("[data-paused-overlay]")));
+    check("paused video keeps its ▶ overlay", Boolean(shortCard?.querySelector("[data-paused-overlay]")));
+    check("pause tap still did NOT like", likeCountOf(shortCard) === 0, `count=${likeCountOf(shortCard)}`);
+    // Resume, then let the flash fully clear before the double tap.
+    clickEl(shortVideo);
+    await waitFor("resume flash", () => flashOf() === "play");
+    await sleep(900);
+    // Double tap: heart burst + like, and it must NOT pause (the pending
+    // single tap is cancelled — no flash may appear).
+    clickEl(shortVideo);
+    clickEl(shortVideo);
+    await waitFor("double-tap heart burst", () => Boolean(shortCard?.querySelector(".zoomly-heart-burst")));
+    check("double tap bursts a heart at the tap point", Boolean(shortCard?.querySelector(".zoomly-heart-burst")));
+    await waitFor("double tap likes the post (count 1)", () => likeCountOf(shortCard) === 1);
+    check("double tap liked the post (count 1)", likeCountOf(shortCard) === 1);
+    await sleep(600);
+    check("double tap did NOT pause (no flash, no paused overlay)", !shortCard?.querySelector("[data-tap-flash]") && !shortCard?.querySelector("[data-paused-overlay]"));
+    // Double tap on the now-LIKED post: bursts again but the like stays —
+    // it must never unlike.
+    clickEl(shortVideo);
+    clickEl(shortVideo);
+    await waitFor("second double-tap heart burst", () => Boolean(shortCard?.querySelector(".zoomly-heart-burst")));
+    check("double tap on a liked post bursts again", Boolean(shortCard?.querySelector(".zoomly-heart-burst")));
+    await sleep(900);
+    check("double tap on a liked post keeps the like (count still 1)", likeCountOf(shortCard) === 1, `count=${likeCountOf(shortCard)}`);
+  } finally {
+    mediaProto.play = savedPlay;
+    mediaProto.pause = savedPause;
+    if (savedPausedDesc) Object.defineProperty(mediaProto, "paused", savedPausedDesc);
+    else delete mediaProto.paused;
+  }
 
   // ---- stories placement: strip is OUT of the feed, in a Watch section -----
   // Owner fix 2026-10-23: the story strip at the top of the feed ate vertical
