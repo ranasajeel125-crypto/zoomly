@@ -301,6 +301,12 @@ try {
   check("all 5 pack prices rendered", rewards.packs.every((p) => t.includes(`Rs.${p.pricePkr.toLocaleString()}`)));
   check("no 'Rs.undefined' anywhere", !t.includes("Rs.undefined"));
   check("JazzCash number rendered", t.includes(rewards.jazzcash.number));
+  const jcHighlight = document.querySelector("[data-jazzcash-highlight]");
+  check(
+    "JazzCash payment block is highlighted with the number (contiguous) + account title",
+    Boolean(jcHighlight) && jcHighlight.textContent.includes(rewards.jazzcash.number) && jcHighlight.textContent.includes(rewards.jazzcash.title),
+    jcHighlight ? jcHighlight.textContent.slice(0, 80) : "highlight block missing"
+  );
   check("leaderboard rendered", t.includes("Leaderboard") && t.includes("Top Coins") && t.includes("Top Referrals"));
   check("Top Coins board renders anonymously (ID # shown, own @username absent)", t.includes("ID #") && !t.includes(`@${username}`), `username=@${username}`);
   // Switch to the Top Referrals board and confirm it renders too.

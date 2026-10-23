@@ -2905,6 +2905,24 @@ function RewardsView({ me, refreshMe }) {
           <br />
           Ya ✏️ <strong style={{ color: "var(--text)" }}>Custom</strong> choose karke apni marzi ke coins bhi le sakte ho (kam az kam 10 — 1 coin = Rs.1).
         </p>
+        {/* Highlighted payment card: the number buyers send money to,
+            big and unmissable (owner request). The number stays one
+            contiguous, selectable text node. */}
+        <div
+          data-jazzcash-highlight=""
+          style={{
+            background: "color-mix(in srgb, var(--accent) 12%, var(--surface))",
+            border: "2px solid var(--accent)",
+            borderRadius: 14,
+            padding: "12px 14px",
+            margin: "0 0 12px",
+            textAlign: "center",
+          }}
+        >
+          <div style={{ fontSize: 12.5, fontWeight: 800, letterSpacing: 1.4, color: "var(--accent)" }}>💸 JAZZCASH</div>
+          <div style={{ fontSize: 27, fontWeight: 900, letterSpacing: 1, color: "var(--text)", marginTop: 2, userSelect: "text" }}>{data.jazzcash.number}</div>
+          <div style={{ fontSize: 15, fontWeight: 800, color: "var(--text)" }}>{data.jazzcash.title}</div>
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(104px, 1fr))", gap: 8 }}>
           {data.packs.map((pack, i) => (
             <button
