@@ -523,6 +523,13 @@ try {
   dom.window.eval(bundle);
   await waitForText("app boot", (t) => t.includes("Live") || t.includes("could not open"));
   check("app boots without crash", !bodyText().includes("could not open"));
+  // The For You feed carries its own 🔴 LIVE shortcut (TikTok-style) that
+  // jumps straight to the Live tab — separate from the bottom nav button.
+  const feedLiveBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("LIVE"));
+  check("feed has a 🔴 LIVE shortcut button", Boolean(feedLiveBtn));
+  feedLiveBtn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await waitForText("Live tab opened from the feed LIVE button", (t) => t.includes("Go Live") || t.includes("could not open"));
+  check("feed LIVE button opens the Live tab", bodyText().includes("Go Live"));
   const liveBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("Live"));
   check("Live nav button found", Boolean(liveBtn));
   liveBtn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));

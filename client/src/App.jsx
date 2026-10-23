@@ -580,7 +580,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile }) {
   );
 }
 
-function FeedView({ me, onOpenProfile, refreshMe }) {
+function FeedView({ me, onOpenProfile, refreshMe, onGoLive }) {
   const [stream, setStream] = useState("foryou");
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -629,6 +629,26 @@ function FeedView({ me, onOpenProfile, refreshMe }) {
             For You
           </button>
         </div>
+        <button
+          onClick={onGoLive}
+          aria-label="Open Live"
+          title="Watch live broadcasts"
+          style={{
+            background: "#e0245e",
+            color: "#fff",
+            border: "none",
+            borderRadius: 999,
+            padding: "7px 13px",
+            fontWeight: 800,
+            fontSize: 13,
+            cursor: "pointer",
+            boxShadow: "0 4px 14px rgba(224,36,94,0.45)",
+            whiteSpace: "nowrap",
+            flexShrink: 0,
+          }}
+        >
+          🔴 LIVE
+        </button>
         <span className="chip" title="Your coin balance">
           🪙 {me?.coin_balance ?? 0}
         </span>
@@ -1622,7 +1642,7 @@ export function App() {
   return (
     <div style={{ height: "100dvh", display: "flex", flexDirection: "column", maxWidth: 860, margin: "0 auto" }}>
       <div style={{ flex: 1, minHeight: 0, overflowY: tab === "feed" ? "hidden" : "auto" }} className={tab === "feed" ? "" : "no-scrollbar"}>
-        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} />}
+        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} />}
         {tab === "watch" && <WatchView onOpenProfile={openProfile} />}
         {tab === "live" && <LiveView me={me} refreshMe={refreshMe} onOpenProfile={openProfile} />}
         {tab === "upload" && (
