@@ -1265,8 +1265,19 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
     setLoadError(false);
     // getFeed is a read: retried automatically while the server wakes up.
     const res = await call("getFeed", { stream, limit: 30 });
-    if (res.ok) setPosts(res.posts);
-    else if (res.transportError) setLoadError(true);
+    if (res.ok) {
+      // Belt-and-braces: a post id may never render twice in one feed
+      // session (the server orders seen-last; this guards the list
+      // itself, and any future paged append goes through the same cut).
+      const seenIds = new Set();
+      setPosts(
+        (res.posts ?? []).filter((p) => {
+          if (seenIds.has(p.id)) return false;
+          seenIds.add(p.id);
+          return true;
+        }),
+      );
+    } else if (res.transportError) setLoadError(true);
     setLoading(false);
   }, [stream]);
 

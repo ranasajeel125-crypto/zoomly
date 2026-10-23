@@ -280,6 +280,32 @@ const bPost2 = await api("createPost", { token: bToken, title: "B deletes this o
 const bDelOwn = await api("deletePost", { token: bToken, post_id: bPost2.post?.id });
 check("a user can still delete their OWN video (original path)", bDelOwn.ok === true);
 
+// ---- Feed seen-first ordering ------------------------------------------------
+// Videos the viewer already watched (post_views, written by
+// recordPostView when a video plays) sort AFTER unseen ones — they are
+// recycled at the end, never removed. A fresh viewer keeps the natural
+// newest-first order.
+const s1 = await api("createPost", { token: adminToken, title: "Seen order one", video_url: "https://example.com/s1.mp4" });
+const s2 = await api("createPost", { token: adminToken, title: "Seen order two", video_url: "https://example.com/s2.mp4" });
+const s3 = await api("createPost", { token: adminToken, title: "Seen order three", video_url: "https://example.com/s3.mp4" });
+check("three ordering posts created", s1.ok === true && s2.ok === true && s3.ok === true);
+const seenIds = [s1.post.id, s2.post.id, s3.post.id];
+const relOrder = (feedPosts) => (feedPosts ?? []).map((p) => p.id).filter((id) => seenIds.includes(id));
+const dFeed1 = await api("getFeed", { token: dSignup.token, stream: "foryou" });
+check("fresh viewer gets natural newest-first order", JSON.stringify(relOrder(dFeed1.posts)) === JSON.stringify([s3.post.id, s2.post.id, s1.post.id]), JSON.stringify(relOrder(dFeed1.posts)));
+const dView = await api("recordPostView", { token: dSignup.token, post_id: s3.post.id });
+check("viewer watching the top video records a view", dView.ok === true && dView.counted === true, JSON.stringify(dView));
+const dFeed2 = await api("getFeed", { token: dSignup.token, stream: "foryou" });
+check("watched video moves behind ALL unseen ones", JSON.stringify(relOrder(dFeed2.posts)) === JSON.stringify([s2.post.id, s1.post.id, s3.post.id]), JSON.stringify(relOrder(dFeed2.posts)));
+check("watched video is still IN the feed (recycled at the end, not removed)", relOrder(dFeed2.posts).length === 3);
+const userF = `fresh_${suffix}`;
+const fSignup = await api("signup", { username: userF, display_name: "Fresh Viewer", password: "test-pass-123" });
+const fFeed = await api("getFeed", { token: fSignup.token, stream: "foryou" });
+check("a different fresh viewer still gets the natural order", JSON.stringify(relOrder(fFeed.posts)) === JSON.stringify([s3.post.id, s2.post.id, s1.post.id]), JSON.stringify(relOrder(fFeed.posts)));
+await api("deletePost", { token: adminToken, post_id: s1.post.id });
+await api("deletePost", { token: adminToken, post_id: s2.post.id });
+await api("deletePost", { token: adminToken, post_id: s3.post.id });
+
 // Cleanup: delete the smoke post
 const del = await api("deletePost", { token: adminToken, post_id: postId });
 check("delete own post", del.ok === true);

@@ -729,16 +729,44 @@ export const Actions = {
       // their owner; blocked users' posts never reach this viewer.
       const blocked = await blockedIdsFor(user.id);
       const visible = or(eq(schema.posts.hidden, 0), eq(schema.posts.userId, user.id));
+      // Seen-first ordering (owner fix 2026-10-23): videos this user has
+      // already watched (a post_views row — written when a video plays)
+      // sort AFTER everything unseen, newest first within each group, so
+      // a refresh never leads with repeats while fresh videos exist.
+      // Seen videos are never removed — with a small catalog they simply
+      // recycle at the very end. The author's own posts are never marked
+      // seen for them (recordPostView skips authors), so own posts keep
+      // their natural place. The join cannot duplicate rows: post_views
+      // is UNIQUE(post_id, user_id). Ordering happens in SQL, before
+      // LIMIT/OFFSET, so paging stays correct.
+      const seenLast = sql`case when ${schema.postViews.id} is null then 0 else 1 end`;
+      const seenJoin = and(eq(schema.postViews.postId, schema.posts.id), eq(schema.postViews.userId, user.id));
       let rows;
       if (args.stream === "following") {
         const followees = await db.select({ id: schema.follows.followeeId }).from(schema.follows).where(eq(schema.follows.followerId, user.id));
         const ids = followees.map((f) => f.id).filter((id) => !blocked.has(id));
         if (ids.length === 0) return { ok: true, posts: [] };
-        rows = await db.select().from(schema.posts).where(and(inArray(schema.posts.userId, ids), visible)).orderBy(desc(schema.posts.createdAt)).limit(args.limit).offset(args.offset);
+        const joined = await db
+          .select({ post: schema.posts })
+          .from(schema.posts)
+          .leftJoin(schema.postViews, seenJoin)
+          .where(and(inArray(schema.posts.userId, ids), visible))
+          .orderBy(seenLast, desc(schema.posts.createdAt), desc(schema.posts.id))
+          .limit(args.limit)
+          .offset(args.offset);
+        rows = joined.map((r) => r.post);
       } else {
         const conds = [visible];
         if (blocked.size > 0) conds.push(notInArray(schema.posts.userId, [...blocked]));
-        rows = await db.select().from(schema.posts).where(and(...conds)).orderBy(desc(schema.posts.createdAt)).limit(args.limit).offset(args.offset);
+        const joined = await db
+          .select({ post: schema.posts })
+          .from(schema.posts)
+          .leftJoin(schema.postViews, seenJoin)
+          .where(and(...conds))
+          .orderBy(seenLast, desc(schema.posts.createdAt), desc(schema.posts.id))
+          .limit(args.limit)
+          .offset(args.offset);
+        rows = joined.map((r) => r.post);
       }
       return { ok: true, posts: await postDtos(rows, user) };
     }
