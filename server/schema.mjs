@@ -187,3 +187,23 @@ export const notifications = sqliteTable("notifications", {
   read: integer("read").notNull().default(0),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
+
+// A 24-hour story (photo or video, hosted on Cloudinary like all media).
+// Expiry is by created_at: getStories only returns stories younger than
+// 24h and opportunistically deletes expired rows (cleanup on read).
+export const stories = sqliteTable("stories", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  mediaUrl: text("media_url").notNull(),
+  mediaPublicId: text("media_public_id"),
+  mediaType: text("media_type", { enum: ["image", "video"] }).notNull().default("image"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+// One row per (story, viewer): the owner sees who watched their story.
+export const storyViews = sqliteTable("story_views", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  storyId: integer("story_id").notNull().references(() => stories.id, { onDelete: "cascade" }),
+  viewerId: integer("viewer_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});

@@ -3,7 +3,7 @@
 // Mirrors the SMM panel's conventions: zod validation, PBKDF2 password
 // hashes, SHA-256-hashed session tokens stored in the DB.
 import { z } from "zod";
-import { and, desc, eq, gte, inArray, isNull, like, notInArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, like, lt, notInArray, or, sql } from "drizzle-orm";
 import { db } from "./db.mjs";
 import * as schema from "./schema.mjs";
 import {
@@ -141,6 +141,56 @@ async function notify({ userId, type, actorId = null, postId = null, liveSession
   } catch (err) {
     console.error("[notify] insert failed:", err?.message || err);
   }
+}
+
+// ---- Stories (24h) --------------------------------------------------------------
+const STORY_TTL_MS = 24 * 60 * 60 * 1000;
+
+function storyDto(s, viewCount, seenByMe) {
+  return {
+    id: s.id,
+    media_url: s.mediaUrl,
+    media_type: s.mediaType,
+    created_at: s.createdAt.getTime(),
+    view_count: viewCount ?? 0,
+    seen_by_me: Boolean(seenByMe),
+  };
+}
+
+// Active (< 24h) stories of one author as DTOs, with view counts and the
+// viewer's seen flags.
+async function storyDtosFor(authorId, viewerId) {
+  const cutoff = new Date(Date.now() - STORY_TTL_MS);
+  const rows = await db
+    .select()
+    .from(schema.stories)
+    .where(and(eq(schema.stories.userId, authorId), gte(schema.stories.createdAt, cutoff)))
+    .orderBy(schema.stories.createdAt);
+  if (rows.length === 0) return [];
+  const ids = rows.map((s) => s.id);
+  const viewRows = await db
+    .select({ storyId: schema.storyViews.storyId, viewerId: schema.storyViews.viewerId, count: sql`count(*)`.mapWith(Number) })
+    .from(schema.storyViews)
+    .where(inArray(schema.storyViews.storyId, ids))
+    .groupBy(schema.storyViews.storyId, schema.storyViews.viewerId);
+  const counts = new Map();
+  const seen = new Set();
+  for (const r of viewRows) {
+    counts.set(r.storyId, (counts.get(r.storyId) ?? 0) + r.count);
+    if (r.viewerId === viewerId) seen.add(r.storyId);
+  }
+  return rows.map((s) => storyDto(s, counts.get(s.id) ?? 0, seen.has(s.id)));
+}
+
+// Who may see an author's stories: the author, or someone who follows them.
+async function canViewStories(viewerId, authorId) {
+  if (viewerId === authorId) return true;
+  const rows = await db
+    .select({ id: schema.follows.id })
+    .from(schema.follows)
+    .where(and(eq(schema.follows.followerId, viewerId), eq(schema.follows.followeeId, authorId)))
+    .limit(1);
+  return rows.length > 0;
 }
 
 // ---- Moderation helpers -------------------------------------------------------
@@ -736,6 +786,8 @@ export const Actions = {
       const referred = await db.select().from(schema.users).where(eq(schema.users.referredBy, target.id)).orderBy(desc(schema.users.createdAt));
       referrals = referred.map((u) => ({ ...authorDto(u), created_at: u.createdAt.getTime() }));
     }
+    // Active stories for the profile ring (visible to the owner + followers).
+    const profileStories = target.id === viewer.id || isFollowing ? await storyDtosFor(target.id, viewer.id) : [];
     return {
       ok: true,
       profile: {
@@ -750,6 +802,7 @@ export const Actions = {
       },
       posts: await postDtos(postRows, viewer),
       referrals,
+      stories: profileStories,
     };
   }),
 
@@ -1439,6 +1492,111 @@ export const Actions = {
     if (!user) return { ok: false, message: "Please sign in." };
     await db.update(schema.notifications).set({ read: 1 }).where(and(eq(schema.notifications.userId, user.id), eq(schema.notifications.read, 0)));
     return { ok: true, message: "All notifications marked as read.", unread_count: 0 };
+  }),
+
+  // ---- Stories (24h) ------------------------------------------------------------
+  createStory: withValidation(
+    z.object({
+      token: tokenArg,
+      media_url: z.string().url().max(2000),
+      media_public_id: z.string().max(300).optional(),
+      media_type: z.enum(["image", "video"]).default("image"),
+    }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      const inserted = await db
+        .insert(schema.stories)
+        .values({ userId: user.id, mediaUrl: args.media_url, mediaPublicId: args.media_public_id ?? null, mediaType: args.media_type })
+        .returning();
+      const story = inserted[0];
+      if (!story) return { ok: false, message: "Story could not be posted." };
+      return { ok: true, message: "Story posted — 24 ghante rahegi.", story: storyDto(story, 0, true) };
+    }
+  ),
+
+  // Story strip for the feed: my own + my followees' active stories,
+  // grouped by author (mine first, then unseen, then most recent).
+  getStories: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    // Cleanup on read: expired stories (and their views, via FK cascade
+    // at the app level) are deleted opportunistically.
+    const cutoff = new Date(Date.now() - STORY_TTL_MS);
+    await db.delete(schema.storyViews).where(
+      inArray(
+        schema.storyViews.storyId,
+        db.select({ id: schema.stories.id }).from(schema.stories).where(lt(schema.stories.createdAt, cutoff)),
+      ),
+    );
+    await db.delete(schema.stories).where(lt(schema.stories.createdAt, cutoff));
+    const followees = await db.select({ id: schema.follows.followeeId }).from(schema.follows).where(eq(schema.follows.followerId, user.id));
+    const authorIds = [user.id, ...followees.map((f) => f.id)];
+    const authors = await db.select().from(schema.users).where(inArray(schema.users.id, authorIds));
+    const authorMap = new Map(authors.map((a) => [a.id, a]));
+    const groups = [];
+    for (const authorId of authorIds) {
+      const stories = await storyDtosFor(authorId, user.id);
+      if (stories.length === 0) continue;
+      groups.push({
+        author: authorMap.has(authorId) ? authorDto(authorMap.get(authorId)) : null,
+        stories,
+        has_unseen: stories.some((s) => !s.seen_by_me),
+        latest_at: stories[stories.length - 1].created_at,
+      });
+    }
+    groups.sort((a, b) => {
+      const aMine = a.author?.id === user.id ? 0 : 1;
+      const bMine = b.author?.id === user.id ? 0 : 1;
+      if (aMine !== bMine) return aMine - bMine;
+      if (a.has_unseen !== b.has_unseen) return a.has_unseen ? -1 : 1;
+      return b.latest_at - a.latest_at;
+    });
+    return { ok: true, groups };
+  }),
+
+  viewStory: withValidation(z.object({ token: tokenArg, story_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const story = (await db.select().from(schema.stories).where(eq(schema.stories.id, args.story_id)).limit(1))[0];
+    if (!story || Date.now() - story.createdAt.getTime() > STORY_TTL_MS) return { ok: false, message: "Story expired or not found." };
+    if (!(await canViewStories(user.id, story.userId))) return { ok: false, message: "Story not available." };
+    if (story.userId !== user.id) {
+      try {
+        await db.insert(schema.storyViews).values({ storyId: story.id, viewerId: user.id });
+      } catch {
+        /* already viewed */
+      }
+    }
+    const countRows = await db.select({ count: sql`count(*)`.mapWith(Number) }).from(schema.storyViews).where(eq(schema.storyViews.storyId, story.id));
+    return { ok: true, view_count: countRows[0]?.count ?? 0 };
+  }),
+
+  getStoryViewers: withValidation(z.object({ token: tokenArg, story_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const story = (await db.select().from(schema.stories).where(eq(schema.stories.id, args.story_id)).limit(1))[0];
+    if (!story) return { ok: false, message: "Story not found." };
+    if (story.userId !== user.id) return { ok: false, message: "Sirf story ka owner viewers dekh sakta hai." };
+    const rows = await db
+      .select({ view: schema.storyViews, viewer: schema.users })
+      .from(schema.storyViews)
+      .innerJoin(schema.users, eq(schema.storyViews.viewerId, schema.users.id))
+      .where(eq(schema.storyViews.storyId, story.id))
+      .orderBy(desc(schema.storyViews.createdAt));
+    return { ok: true, viewers: rows.map((r) => ({ viewer: authorDto(r.viewer), viewed_at: r.view.createdAt.getTime() })) };
+  }),
+
+  deleteStory: withValidation(z.object({ token: tokenArg, story_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const story = (await db.select().from(schema.stories).where(eq(schema.stories.id, args.story_id)).limit(1))[0];
+    if (!story) return { ok: false, message: "Story not found." };
+    if (story.userId !== user.id) return { ok: false, message: "You can only delete your own stories." };
+    await db.delete(schema.storyViews).where(eq(schema.storyViews.storyId, story.id));
+    await db.delete(schema.stories).where(eq(schema.stories.id, story.id));
+    if (story.mediaPublicId) await destroyFromCloudinary(story.mediaPublicId, story.mediaType === "video" ? "video" : "image");
+    return { ok: true, message: "Story deleted." };
   }),
 
   // Owner moderation queue: reports grouped by target, with the reported
