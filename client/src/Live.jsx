@@ -4,7 +4,7 @@
 // viewer at a time can take the guest seat: the host accepts their join
 // request and they publish camera/mic as a second publisher next to the
 // host (split stage, same mesh + TURN-retry rules). Gifts always target
-// the host's session with the usual 50/50 split.
+// the host's session with the usual 70/30 split (broadcaster/platform).
 //
 // The watch and broadcast rooms are full-screen stages (TikTok-style):
 // the video fills the whole viewport and the chat, controls, gift sheet
@@ -577,7 +577,7 @@ function GoLiveSetup({ me, onStart, onCancel }) {
         </div>
       </form>
       <p style={{ color: "var(--dim)", fontSize: 13, marginTop: 10 }}>
-        Viewers tumhe gifts bhej sakte hain — har gift ke aadhe (50%) coins tumhare balance me aayenge.
+        Viewers tumhe gifts bhej sakte hain — har gift ke 70% coins tumhare balance me aayenge.
       </p>
     </div>
   );
@@ -1702,7 +1702,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
               </button>
             </div>
             <div style={{ fontSize: 13, color: "var(--dim)", margin: "8px 0 10px" }}>
-              Aadhe coins broadcaster ko jayenge{match ? ", aur poori value uski PK score me judegi" : ""}. Tumhara balance:{" "}
+              Gift ke 70% coins broadcaster ko jayenge{match ? ", aur poori value uski PK score me judegi" : ""}. Tumhara balance:{" "}
               <strong style={{ color: "var(--text)" }}>🪙 {balance}</strong>
             </div>
             <Notice text={error} bad />
@@ -1751,7 +1751,7 @@ function EndSummary({ summary, onClose }) {
           <strong>🪙 {summary.total_gift_coins}</strong>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
-          <span style={{ color: "var(--dim)" }}>💰 Tumhari kamai (50%)</span>
+          <span style={{ color: "var(--dim)" }}>💰 Tumhari kamai (70%)</span>
           <strong style={{ color: "var(--accent)" }}>🪙 {summary.creator_earned_coins}</strong>
         </div>
       </div>

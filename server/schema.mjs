@@ -73,7 +73,7 @@ export const coinRequests = sqliteTable("coin_requests", {
 
 // A LIVE broadcast. endedAt is null while the broadcast is running.
 // totalGiftCoins = gross gift coins received; platformCutCoins = the
-// platform's 50% share of those gifts (the creator received the rest).
+// platform's 30% share of those gifts (the creator received the other 70%).
 export const liveSessions = sqliteTable("live_sessions", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
@@ -102,7 +102,7 @@ export const giftEvents = sqliteTable("gift_events", {
 
 // A PK match between two live broadcasts. scoreA/scoreB are the summed
 // gift coin values each side received during the match (balances still use
-// the normal 50/50 gift split). winnerUserId is null for a draw and while
+// the normal 70/30 gift split). winnerUserId is null for a draw and while
 // the match is running; endedAt is null while running.
 export const liveMatches = sqliteTable("live_matches", {
   id: integer("id").primaryKey({ autoIncrement: true }),

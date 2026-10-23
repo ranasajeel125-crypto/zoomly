@@ -245,9 +245,9 @@ check("gift outside the match does not score", sockA.ofType("match-score").lengt
 const midRow = await dbOne("SELECT score_a, score_b FROM live_matches WHERE id = ?", [matchId]);
 check("running scores mirrored to DB (100 / 25)", midRow?.score_a === 100 && midRow?.score_b === 25, JSON.stringify(midRow));
 
-// The 50/50 balance split still applies during a match: A got +50 of the 100.
+// The 70/30 balance split still applies during a match: A got +70 of the 100.
 const aBalance = (await api("getMe", { token: userA.token })).user.coin_balance;
-check("broadcaster balance still uses 50/50 split (+50)", aBalance === 50, `bal=${aBalance}`);
+check("broadcaster balance still uses 70/30 split (+70)", aBalance === 70, `bal=${aBalance}`);
 
 // ---- timer end + winner --------------------------------------------------------------
 

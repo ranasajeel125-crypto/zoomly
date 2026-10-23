@@ -828,7 +828,7 @@ export const Actions = {
       };
       broadcastGift(session.id, { from: authorDto(user), gift: giftPayload, created_at: Date.now() });
       // If this live is in a PK match, the gift's full value scores for
-      // the broadcaster's side (balances above already used the 50/50 split).
+      // the broadcaster's side (balances above used the 70/30 split).
       noteGiftForMatch(session.id, gift.coins);
       return {
         ok: true,

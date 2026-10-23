@@ -85,9 +85,10 @@ export const LEADERBOARD_LIMIT = 50;
 // clients render exactly these entries (getLive returns them) and sendGift
 // prices come only from here. Field names are part of the API contract —
 // { key, name, emoji, coins } — keep them in sync with the client.
-// Revenue split: the broadcaster (creator) receives floor(coins / 2) into
-// their normal coin balance; the rest is the platform cut, recorded in the
-// DB (gift_events.platform_share + live_sessions.platform_cut_coins) and
+// Revenue split (owner-set): the broadcaster (creator) receives 70% of
+// the gift price — floor(coins * 0.7) — into their normal coin balance;
+// the platform keeps the remaining 30%, recorded in the DB
+// (gift_events.platform_share + live_sessions.platform_cut_coins) and
 // credited nowhere.
 export const GIFT_CATALOG = [
   { key: "rose", name: "Rose", emoji: "🌹", coins: 10 },
@@ -104,10 +105,10 @@ export function giftForKey(key) {
   return GIFT_CATALOG.find((g) => g.key === key) ?? null;
 }
 
-// Splits a gift's price: creator gets floor(half), platform keeps the rest
-// (so an odd price like 25 → creator 12, platform 13).
+// Splits a gift's price: creator gets 70% (floored), platform keeps the
+// rest (so an odd price like 25 → creator 17, platform 8).
 export function giftSplit(coins) {
-  const creatorShare = Math.floor(coins / 2);
+  const creatorShare = Math.floor(coins * 0.7);
   return { creatorShare, platformShare: coins - creatorShare };
 }
 

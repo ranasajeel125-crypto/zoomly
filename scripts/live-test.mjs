@@ -1,5 +1,5 @@
 // End-to-end tests for Zoomly LIVE: broadcasts, WebRTC signaling relay,
-// live chat, viewer counts, and coin gifts with the 50/50 split.
+// live chat, viewer counts, and coin gifts with the 70/30 split.
 //
 // Boots against an already-running server (BASE_URL) whose database the
 // test can also read directly (TEST_DB_URL, a libsql file: URL) to verify
@@ -283,44 +283,44 @@ try {
 }
 check("unauthenticated socket rejected", unauthRejected);
 
-// ---- Gifts: the 50/50 split ------------------------------------------------------
+// ---- Gifts: the 70/30 split (broadcaster 70% / platform 30%) -------------------------
 
 const creatorBefore = (await api("getMe", { token: creatorToken })).user.coin_balance;
 const gift100 = await api("sendGift", { token: viewerToken, live_session_id: sid, gift_key: "giftbox" });
 check("giftbox (100) sent", gift100.ok === true, JSON.stringify(gift100).slice(0, 200));
-check("giftbox split reported 50/50", gift100.creator_share === 50 && gift100.platform_share === 50);
-check("sender balance reported 5910", gift100.my_balance === 5910, `bal=${gift100.my_balance}`);
+check("giftbox split reported 70/30", gift100.creator_share === 70 && gift100.platform_share === 30);
+check("sender balance reported 5900", gift100.my_balance === 5900, `bal=${gift100.my_balance}`);
 const creatorAfter100 = (await api("getMe", { token: creatorToken })).user.coin_balance;
-check("broadcaster credited +50", creatorAfter100 === creatorBefore + 50, `before=${creatorBefore} after=${creatorAfter100}`);
+check("broadcaster credited +70", creatorAfter100 === creatorBefore + 70, `before=${creatorBefore} after=${creatorAfter100}`);
 
 const giftWs = await fanSock.waitFor((m) => m.type === "gift" && m.gift?.key === "giftbox", 8000, "gift broadcast");
-check("gift broadcast over WS (viewer side)", giftWs.gift.coins === 100 && giftWs.gift.creator_share === 50 && giftWs.from?.username === viewerName, JSON.stringify(giftWs).slice(0, 220));
+check("gift broadcast over WS (viewer side)", giftWs.gift.coins === 100 && giftWs.gift.creator_share === 70 && giftWs.from?.username === viewerName, JSON.stringify(giftWs).slice(0, 220));
 const giftWsHost = await hostSock.waitFor((m) => m.type === "gift" && m.gift?.key === "giftbox", 8000, "gift broadcast at host");
 check("gift broadcast over WS (broadcaster side)", giftWsHost.gift.emoji === "🎁");
 
 const ev100 = await dbOne("SELECT * FROM gift_events WHERE live_session_id = ? AND gift_key = 'giftbox'", [sid]);
 check(
-  "gift_events row: 100 = 50 creator + 50 platform",
-  ev100 && ev100.coins === 100 && ev100.creator_share === 50 && ev100.platform_share === 50 && ev100.sender_id === viewerId && ev100.creator_id === creatorId,
+  "gift_events row: 100 = 70 creator + 30 platform",
+  ev100 && ev100.coins === 100 && ev100.creator_share === 70 && ev100.platform_share === 30 && ev100.sender_id === viewerId && ev100.creator_id === creatorId,
   JSON.stringify(ev100)
 );
 const totals1 = await dbOne("SELECT total_gift_coins, platform_cut_coins FROM live_sessions WHERE id = ?", [sid]);
-check("session totals after 100 gift", totals1?.total_gift_coins === 100 && totals1?.platform_cut_coins === 50, JSON.stringify(totals1));
+check("session totals after 100 gift", totals1?.total_gift_coins === 100 && totals1?.platform_cut_coins === 30, JSON.stringify(totals1));
 
-// Odd price: chocolate 25 -> creator 12, platform 13.
+// Odd price: chocolate 25 -> creator 17 (floor of 70%), platform 8.
 const gift25 = await api("sendGift", { token: viewerToken, live_session_id: sid, gift_key: "chocolate" });
 check("chocolate (25) sent", gift25.ok === true, JSON.stringify(gift25).slice(0, 160));
-check("odd split 25 → 12/13", gift25.creator_share === 12 && gift25.platform_share === 13, JSON.stringify(gift25));
+check("odd split 25 → 17/8", gift25.creator_share === 17 && gift25.platform_share === 8, JSON.stringify(gift25));
 const creatorAfter25 = (await api("getMe", { token: creatorToken })).user.coin_balance;
-check("broadcaster credited +12", creatorAfter25 === creatorAfter100 + 12, `after=${creatorAfter25}`);
+check("broadcaster credited +17", creatorAfter25 === creatorAfter100 + 17, `after=${creatorAfter25}`);
 const ev25 = await dbOne("SELECT * FROM gift_events WHERE live_session_id = ? AND gift_key = 'chocolate'", [sid]);
-check("gift_events row: 25 = 12 + 13", ev25 && ev25.creator_share === 12 && ev25.platform_share === 13, JSON.stringify(ev25));
+check("gift_events row: 25 = 17 + 8", ev25 && ev25.creator_share === 17 && ev25.platform_share === 8, JSON.stringify(ev25));
 const totals2 = await dbOne("SELECT total_gift_coins, platform_cut_coins FROM live_sessions WHERE id = ?", [sid]);
-check("session totals after both gifts (125 / 63)", totals2?.total_gift_coins === 125 && totals2?.platform_cut_coins === 63, JSON.stringify(totals2));
+check("session totals after both gifts (125 / 38)", totals2?.total_gift_coins === 125 && totals2?.platform_cut_coins === 38, JSON.stringify(totals2));
 
 // Owner sees the recorded platform take.
 const adminView = await api("getAdminCoinRequests", { token: adminToken });
-check("admin view reports platform gift earnings (63)", adminView.platform_gift_coins === 63, `got=${adminView.platform_gift_coins}`);
+check("admin view reports platform gift earnings (38)", adminView.platform_gift_coins === 38, `got=${adminView.platform_gift_coins}`);
 
 // ---- Gift rejections ----------------------------------------------------------------
 
@@ -568,7 +568,7 @@ check("live-ended broadcast on broadcaster disconnect", endedMsg.liveSessionId =
 await sleep(400);
 const endedRow = await dbOne("SELECT ended_at, total_gift_coins, platform_cut_coins, peak_viewers FROM live_sessions WHERE id = ?", [sid]);
 check("session marked ended in DB", endedRow?.ended_at !== null && endedRow?.ended_at !== undefined, JSON.stringify(endedRow));
-check("final totals persisted (125 / 63)", endedRow?.total_gift_coins === 125 && endedRow?.platform_cut_coins === 63, JSON.stringify(endedRow));
+check("final totals persisted (125 / 38)", endedRow?.total_gift_coins === 125 && endedRow?.platform_cut_coins === 38, JSON.stringify(endedRow));
 
 const listAfter = await api("listLive", { token: viewerToken });
 check("ended session leaves listLive", !listAfter.lives?.some((l) => l.id === sid));

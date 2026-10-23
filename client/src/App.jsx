@@ -1167,7 +1167,7 @@ function AdminSection({ refreshMe }) {
       </p>
       {typeof platformGiftCoins === "number" && (
         <p style={{ fontSize: 14, margin: "0 0 10px" }}>
-          🔴 Platform earnings from LIVE gifts (50% cut, recorded): <strong>🪙 {platformGiftCoins.toLocaleString()}</strong>
+          🔴 Platform earnings from LIVE gifts (30% cut, recorded): <strong>🪙 {platformGiftCoins.toLocaleString()}</strong>
         </p>
       )}
       <Notice text={error} bad />
