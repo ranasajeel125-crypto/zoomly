@@ -553,13 +553,23 @@ try {
   dom.window.eval(bundle);
   await waitForText("app boot", (t) => t.includes("Live") || t.includes("could not open"));
   check("app boots without crash", !bodyText().includes("could not open"));
-  // The owner removed the 🔴 LIVE pill from the feed header: the feed must
-  // have NO live shortcut of its own. The raised centre button in the bottom
-  // nav is the one route to the Live tab.
-  const feedPill = document.querySelector('button[aria-label="Open Live"]');
-  check("feed header has NO 🔴 LIVE pill", !feedPill);
-  const strayLiveBtn = [...document.querySelectorAll("button")].find((b) => !b.closest("nav") && (b.textContent || "").includes("LIVE"));
-  check("no LIVE shortcut button outside the bottom nav", !strayLiveBtn);
+  // The owner rejected the big red 🔴 LIVE pill in the feed header. Instead
+  // the feed carries a small TikTok-style TV "LIVE" icon at the top-left of
+  // the header: icon-only, no red pill, and NOT the 🔴-emoji text button.
+  const pillBtn = [...document.querySelectorAll("button")].find((b) => !b.closest("nav") && (b.textContent || "").includes("🔴"));
+  check("feed header has NO red 🔴 LIVE pill", !pillBtn);
+  const liveIconBtn = document.querySelector('button[aria-label="Open Live"]');
+  check("feed header has the small LIVE icon button", Boolean(liveIconBtn) && !liveIconBtn.closest("nav"));
+  check("feed LIVE entry is an icon (SVG), not a text pill", Boolean(liveIconBtn?.querySelector("svg")));
+  liveIconBtn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await waitForText("Live tab opened from the feed LIVE icon", (t) => t.includes("Go Live") || t.includes("could not open"));
+  check("feed LIVE icon opens the Live tab", bodyText().includes("Go Live"));
+  // Back to the feed via the Home nav button, then in through the raised
+  // centre nav LIVE button — it must keep working exactly as before.
+  const homeBtn = [...document.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("Home"));
+  check("Home nav button found", Boolean(homeBtn));
+  homeBtn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await waitForText("back on the feed", (t) => t.includes("For You") || t.includes("could not open"));
   const liveBtn = [...document.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("Live"));
   check("raised centre nav LIVE button found", Boolean(liveBtn));
   liveBtn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));

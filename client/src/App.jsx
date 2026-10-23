@@ -957,7 +957,7 @@ function StoriesRow({ me }) {
   );
 }
 
-function FeedView({ me, onOpenProfile, refreshMe, onOpenNotifications, sharedPostId }) {
+function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications, sharedPostId }) {
   const [stream, setStream] = useState("foryou");
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1013,6 +1013,32 @@ function FeedView({ me, onOpenProfile, refreshMe, onOpenNotifications, sharedPos
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px 0" }}>
+        <button
+          onClick={onGoLive}
+          aria-label="Open Live"
+          title="Watch live broadcasts"
+          style={{
+            background: "none",
+            border: "none",
+            padding: "1px 2px 0",
+            cursor: "pointer",
+            color: "#fff",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 0,
+            flexShrink: 0,
+            lineHeight: 1,
+            opacity: 0.92,
+          }}
+        >
+          <svg width="25" height="19" viewBox="0 0 28 22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M9 2.5 14 6l5-3.5" />
+            <rect x="3" y="6" width="22" height="14" rx="3" />
+            <path d="M10.5 13h7" strokeWidth="2.4" />
+          </svg>
+          <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, marginTop: 1 }}>LIVE</span>
+        </button>
         <Logo size={30} />
         <div style={{ display: "flex", flex: 1, gap: 6 }}>
           <button className={`tab-btn ${stream === "following" ? "active" : ""}`} onClick={() => setStream("following")}>
@@ -2919,7 +2945,7 @@ export function App() {
   return (
     <div style={{ height: "100dvh", display: "flex", flexDirection: "column", maxWidth: 860, margin: "0 auto" }}>
       <div style={{ flex: 1, minHeight: 0, overflowY: tab === "feed" ? "hidden" : "auto" }} className={tab === "feed" ? "" : "no-scrollbar"}>
-        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onOpenNotifications={() => setShowNotifs(true)} sharedPostId={sharedPostId} />}
+        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} onOpenNotifications={() => setShowNotifs(true)} sharedPostId={sharedPostId} />}
         {tab === "watch" && <WatchView onOpenProfile={openProfile} />}
         {tab === "live" && <LiveView me={me} refreshMe={refreshMe} onOpenProfile={openProfile} />}
         {tab === "upload" && (
