@@ -217,6 +217,36 @@ check(
 check("live watch starts from the preference too", liveJsxSrc.includes("useState(() => viewerMuted())") && liveJsxSrc.includes("setViewerMuted"));
 check("forced-muted autoplay shows a Sound on overlay (feed + live)", appJsxSrc.includes("Sound on") && appJsxSrc.includes("forcedMute") && liveJsxSrc.includes("Sound on") && liveJsxSrc.includes("forcedMute"));
 
+// ---- Face filters ---------------------------------------------------------------
+// Broadcasters (host + seated guest) can filter their own camera and the
+// filter is rendered into the published stream via a canvas pipeline
+// (filters.js). Headless checks: the module's shape, the persistence, and
+// that both publish paths consume the processed stream. The jsdom host
+// section at the end exercises the picker itself with stubbed media.
+const filtersJsSrc = fs.readFileSync(path.join(SRC_DIR, "filters.js"), "utf8");
+check(
+  "filter module defines all 7 filters",
+  ["normal", "beauty", "bright", "warm", "cool", "vivid", "bw"].every((k) => filtersJsSrc.includes(`key: "${k}"`)) &&
+    ["Normal", "Beauty", "Bright", "Warm", "Cool", "Vivid", "B&W"].every((l) => filtersJsSrc.includes(`label: "${l}"`))
+);
+check("filter choice persists via localStorage", filtersJsSrc.includes("zoomly_live_filter") && filtersJsSrc.includes("getLiveFilter") && filtersJsSrc.includes("setLiveFilter"));
+check("processor publishes a canvas captureStream (viewers get the filtered video)", filtersJsSrc.includes("createVideoProcessor") && filtersJsSrc.includes("captureStream") && filtersJsSrc.includes("drawImage"));
+check("beauty filter is a smoothing blend, not just a colour wash", filtersJsSrc.includes('currentKey === "beauty"') && filtersJsSrc.includes('blur(3px)') && filtersJsSrc.includes("globalAlpha"));
+check("unsupported browsers fall back (support probe + null processor)", filtersJsSrc.includes("filtersSupported") && filtersJsSrc.includes('ctx.filter = "blur(2px)"'));
+check(
+  "host path: camera runs through the processor, room publishes the given stream",
+  liveJsxSrc.includes("createVideoProcessor(s, getLiveFilter())") && liveJsxSrc.includes("onStart(res.session, stream, proc)") && liveJsxSrc.includes("for (const track of stream.getTracks()) pc.addTrack(track, stream)")
+);
+check(
+  "guest path: seated guest publishes the processed stream too",
+  liveJsxSrc.includes("guestStreamRef.current = proc ? proc.stream : stream") && liveJsxSrc.includes("guestStreamRef.current.getTracks()")
+);
+check(
+  "filter picker is wired for publishers (sheet + 🎨 buttons)",
+  liveJsxSrc.includes("Face Filters") && liveJsxSrc.includes("LIVE_FILTERS.map") && (liveJsxSrc.match(/aria-label="Filters"/g) ?? []).length >= 2 && liveJsxSrc.includes("processor?.setFilter(key)") && liveJsxSrc.includes("guestProcessorRef.current?.setFilter(key)")
+);
+check("picking a filter persists it for the next live", liveJsxSrc.includes("setLiveFilter(key)"));
+
 // ---- WebSocket: join, presence, signaling relay, chat ---------------------------
 
 const hostSock = await connectSocket(creatorToken);
@@ -593,6 +623,9 @@ try {
   const wt = bodyText();
   check("watch screen renders the Follow button", wt.includes("Follow"));
   check("watch screen renders the Join Live button", wt.includes("Join Live"));
+  // A plain viewer is not a publisher: no filter controls for them.
+  check("watch screen (plain viewer) has NO Filters button", !document.querySelector('button[aria-label="Filters"]'));
+  check("watch screen (plain viewer) shows no Face Filters picker", !wt.includes("Face Filters"));
   check("watch screen did NOT crash the app", !wt.includes("could not open"));
   dom.window.close();
 } catch (err) {
@@ -669,6 +702,155 @@ check("the default title was saved too", freshMe.user?.live_title === "Fresh Fac
 await api("endLive", { token: fresh.token, live_session_id: defaulted.session.id });
 
 fan2.close();
+
+// ---- jsdom: the host's own live screen has the filter picker ----------------------
+// A fresh user (so nothing above is disturbed) goes live in jsdom with
+// stubbed camera/canvas: jsdom has no MediaStream or canvas pipeline,
+// so the stubs stand in for them — what is asserted is the real client
+// wiring: the processor runs (canvas capture happens), the processed
+// stream reaches the stage preview, the 🎨 button + picker render for
+// the host, picking a filter updates + persists the choice.
+try {
+  const fhName = `filterhost_${suffix}`;
+  const fh = await api("signup", { username: fhName, display_name: "Filter Host", password: "test-pass-123" });
+  check("filter host signup", fh.ok === true, JSON.stringify(fh).slice(0, 160));
+  const indexHtml = fs.readFileSync(path.join(DIST_DIR, "index.html"), "utf8");
+  const bundleName = fs.readdirSync(path.join(DIST_DIR, "assets")).find((f) => f.endsWith(".js"));
+  const bundle = fs.readFileSync(path.join(DIST_DIR, "assets", bundleName), "utf8");
+  check("bundle contains the filter picker", bundle.includes("Face Filters") && bundle.includes("zoomly_live_filter"));
+
+  const dom = new JSDOM(indexHtml, {
+    url: `${BASE}/`,
+    runScripts: "dangerously",
+    pretendToBeVisual: true,
+    beforeParse(window) {
+      window.localStorage.setItem("zoomly_token", fh.token);
+      window.fetch = (u, o = {}) => {
+        const { signal, ...rest } = o;
+        return fetch(new URL(u, BASE), rest);
+      };
+      window.IntersectionObserver = class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      };
+      window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+      window.HTMLMediaElement.prototype.pause = () => {};
+      window.HTMLMediaElement.prototype.load = () => {};
+      window.scrollTo = () => {};
+      if (!window.WebSocket) {
+        window.WebSocket = class {
+          constructor() {
+            this.readyState = 0;
+          }
+          send() {}
+          close() {
+            this.readyState = 3;
+          }
+        };
+      }
+      // --- stubbed media stack (jsdom has none of this) ---
+      const fakeTrack = (kind) => ({
+        kind,
+        readyState: "live",
+        stop() {
+          this.readyState = "ended";
+        },
+        getSettings: () => ({ width: 640, height: 480, frameRate: 30 }),
+      });
+      window.MediaStream = class FakeMediaStream {
+        constructor(tracks = []) {
+          this._tracks = [...tracks];
+        }
+        getTracks() {
+          return [...this._tracks];
+        }
+        getVideoTracks() {
+          return this._tracks.filter((t) => t.kind === "video");
+        }
+        getAudioTracks() {
+          return this._tracks.filter((t) => t.kind === "audio");
+        }
+        addTrack(t) {
+          this._tracks.push(t);
+        }
+      };
+      Object.defineProperty(window.navigator, "mediaDevices", {
+        configurable: true,
+        value: { getUserMedia: async () => new window.MediaStream([fakeTrack("video"), fakeTrack("audio")]) },
+      });
+      window.__canvasCaptures = 0;
+      window.HTMLCanvasElement.prototype.getContext = function () {
+        return { filter: "", globalAlpha: 1, drawImage() {} };
+      };
+      window.HTMLCanvasElement.prototype.captureStream = function () {
+        window.__canvasCaptures += 1;
+        return new window.MediaStream([fakeTrack("video")]);
+      };
+    },
+  });
+  const { document } = dom.window;
+  const bodyText = () => document.body?.textContent || "";
+  const waitFor = async (desc, pred, timeoutMs = 25000) => {
+    const t0 = Date.now();
+    for (;;) {
+      if (pred()) return;
+      if (Date.now() - t0 > timeoutMs) throw new Error(`Timed out waiting for: ${desc}`);
+      await sleep(200);
+    }
+  };
+  const click = (el) => el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  dom.window.eval(bundle);
+  await waitFor("app boot", () => bodyText().includes("For You") || bodyText().includes("could not open"));
+  check("host app boots without crash", !bodyText().includes("could not open"));
+
+  const navLiveBtn = [...document.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("Live"));
+  check("host: centre nav LIVE button found", Boolean(navLiveBtn));
+  click(navLiveBtn);
+  await waitFor("Live tab", () => bodyText().includes("shuru karo") || bodyText().includes("could not open"));
+  const goLiveBtn = [...document.querySelectorAll("button")].find((b) => !b.closest("nav") && (b.textContent || "").includes("shuru karo"));
+  check("host: Go Live button found", Boolean(goLiveBtn));
+  click(goLiveBtn);
+  await waitFor("go-live setup", () => bodyText().includes("Camera on karo") || bodyText().includes("could not open"));
+  const camBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("Camera on karo"));
+  click(camBtn);
+  await waitFor("camera on + processor running", () => dom.window.__canvasCaptures >= 1);
+  check("camera runs through the filter processor (canvas capture happened)", dom.window.__canvasCaptures >= 1);
+  const startBtn = () => [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("Start Live"));
+  await waitFor("Start Live enabled", () => startBtn() && !startBtn().disabled);
+  click(startBtn());
+  await waitFor("broadcast room", () => bodyText().includes("End Live") || bodyText().includes("could not open"));
+  check("broadcast room renders", bodyText().includes("End Live") && !bodyText().includes("could not open"));
+  const stageVideo = [...document.querySelectorAll("video")].find((v) => v.srcObject && typeof v.srcObject.getVideoTracks === "function");
+  check("stage preview shows a (processed) stream", Boolean(stageVideo));
+  check("stage preview stream's video track is the canvas capture", stageVideo?.srcObject.getVideoTracks().length === 1 && dom.window.__canvasCaptures >= 1);
+
+  const filtersBtn = document.querySelector('button[aria-label="Filters"]');
+  check("host live screen renders the 🎨 Filters button", Boolean(filtersBtn));
+  check("picker is closed until tapped", !bodyText().includes("Face Filters"));
+  click(filtersBtn);
+  await waitFor("filter picker opens", () => bodyText().includes("Face Filters"));
+  const chips = [...document.querySelectorAll("button[data-filter-key]")].map((b) => b.getAttribute("data-filter-key")).sort();
+  check("picker lists all 7 filters", JSON.stringify(chips) === JSON.stringify(["beauty", "bright", "bw", "cool", "normal", "vivid", "warm"]), chips.join(","));
+  const vividChip = document.querySelector('button[data-filter-key="vivid"]');
+  click(vividChip);
+  await waitFor("vivid persisted", () => dom.window.localStorage.getItem("zoomly_live_filter") === "vivid");
+  check("picking a filter persists it (localStorage)", dom.window.localStorage.getItem("zoomly_live_filter") === "vivid");
+  check("picked chip shows as active", document.querySelector('button[data-filter-key="vivid"]')?.getAttribute("aria-pressed") === "true");
+  const bwChip = document.querySelector('button[data-filter-key="bw"]');
+  click(bwChip);
+  await waitFor("bw persisted", () => dom.window.localStorage.getItem("zoomly_live_filter") === "bw");
+  check("switching filters live updates the persisted choice", dom.window.localStorage.getItem("zoomly_live_filter") === "bw");
+  check("broadcast room still healthy after filter switches", bodyText().includes("End Live") && !bodyText().includes("could not open"));
+
+  // Tidy up: end this host's live through the API.
+  const ll = await api("listLive", { token: fh.token });
+  const mine = ll.lives?.find((l) => l.broadcaster?.username === fhName);
+  if (mine) await api("endLive", { token: fh.token, live_session_id: mine.id });
+  dom.window.close();
+} catch (err) {
+  check(`jsdom host filter check (${err.message})`, false);
+}
 
 console.log(failures === 0 ? "\nLIVE TEST PASSED ✔" : `\nLIVE TEST FAILED — ${failures} check(s) failed ✗`);
 process.exit(failures === 0 ? 0 : 1);

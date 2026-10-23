@@ -21,6 +21,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { call } from "./api";
 import { logSelectedCandidatePair, openLiveSocket, peerConnectionConfig, setIceServers } from "./live";
 import { setViewerMuted, viewerMuted } from "./sound";
+import { LIVE_FILTERS, createVideoProcessor, getLiveFilter, setLiveFilter } from "./filters";
 import { Avatar, Notice, OwnerBadge, ReportDialog } from "./App.jsx";
 
 const ENDED_TEXT = "This live has ended.";
@@ -470,6 +471,11 @@ function GoLiveSetup({ me, onStart, onCancel }) {
   const [error, setError] = useState("");
   const previewRef = useRef(null);
   const streamRef = useRef(null);
+  // The filter processor (filters.js): the camera runs through it and
+  // its processed stream is what the preview shows and the broadcast
+  // room publishes. Null when this browser can't process video — then
+  // the raw camera is used, exactly as before filters existed.
+  const processorRef = useRef(null);
 
   useEffect(() => {
     if (previewRef.current && stream) previewRef.current.srcObject = stream;
@@ -477,6 +483,7 @@ function GoLiveSetup({ me, onStart, onCancel }) {
 
   useEffect(
     () => () => {
+      processorRef.current?.stop();
       streamRef.current?.getTracks().forEach((t) => t.stop());
     },
     []
@@ -491,7 +498,10 @@ function GoLiveSetup({ me, onStart, onCancel }) {
     try {
       const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       streamRef.current = s;
-      setStream(s);
+      const proc = createVideoProcessor(s, getLiveFilter());
+      processorRef.current = proc;
+      // Preview the same processed picture viewers will receive.
+      setStream(proc ? proc.stream : s);
     } catch (err) {
       if (err && (err.name === "NotAllowedError" || err.name === "SecurityError")) {
         setError("Camera/mic ki ijazat nahi mili. Browser ki settings me camera aur microphone Allow karo, phir dobara koshish karo.");
@@ -523,12 +533,17 @@ function GoLiveSetup({ me, onStart, onCancel }) {
     }
     // Adopt the server's ICE list (STUN + TURN) for all peer connections.
     setIceServers(res.ice_servers);
-    // Ownership of the stream passes to the broadcast room.
+    // Ownership of the stream (and its filter processor) passes to the
+    // broadcast room.
     streamRef.current = null;
-    onStart(res.session, stream);
+    const proc = processorRef.current;
+    processorRef.current = null;
+    onStart(res.session, stream, proc);
   }
 
   function cancel() {
+    processorRef.current?.stop();
+    processorRef.current = null;
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     onCancel();
@@ -584,9 +599,71 @@ function GoLiveSetup({ me, onStart, onCancel }) {
   );
 }
 
+// ---- face filters ------------------------------------------------------------------
+// The picker shown to publishers (host + seated guest). The published
+// video itself is filtered (see filters.js), so viewers see the same
+// picture. Where the browser can't process the camera, the sheet says
+// so and the broadcast simply runs unfiltered.
+function FilterSheet({ activeKey, supported, onPick, onClose }) {
+  return (
+    <>
+      <div onClick={onClose} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 7 }} />
+      <div
+        style={{
+          position: "absolute",
+          left: 0,
+          right: 0,
+          bottom: 0,
+          zIndex: 8,
+          background: "var(--surface)",
+          borderTop: "1px solid var(--border)",
+          borderRadius: "18px 18px 0 0",
+          padding: "14px 14px calc(14px + env(safe-area-inset-bottom))",
+          animation: "zoomly-sheet-up 0.22s ease-out",
+          maxHeight: "62dvh",
+          overflowY: "auto",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <strong style={{ fontSize: 16, flex: 1 }}>🎨 Face Filters</strong>
+          <button type="button" className="btn btn-small" onClick={onClose} aria-label="Close filters">
+            ✕
+          </button>
+        </div>
+        {supported ? (
+          <>
+            <p style={{ fontSize: 13, color: "var(--dim)", margin: "8px 0 10px" }}>
+              Filter live badal sakte ho — broadcast nahi rukega. Viewers ko bhi yehi filtered video dikhegi.
+            </p>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {LIVE_FILTERS.map((f) => (
+                <button
+                  key={f.key}
+                  type="button"
+                  data-filter-key={f.key}
+                  aria-pressed={f.key === activeKey}
+                  className={f.key === activeKey ? "btn btn-primary" : "btn"}
+                  onClick={() => onPick(f.key)}
+                  style={{ borderRadius: 999, padding: "9px 16px", fontWeight: 700 }}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p style={{ fontSize: 13.5, color: "var(--dim)", margin: "10px 0 4px" }}>
+            ⚠️ Is browser me filters support nahi hain — is liye tumhari video bina filter ke live hai. Chrome ke latest version me filters chal jayenge.
+          </p>
+        )}
+      </div>
+    </>
+  );
+}
+
 // ---- broadcast room -----------------------------------------------------------------
 
-function BroadcastRoom({ me, session, stream, onDone }) {
+function BroadcastRoom({ me, session, stream, processor, onDone }) {
   const videoRef = useRef(null);
   const secondVideoRef = useRef(null);
   const pcsRef = useRef(new Map()); // peerId -> { pc, pendingIce, kind: "viewer" | "match-viewer" | "match-peer" }
@@ -609,6 +686,18 @@ function BroadcastRoom({ me, session, stream, onDone }) {
   const [guestSeat, setGuestSeat] = useState(null);
   const [guestRequests, setGuestRequests] = useState([]);
   const guestPeerIdRef = useRef(null);
+  // Face filter state: `stream` is already the processor's output (or
+  // the raw camera when processing is unavailable), so all peers and
+  // the preview show the filtered picture. Switching just re-aims the
+  // processor's canvas — the published track never changes.
+  const [filterKey, setFilterKey] = useState(() => processor?.filter ?? getLiveFilter());
+  const [showFilters, setShowFilters] = useState(false);
+
+  function pickFilter(key) {
+    setFilterKey(key);
+    setLiveFilter(key);
+    processor?.setFilter(key);
+  }
 
   const room = useLiveRoom(session.id, {
     onGift: (msg) => {
@@ -723,9 +812,12 @@ function BroadcastRoom({ me, session, stream, onDone }) {
   }, [session.started_at]);
 
   // Leaving this screen any other way: stop the camera and close peers.
-  // (The socket close ends the live on the server too.)
+  // (The socket close ends the live on the server too.) The processor's
+  // stop() releases the canvas, its draw loop and the raw camera video
+  // track it consumed; the stream cleanup below stops the rest.
   useEffect(
     () => () => {
+      processor?.stop();
       stream.getTracks().forEach((t) => t.stop());
       for (const { pc } of pcsRef.current.values()) {
         try {
@@ -736,7 +828,7 @@ function BroadcastRoom({ me, session, stream, onDone }) {
       }
       pcsRef.current.clear();
     },
-    [stream]
+    [stream, processor]
   );
 
   function clearEntryTimers(entry) {
@@ -1062,11 +1154,15 @@ function BroadcastRoom({ me, session, stream, onDone }) {
               ⚔️
             </button>
           )}
+          <button type="button" onClick={() => setShowFilters(true)} style={roundBtnStyle} aria-label="Filters" title="Face filters">
+            🎨
+          </button>
           <button className="btn btn-danger" onClick={endLive} disabled={ending} style={{ borderRadius: 999, padding: "11px 16px", fontSize: 15, fontWeight: 800, whiteSpace: "nowrap", flexShrink: 0 }}>
             {ending ? "Ending…" : "⏹ End Live"}
           </button>
         </div>
       </div>
+      {showFilters && <FilterSheet activeKey={filterKey} supported={Boolean(processor)} onPick={pickFilter} onClose={() => setShowFilters(false)} />}
     </div>
   );
 }
@@ -1104,8 +1200,34 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
   const [amGuest, setAmGuest] = useState(false);
   const seatedGuestRef = useRef(null);
   const guestStreamRef = useRef(null);
+  // The guest's raw camera stream + its filter processor: guestStreamRef
+  // holds the processor's (filtered) stream — the raw one only when this
+  // browser can't process video — and every publish path reads
+  // guestStreamRef, so viewers receive the filtered picture.
+  const guestRawRef = useRef(null);
+  const guestProcessorRef = useRef(null);
   const myVideoRef = useRef(null);
   const amGuestRef = useRef(false);
+  // Face filter (only while I am the seated guest).
+  const [guestFilterKey, setGuestFilterKey] = useState(() => getLiveFilter());
+  const [showGuestFilters, setShowGuestFilters] = useState(false);
+
+  function pickGuestFilter(key) {
+    setGuestFilterKey(key);
+    setLiveFilter(key);
+    guestProcessorRef.current?.setFilter(key);
+  }
+
+  // Release the guest capture chain: processor (canvas + raw video
+  // track), then both streams' remaining tracks. Safe to call twice.
+  function stopGuestCapture() {
+    guestProcessorRef.current?.stop();
+    guestProcessorRef.current = null;
+    guestStreamRef.current?.getTracks().forEach((t) => t.stop());
+    guestStreamRef.current = null;
+    guestRawRef.current?.getTracks().forEach((t) => t.stop());
+    guestRawRef.current = null;
+  }
   // PK match state
   const [match, setMatch] = useState(null);
   const [matchResult, setMatchResult] = useState(null);
@@ -1196,10 +1318,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
     },
     onEnded: () => {
       closeAllPcs();
-      if (guestStreamRef.current) {
-        guestStreamRef.current.getTracks().forEach((t) => t.stop());
-        guestStreamRef.current = null;
-      }
+      stopGuestCapture();
     },
   });
   const { sockRef } = room;
@@ -1222,7 +1341,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
   useEffect(
     () => () => {
       closeAllPcs();
-      guestStreamRef.current?.getTracks().forEach((t) => t.stop());
+      stopGuestCapture();
     },
     []
   );
@@ -1381,7 +1500,13 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      guestStreamRef.current = stream;
+      guestRawRef.current = stream;
+      // Run the camera through the filter processor; publish its stream
+      // (or the raw camera when this browser can't process video).
+      const proc = createVideoProcessor(stream, getLiveFilter());
+      guestProcessorRef.current = proc;
+      guestStreamRef.current = proc ? proc.stream : stream;
+      if (proc) setGuestFilterKey(proc.filter);
       amGuestRef.current = true;
       setAmGuest(true);
       sockRef.current?.send({ type: "guest-ready" });
@@ -1396,8 +1521,8 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
     amGuestRef.current = false;
     setAmGuest(false);
     setJoinPending(false);
-    guestStreamRef.current?.getTracks().forEach((t) => t.stop());
-    guestStreamRef.current = null;
+    setShowGuestFilters(false);
+    stopGuestCapture();
     for (const [peerId, entry] of [...pcsRef.current.entries()]) {
       if (entry.kind === "guest-viewer") closePcEntry(peerId, entry);
     }
@@ -1682,11 +1807,19 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
           <button type="button" onClick={() => setShowGifts(true)} disabled={room.ended || gifts.length === 0} style={{ ...roundBtnStyle, opacity: room.ended || gifts.length === 0 ? 0.5 : 1 }} aria-label="Gifts" title="Gift bhejo">
             🎁
           </button>
+          {amGuest && (
+            <button type="button" onClick={() => setShowGuestFilters(true)} style={roundBtnStyle} aria-label="Filters" title="Face filters">
+              🎨
+            </button>
+          )}
           <button type="button" onClick={toggleMute} style={roundBtnStyle} aria-label="Sound">
             {muted ? "🔇" : "🔊"}
           </button>
         </div>
       </div>
+      {showGuestFilters && amGuest && (
+        <FilterSheet activeKey={guestFilterKey} supported={Boolean(guestProcessorRef.current)} onPick={pickGuestFilter} onClose={() => setShowGuestFilters(false)} />
+      )}
 
       {/* gift bottom sheet over the video */}
       {reportOpen && <ReportDialog targetType="live" targetId={session.id} label="live" onClose={() => setReportOpen(false)} />}
@@ -1788,9 +1921,9 @@ export function LiveView({ me, refreshMe, onOpenProfile }) {
       <GoLiveSetup
         me={me}
         onCancel={() => setScreen({ kind: "list" })}
-        onStart={(session, stream) => {
+        onStart={(session, stream, processor) => {
           refreshMe?.();
-          setScreen({ kind: "broadcast", session, stream });
+          setScreen({ kind: "broadcast", session, stream, processor });
         }}
       />
     );
@@ -1801,6 +1934,7 @@ export function LiveView({ me, refreshMe, onOpenProfile }) {
         me={me}
         session={screen.session}
         stream={screen.stream}
+        processor={screen.processor}
         onDone={(summary) => {
           refreshMe?.();
           setScreen({ kind: "summary", summary });
