@@ -1026,10 +1026,15 @@ try {
     await waitFor("PK invite panel on the host", () => bodyText().includes("challenge bheja hai") || bodyText().includes("could not open"));
     const acceptBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("match shuru karo"));
     check("host sees the PK invite with an Accept button", Boolean(acceptBtn));
+    check("host has no PK band before the match starts", !document.querySelector("[data-pk-band]"));
     click(acceptBtn);
     await waitFor("host stage splits for the match", () => Boolean(document.querySelector('[data-stage-layout="pk"]')));
     check("host stage is in the PK split layout", Boolean(document.querySelector('[data-stage-layout="pk"]')));
     check("host split renders both peer tiles", document.querySelectorAll("[data-stage-tile]").length === 2);
+    const hostBand = document.querySelector("[data-pk-band]");
+    check("host cameras sit in the framed PK band (data-pk-band)", Boolean(hostBand));
+    check("host PK band is the split layer itself", hostBand?.getAttribute("data-stage-layout") === "pk");
+    check("host PK band is framed at 55% of the stage height", hostBand?.style.height === "55%", hostBand?.style.height);
     const barText = document.querySelector("[data-pk-scorebar]")?.textContent || "";
     check("host score bar shows both broadcasters", barText.includes(`@${fhName}`) && barText.includes(`@${foeName}`), barText.slice(0, 140));
     check("host score bar has the centre countdown", Boolean(document.querySelector("[data-pk-countdown]")), barText.slice(0, 140));
@@ -1044,6 +1049,7 @@ try {
     await api("endLive", { token: foe.token, live_session_id: foeLive.session.id });
     await waitFor("host stage returns to single", () => !document.querySelector("[data-pk-scorebar]") && Boolean(document.querySelector('[data-stage-layout="single"]')), 10000);
     check("host stage returns to single after match-ended", !document.querySelector("[data-pk-scorebar]"));
+    check("host PK band is gone after the match", !document.querySelector("[data-pk-band]"));
     foeSock.close();
   }
 

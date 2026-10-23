@@ -330,7 +330,7 @@ try {
   const indexHtml = fs.readFileSync(path.join(DIST_DIR, "index.html"), "utf8");
   const bundleName = fs.readdirSync(path.join(DIST_DIR, "assets")).find((f) => f.endsWith(".js"));
   const bundle = fs.readFileSync(path.join(DIST_DIR, "assets", bundleName), "utf8");
-  check("bundle contains the PK split + score bar hooks", bundle.includes("data-pk-scorebar") && bundle.includes("data-stage-layout"));
+  check("bundle contains the PK split + score bar + band hooks", bundle.includes("data-pk-scorebar") && bundle.includes("data-stage-layout") && bundle.includes("data-pk-band"));
 
   const dom = new JSDOM(indexHtml, {
     url: `${BASE}/`,
@@ -389,6 +389,7 @@ try {
   click(watchBtnD);
   await waitFast("D watch room chrome", () => bodyText().includes("Join Live") || bodyText().includes("could not open"), 25000);
   check("viewer starts in the single layout (no match yet)", Boolean(document.querySelector('[data-stage-layout="single"]')) && !document.querySelector("[data-pk-scorebar]"));
+  check("viewer has no PK band before the match", !document.querySelector("[data-pk-band]"));
 
   // Start the match — D invites, E accepts (5s matches on this server).
   sockD.send({ type: "match-invite", toLiveSessionId: sidE });
@@ -397,6 +398,9 @@ try {
   await waitFast("viewer stage splits", () => Boolean(document.querySelector('[data-stage-layout="pk"]')), 4000);
   check("viewer stage splits 50/50 during the match", Boolean(document.querySelector('[data-stage-layout="pk"]')));
   check("viewer split renders both peer tiles", document.querySelectorAll("[data-stage-tile]").length === 2);
+  const vBand = document.querySelector("[data-pk-band]");
+  check("viewer cameras sit in the framed PK band (data-pk-band)", Boolean(vBand));
+  check("viewer PK band is framed at 55% of the stage height", vBand?.style.height === "55%", vBand?.style.height);
   const vBarText = document.querySelector("[data-pk-scorebar]")?.textContent || "";
   check("viewer score bar shows both broadcasters + scores", vBarText.includes(`@${userD.user.username}`) && vBarText.includes(`@${userE.user.username}`), vBarText.slice(0, 140));
   check("viewer score bar has the centre countdown", Boolean(document.querySelector("[data-pk-countdown]")));
@@ -414,6 +418,7 @@ try {
   // The 5s timer ends the match: score bar gone, stage back to single.
   await waitFast("viewer stage returns to single", () => !document.querySelector("[data-pk-scorebar]") && Boolean(document.querySelector('[data-stage-layout="single"]')), 12000);
   check("viewer stage returns to single after match-ended", !document.querySelector("[data-pk-scorebar]"));
+  check("viewer PK band is gone after the match", !document.querySelector("[data-pk-band]"));
 
   dom.window.close();
   await api("endLive", { token: userD.token, live_session_id: sidD });

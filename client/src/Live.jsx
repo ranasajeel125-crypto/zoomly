@@ -47,8 +47,8 @@ function LiveBadge() {
 // TikTok-style: the video fills the whole viewport (the stage is fixed, so
 // it covers the bottom nav too) and every control floats over it — top bar
 // with a fade, notices under it, chat + actions in a bottom gradient. In a
-// PK match the stage splits into two side-by-side columns and the PK
-// score bar pins to the top, right under the header.
+// PK match the cameras instead sit in a framed band under the header +
+// score bar (see PK_BAND_HEIGHT below) and the lower stage stays dark.
 const stageStyle = {
   position: "fixed",
   inset: 0,
@@ -117,6 +117,23 @@ const tileLabelStyle = (bg) => ({
   fontSize: 13,
   color: "#fff",
 });
+
+// ---- PK band framing ---------------------------------------------------------
+// During a PK match the two cameras do NOT fill the screen (owner's
+// TikTok reference): they sit side-by-side in a framed BAND under the
+// header + score-bar zone — height 55% of the stage — and the stage
+// below the band stays dark, where the chat and controls live. The band
+// is an in-flow flex row (ordered between the header zone and the
+// bottom overlay, which pins itself to the bottom with marginTop:auto)
+// so it starts exactly under the score bar on any screen size; outside
+// a match the video layer is the usual absolute full-screen layer and
+// none of this applies.
+const PK_BAND_HEIGHT = "55%";
+// Gift animation during a match: its base sits just under the band's
+// lower edge (header zone ≈ 15% + band 55% from the top ⇒ ≈ 30% from
+// the bottom), floating in the dark zone above the chat — it hangs at
+// the band's lower edge instead of covering the faces.
+const PK_GIFT_BOTTOM = "31%";
 
 // ---- shared room hook ---------------------------------------------------------
 // Opens the socket, authenticates, joins the room, and collects the room's
@@ -352,8 +369,10 @@ function FloatingHearts({ hearts }) {
 // a time from a short queue: a burst of 1-coin flowers queues up
 // politely instead of stacking, and once the waiting queue is full
 // the extra VISUALS are dropped (the chat feed still records every
-// gift). Positioned in the lower-centre of the stage: below the PK
-// score bar (which sits across the middle seam) and above the chat.
+// gift). Positioned in the lower-centre of the stage, above the chat:
+// callers pass `bottom` to place it — the plain rooms use the default,
+// Broad rooms hug the bottom, and during a PK match it hangs at the
+// framed band's lower edge (PK_GIFT_BOTTOM), never over the faces.
 const GIFT_ANIM_MS = 2800;
 const GIFT_ANIM_GAP_MS = 160;
 const GIFT_ANIM_QUEUE_MAX = 5;
@@ -406,13 +425,13 @@ function useGiftAnimation() {
   return { giftAnim: current, enqueueGiftAnim };
 }
 
-function GiftAnimationOverlay({ anim }) {
+function GiftAnimationOverlay({ anim, bottom = "27%" }) {
   if (!anim?.gift) return null;
   const { gift, from } = anim;
   return (
     <div
       data-gift-animation=""
-      style={{ position: "absolute", left: 0, right: 0, bottom: "27%", zIndex: 5, display: "flex", justifyContent: "center", pointerEvents: "none", padding: "0 16px" }}
+      style={{ position: "absolute", left: 0, right: 0, bottom, zIndex: 5, display: "flex", justifyContent: "center", pointerEvents: "none", padding: "0 16px" }}
     >
       {/* key restarts the CSS animations for each gift in the queue */}
       <div key={anim.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
@@ -1354,13 +1373,19 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
 
   return (
     <div style={stageStyle}>
-      {/* video layer: own camera fills the stage; in a PK match the stage
-          splits into two equal side-by-side columns (me | opponent,
-          TikTok-style); with a seated guest it stacks top/bottom as
-          before. Outside both, a single full-screen video. */}
+      {/* video layer: own camera fills the stage full-screen; with a
+          seated guest it stacks top/bottom as before. In a PK match the
+          layer becomes the framed BAND (see PK_BAND_HEIGHT): an in-flow
+          row under the header/score-bar zone holding the two cameras
+          side-by-side at 55% of the stage height, dark stage below. */}
       <div
         data-stage-layout={match ? "pk" : splitView ? "guest" : "single"}
-        style={{ position: "absolute", inset: 0, display: "flex", flexDirection: match ? "row" : "column" }}
+        data-pk-band={match ? "" : undefined}
+        style={
+          match
+            ? { position: "relative", order: 1, height: PK_BAND_HEIGHT, flexShrink: 0, display: "flex", flexDirection: "row" }
+            : { position: "absolute", inset: 0, display: "flex", flexDirection: "column" }
+        }
       >
         <div data-stage-tile="main" style={{ position: "relative", flex: 1, minHeight: 0, minWidth: 0 }}>
           <video ref={videoRef} autoPlay muted playsInline style={videoFillStyle} />
@@ -1400,8 +1425,9 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
 
       <FloatingHearts hearts={hearts} />
 
-      {/* gift animation: the room-wide overlay (host sees it too) */}
-      <GiftAnimationOverlay anim={room.giftAnim} />
+      {/* gift animation: the room-wide overlay (host sees it too); in a
+          PK match it hangs at the band's lower edge, not over the faces */}
+      <GiftAnimationOverlay anim={room.giftAnim} bottom={match ? PK_GIFT_BOTTOM : undefined} />
 
       {/* header zone: top bar + the PK score bar pinned right under it */}
       <div style={{ position: "relative", zIndex: 6 }}>
@@ -1438,8 +1464,10 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
         <Notice text={room.authError} bad />
       </div>
 
-      {/* bottom overlay: challenge panel, chat, controls */}
-      <div style={bottomOverlayStyle}>
+      {/* bottom overlay: challenge panel, chat, controls. In a PK match
+          it orders itself after the band and pins to the stage bottom
+          (marginTop auto), leaving the dark gap under the band. */}
+      <div style={match ? { ...bottomOverlayStyle, order: 2, marginTop: "auto" } : bottomOverlayStyle}>
         {!splitView &&
           guestRequests.map((req) => (
             <div key={req.requestId} style={{ background: "rgba(8,40,60,0.85)", border: "1px solid #38bdf8", borderRadius: 14, padding: "10px 12px", backdropFilter: "blur(3px)" }}>
@@ -2060,13 +2088,19 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
 
   return (
     <div style={stageStyle}>
-      {/* video layer: the broadcaster fills the stage; in a PK match the
-          stage splits into two equal side-by-side columns (host |
-          opponent, TikTok-style); with a seated guest it stacks
-          top/bottom as before. */}
+      {/* video layer: the broadcaster fills the stage full-screen; with
+          a seated guest it stacks top/bottom as before. In a PK match
+          the layer becomes the framed BAND (see PK_BAND_HEIGHT): an
+          in-flow row under the header/score-bar zone holding the two
+          cameras side-by-side at 55% of the stage height, dark below. */}
       <div
         data-stage-layout={match ? "pk" : seatedGuest ? "guest" : "single"}
-        style={{ position: "absolute", inset: 0, display: "flex", flexDirection: match ? "row" : "column" }}
+        data-pk-band={match ? "" : undefined}
+        style={
+          match
+            ? { position: "relative", order: 1, height: PK_BAND_HEIGHT, flexShrink: 0, display: "flex", flexDirection: "row" }
+            : { position: "absolute", inset: 0, display: "flex", flexDirection: "column" }
+        }
       >
         <div data-stage-tile="main" style={{ position: "relative", flex: 1, minHeight: 0, minWidth: 0 }} onClick={handleStageTap}>
           <video ref={videoRef} autoPlay playsInline muted={muted} style={videoFillStyle} />
@@ -2147,8 +2181,9 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
         )}
       </div>
 
-      {/* gift animation: the room-wide overlay (viewers + seated guest) */}
-      <GiftAnimationOverlay anim={room.giftAnim} />
+      {/* gift animation: the room-wide overlay (viewers + seated guest);
+          in a PK match it hangs at the band's lower edge, not over faces */}
+      <GiftAnimationOverlay anim={room.giftAnim} bottom={match ? PK_GIFT_BOTTOM : undefined} />
 
       {/* header zone: top bar + the PK score bar pinned right under it */}
       <div style={{ position: "relative", zIndex: 6 }}>
@@ -2237,8 +2272,10 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
         <Notice text={notice} />
       </div>
 
-      {/* bottom overlay: chat + actions */}
-      <div style={bottomOverlayStyle}>
+      {/* bottom overlay: chat + actions. In a PK match it orders itself
+          after the band and pins to the stage bottom (marginTop auto),
+          leaving the dark gap under the band. */}
+      <div style={match ? { ...bottomOverlayStyle, order: 2, marginTop: "auto" } : bottomOverlayStyle}>
         <ChatFeed messages={room.messages} />
         <div style={bottomBarStyle}>
           <ChatInput onSend={room.sendChat} disabled={!room.connected || room.ended} placeholder="Chat me kuch likho…" />
