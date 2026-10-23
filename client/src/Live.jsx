@@ -21,7 +21,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { call } from "./api";
 import { logSelectedCandidatePair, openLiveSocket, peerConnectionConfig, setIceServers } from "./live";
 import { setViewerMuted, viewerMuted } from "./sound";
-import { Avatar, Notice } from "./App.jsx";
+import { Avatar, Notice, ReportDialog } from "./App.jsx";
 
 const ENDED_TEXT = "This live has ended.";
 
@@ -439,6 +439,7 @@ function LiveList({ me, onGoLive, onWatch, onOpenProfile }) {
               <div style={{ color: "var(--dim)", fontSize: 13, marginTop: 3 }}>
                 {live.broadcaster?.display_name} (@{live.broadcaster?.username}) · 👀 {live.viewer_count} watching
                 {live.in_match ? " · ⚔️ PK Match chal raha hai" : ""}
+                {live.hidden ? " · ⏳ review me hai (sirf tumhe dikh raha hai)" : ""}
               </div>
             </div>
             {live.broadcaster?.id === me.id ? (
@@ -1095,6 +1096,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
   // Follow (same toggleFollow RPC as profiles/feed)
   const [following, setFollowing] = useState(false);
   const [followBusy, setFollowBusy] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
   // Guest seat: who is seated (anyone), my pending request, and my own
   // publishing state when I am the guest.
   const [seatedGuest, setSeatedGuest] = useState(null);
@@ -1623,6 +1625,17 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
               {following ? "✓ Following" : "+ Follow"}
             </button>
           )}
+          {!detail?.is_mine && (
+            <button
+              type="button"
+              className="btn btn-small"
+              onClick={() => setReportOpen(true)}
+              style={{ background: "rgba(20,20,20,0.6)", borderColor: "rgba(255,255,255,0.3)", color: "#fff" }}
+              title="Report this live"
+            >
+              🚩 Report
+            </button>
+          )}
           {amGuest ? (
             <button type="button" className="btn btn-danger btn-small" onClick={leaveSeat}>
               🚪 Leave seat
@@ -1675,6 +1688,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
       </div>
 
       {/* gift bottom sheet over the video */}
+      {reportOpen && <ReportDialog targetType="live" targetId={session.id} label="live" onClose={() => setReportOpen(false)} />}
       {showGifts && !room.ended && gifts.length > 0 && (
         <>
           <div onClick={() => setShowGifts(false)} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 7 }} />

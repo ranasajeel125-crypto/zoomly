@@ -348,6 +348,7 @@ function CommentsSheet({ post, onClose, onAdded }) {
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [reportComment, setReportComment] = useState(null);
 
   const load = useCallback(async () => {
     const res = await call("getComments", { post_id: post.id });
@@ -391,12 +392,15 @@ function CommentsSheet({ post, onClose, onAdded }) {
           {comments.map((c) => (
             <div key={c.id} style={{ display: "flex", gap: 10 }}>
               <Avatar user={c.author} size={34} />
-              <div>
+              <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 13 }}>
                   <strong>{c.author.display_name}</strong> <span style={{ color: "var(--dim)" }}>@{c.author.username} · {timeAgo(c.created_at)}</span>
                 </div>
                 <div style={{ fontSize: 15 }}>{c.body}</div>
               </div>
+              <button onClick={() => setReportComment(c)} style={{ background: "none", border: "none", fontSize: 14, opacity: 0.65, alignSelf: "flex-start" }} aria-label="Report comment" title="Report comment">
+                🚩
+              </button>
             </div>
           ))}
         </div>
@@ -408,13 +412,82 @@ function CommentsSheet({ post, onClose, onAdded }) {
           </button>
         </form>
       </div>
+      {reportComment && <ReportDialog targetType="comment" targetId={reportComment.id} label="comment" onClose={() => setReportComment(null)} />}
     </div>
   );
 }
 
 // ---------- feed ------------------------------------------------------------------
 
-function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile }) {
+// ---------- report / moderation UI ------------------------------------------------
+// Shared report dialog: reason list + optional details, used for videos,
+// lives, comments and users. Reports feed the owner's moderation queue;
+// enough distinct reports auto-hide content (see server reportContent).
+const REPORT_REASONS = [
+  ["spam", "🚫 Spam"],
+  ["abuse", "😡 Abuse / harassment"],
+  ["nudity", "🔞 Nudity / sexual content"],
+  ["violence", "⚠️ Violence"],
+  ["other", "❓ Other"],
+];
+
+export function ReportDialog({ targetType, targetId, label, onClose }) {
+  const [reason, setReason] = useState("spam");
+  const [details, setDetails] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState("");
+  const [error, setError] = useState("");
+
+  async function submit(e) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    const res = await call("reportContent", { target_type: targetType, target_id: targetId, reason, details: details.trim() });
+    setBusy(false);
+    if (!res.ok) {
+      setError(res.message || "Report could not be sent.");
+      return;
+    }
+    setDone(res.message);
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={onClose}>
+      <div className="card" style={{ width: "100%", maxWidth: 420, maxHeight: "85vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <strong>🚩 Report {label || "this content"}</strong>
+          <button className="btn btn-small" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+        {done ? (
+          <>
+            <p style={{ fontSize: 14, marginTop: 12 }}>{done}</p>
+            <button className="btn btn-primary" onClick={onClose} style={{ marginTop: 8 }}>
+              Close
+            </button>
+          </>
+        ) : (
+          <form onSubmit={submit} style={{ display: "grid", gap: 8, marginTop: 12 }}>
+            {REPORT_REASONS.map(([value, text]) => (
+              <label key={value} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 15, cursor: "pointer" }}>
+                <input type="radio" name="report-reason" value={value} checked={reason === value} onChange={() => setReason(value)} />
+                {text}
+              </label>
+            ))}
+            <textarea className="input" rows={3} maxLength={500} placeholder="Details (optional)" value={details} onChange={(e) => setDetails(e.target.value)} />
+            <Notice text={error} bad />
+            <button className="btn btn-primary" type="submit" disabled={busy}>
+              {busy ? "Sending…" : "Send report"}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock }) {
   const videoRef = useRef(null);
   const cardRef = useRef(null);
   // Sound is ON by default; `muted` here is only ever the viewer's own
@@ -424,6 +497,8 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile }) {
   const [muted, setMuted] = useState(() => viewerMuted());
   const [forcedMute, setForcedMute] = useState(false);
   const [paused, setPaused] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
   const mutedRef = useRef(muted);
   mutedRef.current = muted;
 
@@ -522,6 +597,11 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile }) {
           ▶
         </div>
       )}
+      {post.hidden && post.author?.is_me && (
+        <div style={{ position: "absolute", top: 10, left: 10, right: 10, background: "rgba(120,53,15,0.92)", color: "#ffd9a8", borderRadius: 10, padding: "8px 10px", fontSize: 13, zIndex: 4 }}>
+          ⏳ Ye video reports ki wajah se <strong>review me hai</strong> — abhi sirf tumhe dikh rahi hai.
+        </div>
+      )}
       {forcedMute && !paused && (
         <button
           onClick={(e) => {
@@ -567,6 +647,37 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile }) {
         <button onClick={toggleMute} style={{ background: "none", border: "none", color: "#fff", fontSize: 24, lineHeight: 1 }} aria-label="Sound">
           {muted ? "🔇" : "🔊"}
         </button>
+        <div style={{ position: "relative" }}>
+          <button onClick={() => setMenuOpen((v) => !v)} style={{ background: "none", border: "none", color: "#fff", fontSize: 24, lineHeight: 1 }} aria-label="More options">
+            ⋯
+          </button>
+          {menuOpen && (
+            <div style={{ position: "absolute", right: 46, bottom: 0, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 6, display: "grid", gap: 2, minWidth: 190, zIndex: 6, boxShadow: "0 10px 30px rgba(0,0,0,0.5)" }}>
+              <button
+                className="btn btn-small"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setReportOpen(true);
+                }}
+              >
+                🚩 Report video
+              </button>
+              {post.author && !post.author.is_me && (
+                <button
+                  className="btn btn-small"
+                  onClick={async () => {
+                    setMenuOpen(false);
+                    if (!window.confirm(`Block @${post.author.username}? Unki videos, comments aur live ab tumhe nahi dikhengi.`)) return;
+                    const res = await call("blockUser", { user_id: post.author.id });
+                    if (res.ok) onBlock?.(post.author);
+                  }}
+                >
+                  🚫 Block @{post.author?.username}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
       </div>
       <div style={{ position: "absolute", left: 12, right: 84, bottom: 86, color: "#fff", textShadow: "0 1px 6px rgba(0,0,0,0.8)" }}>
         <button onClick={() => onOpenProfile(post.author.id)} style={{ background: "none", border: "none", color: "#fff", padding: 0, fontWeight: 800, fontSize: 16 }}>
@@ -576,6 +687,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile }) {
         {post.description && <div style={{ fontSize: 14, opacity: 0.9 }}>{post.description}</div>}
         <div style={{ fontSize: 12, opacity: 0.75, marginTop: 2 }}>{timeAgo(post.created_at)}</div>
       </div>
+      {reportOpen && <ReportDialog targetType="post" targetId={post.id} label="video" onClose={() => setReportOpen(false)} />}
     </div>
   );
 }
@@ -671,7 +783,15 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive }) {
           </div>
         )}
         {posts.map((post) => (
-          <VideoCard key={post.id} post={post} onLike={handleLike} onFollow={handleFollow} onComment={setCommentPost} onOpenProfile={onOpenProfile} />
+          <VideoCard
+            key={post.id}
+            post={post}
+            onLike={handleLike}
+            onFollow={handleFollow}
+            onComment={setCommentPost}
+            onOpenProfile={onOpenProfile}
+            onBlock={(author) => setPosts((prev) => prev.filter((p) => p.author?.id !== author.id))}
+          />
         ))}
       </div>
       {commentPost && (
@@ -957,6 +1077,7 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout }) {
   const [dpBusy, setDpBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [reportOpen, setReportOpen] = useState(false);
   const dpInputRef = useRef(null);
 
   const load = useCallback(async () => {
@@ -1027,6 +1148,23 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout }) {
       setData((prev) => ({ ...prev, profile: { ...prev.profile, followed_by_me: res.following, follower_count: res.follower_count } }));
       refreshMe?.();
     }
+  }
+
+  async function handleBlock() {
+    if (!window.confirm(`Block @${profile.username}? Unki videos, comments aur live ab tumhe nahi dikhengi, aur woh tumhari videos par comment nahi kar sakenge.`)) return;
+    const res = await call("blockUser", { user_id: profile.id });
+    if (res.ok) {
+      setNotice(res.message);
+      load();
+    } else setError(res.message || "Block failed.");
+  }
+
+  async function handleUnblock() {
+    const res = await call("unblockUser", { user_id: profile.id });
+    if (res.ok) {
+      setNotice(res.message);
+      load();
+    } else setError(res.message || "Unblock failed.");
   }
 
   async function handleDelete(post) {
@@ -1100,12 +1238,25 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout }) {
           <input ref={dpInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => pickDp(e.target.files?.[0])} />
         </div>
       ) : (
-        <div style={{ marginTop: 16 }}>
+        <div style={{ marginTop: 16, display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button className={`btn ${profile.followed_by_me ? "" : "btn-primary"}`} onClick={handleFollow}>
             {profile.followed_by_me ? "Following" : "Follow"}
           </button>
+          <button className="btn" onClick={() => setReportOpen(true)}>
+            🚩 Report
+          </button>
+          {profile.blocked_by_me ? (
+            <button className="btn" onClick={handleUnblock}>
+              Unblock
+            </button>
+          ) : (
+            <button className="btn btn-danger" onClick={handleBlock}>
+              🚫 Block
+            </button>
+          )}
         </div>
       )}
+      {reportOpen && <ReportDialog targetType="user" targetId={profile.id} label={`@${profile.username}`} onClose={() => setReportOpen(false)} />}
 
       <Notice text={error} bad />
       <Notice text={notice} />
@@ -1163,7 +1314,47 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout }) {
           </div>
         </>
       )}
+
+      {isMe && <BlockedUsersSection />}
     </div>
+  );
+}
+
+// Users the signed-in user has blocked, with one-tap unblock.
+function BlockedUsersSection() {
+  const [blocked, setBlocked] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const load = useCallback(async () => {
+    const res = await call("getBlockedUsers", {});
+    if (res.ok) setBlocked(res.blocked);
+    setLoaded(true);
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+  async function unblock(u) {
+    const res = await call("unblockUser", { user_id: u.id });
+    if (res.ok) load();
+  }
+  if (!loaded || blocked.length === 0) return null;
+  return (
+    <>
+      <h3 style={{ margin: "22px 0 10px" }}>🚫 Blocked users ({blocked.length})</h3>
+      <div style={{ display: "grid", gap: 8 }}>
+        {blocked.map((u) => (
+          <div key={u.id} className="card" style={{ display: "flex", alignItems: "center", gap: 10, padding: 10 }}>
+            <Avatar user={u} size={36} />
+            <span style={{ flex: 1 }}>
+              <strong>{u.display_name}</strong>
+              <span style={{ display: "block", color: "var(--dim)", fontSize: 13 }}>@{u.username}</span>
+            </span>
+            <button className="btn btn-small" onClick={() => unblock(u)}>
+              Unblock
+            </button>
+          </div>
+        ))}
+      </div>
+    </>
   );
 }
 
@@ -1376,6 +1567,126 @@ function AdminSection({ refreshMe }) {
             ))}
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+// Owner moderation queue: community reports grouped by target, with the
+// reported content preview, reporter reasons, repeat-offender flags and
+// the Dismiss / Delete / Ban / Unban decisions (server: getModerationQueue
+// + moderateContent). Renders nothing for non-admins (parent gates it too).
+function ModerationSection() {
+  const [groups, setGroups] = useState(null);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    const res = await call("getModerationQueue", {});
+    if (res.ok) setGroups(res.groups);
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function act(g, action) {
+    setError("");
+    setNotice("");
+    if (action === "delete_content" && !window.confirm("Content delete kar dein? Ye wapas nahi aayega.")) return;
+    if (action === "ban_user" && !window.confirm(`@${g.owner.username} ko BAN kar dein? Woh login, post aur live nahi kar sakega.`)) return;
+    const res = await call("moderateContent", { target_type: g.target_type, target_id: g.target_id, action });
+    if (!res.ok) {
+      setError(res.message || "Action failed.");
+      return;
+    }
+    setNotice(res.message);
+    load();
+  }
+
+  if (!groups) return null;
+  const pendingGroups = groups.filter((g) => g.has_pending);
+  const typeLabel = { post: "🎬 Video", live: "🔴 Live", comment: "💬 Comment", user: "👤 User" };
+
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <h3 style={{ margin: "0 0 6px" }}>🛡️ Owner: moderation queue</h3>
+      <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>
+        Community reports yahan group ho kar aate hain. 3 alag users ki report par video/live khud hide ho jata hai — <strong style={{ color: "var(--text)" }}>Dismiss</strong> se wapas visible, <strong style={{ color: "var(--text)" }}>Delete</strong> se content khatam, <strong style={{ color: "var(--text)" }}>Ban</strong> se user band.
+      </p>
+      <Notice text={error} bad />
+      <Notice text={notice} />
+      {pendingGroups.length === 0 && <p style={{ color: "var(--dim)" }}>No pending reports. 🎉</p>}
+      <div style={{ display: "grid", gap: 10 }}>
+        {pendingGroups.map((g) => (
+          <div key={`${g.target_type}:${g.target_id}`} style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <Avatar user={g.owner} size={36} />
+              <div style={{ flex: 1 }}>
+                <strong>
+                  {typeLabel[g.target_type]} #{g.target_id}
+                </strong>{" "}
+                — {g.report_count} report{g.report_count === 1 ? "" : "s"}
+                <div style={{ color: "var(--dim)", fontSize: 13 }}>
+                  Owner: {g.owner.display_name} (@{g.owner.username}) · ID #{g.owner.id}
+                  {g.owner.flagged && <span style={{ color: "var(--bad)" }}> · ⚠️ repeat offender ({g.owner.hidden_count}× auto-hidden)</span>}
+                  {g.owner.banned && <span style={{ color: "var(--bad)" }}> · BANNED</span>}
+                </div>
+              </div>
+            </div>
+            {g.preview && !g.preview.missing && (
+              <div style={{ fontSize: 14, marginTop: 6, color: "var(--dim)" }}>
+                {g.target_type === "post" && (
+                  <>
+                    “{g.preview.title}”{g.preview.hidden ? " · ⏳ hidden (under review)" : ""}
+                  </>
+                )}
+                {g.target_type === "comment" && <>“{g.preview.body}”</>}
+                {g.target_type === "live" && (
+                  <>
+                    “{g.preview.title}”{g.preview.is_live ? " · abhi LIVE hai" : " · ended"}
+                    {g.preview.hidden ? " · ⏳ hidden" : ""}
+                  </>
+                )}
+                {g.target_type === "user" && <>Profile report</>}
+              </div>
+            )}
+            <div style={{ display: "grid", gap: 2, marginTop: 6 }}>
+              {g.reports
+                .filter((r) => r.status === "pending")
+                .map((r) => (
+                  <div key={r.id} style={{ fontSize: 13, color: "var(--dim)" }}>
+                    🚩 <strong style={{ color: "var(--text)" }}>{r.reason}</strong> — @{r.reporter.username}
+                    {r.details ? `: “${r.details}”` : ""}
+                  </div>
+                ))}
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+              <button className="btn btn-small" onClick={() => act(g, "dismiss")}>
+                ✓ Dismiss (restore)
+              </button>
+              {g.target_type !== "user" && (
+                <button className="btn btn-small" onClick={() => act(g, "delete_content")}>
+                  🗑 Delete content
+                </button>
+              )}
+              {g.owner.banned ? (
+                <button className="btn btn-small" onClick={() => act(g, "unban_user")}>
+                  Unban user
+                </button>
+              ) : (
+                <button className="btn btn-danger btn-small" onClick={() => act(g, "ban_user")}>
+                  ⛔ Ban user
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      {groups.length > pendingGroups.length && (
+        <p style={{ color: "var(--dim)", fontSize: 13, marginTop: 10 }}>
+          {groups.length - pendingGroups.length} decided group(s) — sirf pending dikh rahe hain.
+        </p>
       )}
     </div>
   );
@@ -1701,6 +2012,7 @@ function RewardsView({ me, refreshMe }) {
       </div>
 
       {me?.is_admin && <AdminSection refreshMe={refreshMe} />}
+      {me?.is_admin && <ModerationSection />}
     </div>
   );
 }
