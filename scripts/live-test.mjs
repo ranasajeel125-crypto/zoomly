@@ -353,7 +353,7 @@ check("held coins cannot be gifted", heldGift.ok === false, JSON.stringify(heldG
 const heldWd = await api("requestWithdrawal", { token: viewerToken, coins: 10, jazzcash_number: "03001234567" });
 check("held coins cannot be withdrawn twice", heldWd.ok === false);
 // Rejecting the withdrawal refunds the hold in full.
-const holdReject = await api("reviewWithdrawal", { token: creatorToken, withdrawal_id: hold.withdrawal.id, decision: "rejected" });
+const holdReject = await api("reviewWithdrawal", { token: adminToken, withdrawal_id: hold.withdrawal.id, decision: "rejected" });
 check("admin rejects the hold", holdReject.ok === true, JSON.stringify(holdReject));
 const viewerAfterRefund = (await api("getMe", { token: viewerToken })).user.coin_balance;
 check("hold refunded after rejection (5875)", viewerAfterRefund === 5875, `bal=${viewerAfterRefund}`);
