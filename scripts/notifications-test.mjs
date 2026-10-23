@@ -5,9 +5,12 @@
 //
 //   PORT=3107 ADMIN_USERNAME=sajeel TURSO_DATABASE_URL=file:/tmp/zoomly-notif.db npm start
 //   BASE_URL=http://localhost:3107 ADMIN_USERNAME=sajeel node scripts/notifications-test.mjs
+import { createClient } from "@libsql/client";
 
 const BASE = process.env.BASE_URL || "http://localhost:3107";
 const ADMIN = (process.env.ADMIN_USERNAME || "sajeel").toLowerCase();
+const DB_URL = process.env.TEST_DB_URL || "file:/tmp/zoomly-notifications.db";
+const db = createClient({ url: DB_URL });
 
 let failures = 0;
 function check(name, cond, extra = "") {
@@ -101,6 +104,17 @@ check("follower notified when creator goes live", fanInbox2.notifications.some((
 await api("endLive", { token: creator.token, live_session_id: live2.session.id });
 
 // Withdrawal decisions notify: reject refunds + notifies; approve notifies too.
+// Withdrawals are gated on an APPROVED monetization application (owner
+// program, 2026-10-23) — seed one for the fan; the apply/review journey
+// itself is covered by scripts/monetization-test.mjs.
+{
+  const now = Date.now();
+  await db.execute({
+    sql: `INSERT INTO monetization_applications (user_id, full_name, dob, jazzcash_number, followers_snapshot, views_snapshot, status, created_at, decided_at)
+          VALUES (?, 'Notif Seeded', '2000-01-01', '03001234567', 5000, 50000, 'approved', ?, ?)`,
+    args: [fan.user.id, now, now],
+  });
+}
 const wd = await api("requestWithdrawal", { token: fan.token, coins: 100, jazzcash_number: "03001234567" });
 check("fan withdrawal placed", wd.ok === true, JSON.stringify(wd));
 const adminView = await api("getAdminCoinRequests", { token: adminToken });

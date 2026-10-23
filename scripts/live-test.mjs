@@ -480,6 +480,17 @@ const badGift = await api("sendGift", { token: viewerToken, live_session_id: sid
 check("unknown gift rejected", badGift.ok === false);
 
 // ---- Held coins (pending withdrawal) can be neither gifted nor re-withdrawn --
+// Withdrawals are gated on an APPROVED monetization application (owner
+// program, 2026-10-23) — seed one for the viewer; the apply/review
+// journey itself is covered by scripts/monetization-test.mjs.
+{
+  const now = Date.now();
+  await db.execute({
+    sql: `INSERT INTO monetization_applications (user_id, full_name, dob, jazzcash_number, followers_snapshot, views_snapshot, status, created_at, decided_at)
+          VALUES (?, 'Live Seeded', '2000-01-01', '03001234567', 5000, 50000, 'approved', ?, ?)`,
+    args: [viewerId, now, now],
+  });
+}
 // The viewer holds all 5,875 remaining coins in a withdrawal request: the
 // spendable balance drops to 0, so a 100-coin gift and a second withdrawal
 // both fail.

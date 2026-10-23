@@ -8,8 +8,25 @@
 //   rejection, admin approve (coins credited), leaderboards shape (<= 50 rows),
 //   DP avatar field round-trip.
 // Usage:  BASE_URL=http://localhost:3100 ADMIN_USERNAME=sajeel npm run smoke
+import { createClient } from "@libsql/client";
+
 const BASE = process.env.BASE_URL || "http://localhost:3100";
 const ADMIN = (process.env.ADMIN_USERNAME || "sajeel").toLowerCase();
+const DB_URL = process.env.TEST_DB_URL || "file:/tmp/zoomly-smoke.db";
+const db = createClient({ url: DB_URL });
+
+// Withdrawals are gated on an APPROVED monetization application (owner
+// program, 2026-10-23) — seed one directly for users whose withdrawal
+// flows this suite exercises. The apply/review journey itself is covered
+// by scripts/monetization-test.mjs.
+async function seedApprovedApplication(userId) {
+  const now = Date.now();
+  await db.execute({
+    sql: `INSERT INTO monetization_applications (user_id, full_name, dob, jazzcash_number, followers_snapshot, views_snapshot, status, created_at, decided_at)
+          VALUES (?, 'Smoke Seeded', '2000-01-01', '03001234567', 5000, 50000, 'approved', ?, ?)`,
+    args: [userId, now, now],
+  });
+}
 
 let failures = 0;
 function check(name, cond, extra = "") {
@@ -171,7 +188,12 @@ const bAfterCustom = (await api("getMe", { token: bToken })).user;
 check("custom coins credited after approve (137)", bAfterCustom.coin_balance === 137, `balance=${bAfterCustom.coin_balance}`);
 
 // ---- Withdrawals: hold at request, reject refunds, approve finalizes ---------
-// B has 137 coins. Withdraw 100 -> held immediately (balance 37).
+// B has 137 coins. Withdrawals need an approved monetization application
+// (seeded — the full journey lives in monetization-test.mjs).
+await seedApprovedApplication(bLogin.user.id);
+const bMonSeeded = await api("getRewards", { token: bToken });
+check("seeded B reads as monetized", bMonSeeded.monetization?.monetized === true, JSON.stringify(bMonSeeded.monetization).slice(0, 160));
+// Withdraw 100 -> held immediately (balance 37).
 const wd1 = await api("requestWithdrawal", { token: bToken, coins: 100, jazzcash_number: "03001234567", account_title: "Test Fan" });
 check("withdrawal request ok", wd1.ok === true, JSON.stringify(wd1));
 check("hold deducted at request (balance 37)", wd1.my_balance === 37, `my_balance=${wd1.my_balance}`);

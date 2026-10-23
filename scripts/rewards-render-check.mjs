@@ -29,9 +29,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { JSDOM } from "jsdom";
+import { createClient } from "@libsql/client";
 
 const BASE = process.env.BASE_URL || "http://localhost:3102";
 const DIST_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "client", "dist");
+const DB_URL = process.env.TEST_DB_URL || "file:/tmp/zoomly-rewards.db";
+const db = createClient({ url: DB_URL });
 
 let failures = 0;
 function check(name, cond, extra = "") {
@@ -97,6 +100,19 @@ check("payload packs have numeric coins + pricePkr", Array.isArray(rewards.packs
 check("payload jazzcash has number + title", typeof rewards.jazzcash?.number === "string" && typeof rewards.jazzcash?.title === "string");
 check("payload my_requests is an array", Array.isArray(rewards.my_requests));
 check("payload leaderboards have both boards", Array.isArray(rewards.leaderboards?.top_coins) && Array.isArray(rewards.leaderboards?.top_referrals));
+check(
+  "payload monetization: fresh user meets nothing (5,000 followers / 50,000 views / 18+ age)",
+  rewards.monetization?.monetized === false &&
+    rewards.monetization?.can_apply === false &&
+    rewards.monetization?.application === null &&
+    rewards.monetization?.criteria?.followers?.required === 5000 &&
+    rewards.monetization?.criteria?.followers?.current === 0 &&
+    rewards.monetization?.criteria?.views?.required === 50000 &&
+    rewards.monetization?.criteria?.views?.current === 0 &&
+    rewards.monetization?.criteria?.age?.required === 18 &&
+    rewards.monetization?.criteria?.age?.current === null,
+  JSON.stringify(rewards.monetization ?? {}).slice(0, 200),
+);
 check(
   "top_coins rows are anonymous (id + avatar_url + coin_balance + level; NO username/display_name keys)",
   rewards.leaderboards.top_coins.every((r) => !("username" in r) && !("display_name" in r) && "id" in r && "avatar_url" in r && "coin_balance" in r && "level" in r),
@@ -316,6 +332,31 @@ try {
     await sleep(500);
     check("Top Referrals board renders without crash", !bodyText().includes("could not open") && bodyText().includes(`@${username}`));
   }
+
+  // ---- monetization: gated withdraw + the Start Monetization screen --------
+  // This user is NOT monetized: the withdraw submit must be disabled with
+  // the apply-first hint, and the Monetization screen must show the three
+  // criteria with live numbers and a disabled Apply (criteria unmet).
+  const startMonBtn = document.querySelector("[data-start-monetization]");
+  check("Start Monetization button rendered in Rewards", Boolean(startMonBtn));
+  const wdBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Request withdrawal");
+  check("withdraw submit is DISABLED for a non-monetized user", Boolean(wdBtn) && wdBtn.disabled === true, `disabled=${wdBtn?.disabled}`);
+  check("withdraw monetization hint rendered", Boolean(document.querySelector("[data-withdraw-monetization-hint]")));
+  startMonBtn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await waitFor("Monetization screen hero", () => bodyText().includes("Zoomly Monetization Program"));
+  const mt = bodyText();
+  check("Monetization hero explains the program (70% / JazzCash / 1 coin = Rs.1)", mt.includes("70% hissa creator ko") && mt.includes("JazzCash") && mt.includes("1 coin = Rs.1"));
+  check("criteria rows render with live numbers (0 / 5,000 followers)", mt.includes("Followers") && mt.includes("0 / 5,000"), mt.slice(0, 0));
+  check("criteria rows render with live numbers (0 / 50,000 views)", mt.includes("Total video views") && mt.includes("0 / 50,000"));
+  check("age criterion row renders (18+)", mt.includes("Age 18+"));
+  check("screen is in the apply-form state for a fresh user", Boolean(document.querySelector('[data-monetization-state="form"]')));
+  const applyBtn = document.querySelector("[data-apply-monetization]");
+  check("Apply button is disabled while criteria are unmet", Boolean(applyBtn) && applyBtn.disabled === true, `disabled=${applyBtn?.disabled}`);
+  const closeMonBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("✕ Close"));
+  check("Monetization screen close button found", Boolean(closeMonBtn));
+  closeMonBtn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await sleep(400);
+  check("Monetization screen closes back to Rewards", !bodyText().includes("Zoomly Monetization Program") && bodyText().includes("Your coin balance"));
 } catch (err) {
   jsdomError = err;
   check(`render flow completed (${err.message})`, false);
@@ -549,6 +590,94 @@ try {
   check("owner-deleted video is gone from the server feed too", !(afterDel.posts || []).some((p) => (p.title || "").includes("Short caption post")));
 } catch (err) {
   check(`owner-delete render flow completed (${err.message})`, false);
+}
+
+// ---- 7. monetization states: monetized user + owner review queue -----------
+// The API journey lives in monetization-test.mjs; here the DB is seeded
+// directly: an APPROVED application (monetized render state — withdraw
+// unlocked, panel success state) and a PENDING one (owner review card).
+try {
+  const bootAs7 = (tok) => {
+    const d = new JSDOM(indexHtml, {
+      url: `${BASE}/`,
+      runScripts: "dangerously",
+      pretendToBeVisual: true,
+      beforeParse(window) {
+        window.fetch = (u, o = {}) => {
+          const { signal, ...rest } = o;
+          return fetch(new URL(u, BASE), rest);
+        };
+        window.IntersectionObserver = class {
+          observe() {}
+          unobserve() {}
+          disconnect() {}
+        };
+        window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+        window.HTMLMediaElement.prototype.pause = () => {};
+        window.HTMLMediaElement.prototype.load = () => {};
+        window.scrollTo = () => {};
+        window.localStorage.setItem("zoomly_token", tok);
+      },
+    });
+    d.window.eval(bundle);
+    return d;
+  };
+  const click7 = (win, el) => el?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }));
+  const goRewards = async (d, label) => {
+    const doc = d.window.document;
+    await waitFor(`shell (${label})`, () => [...doc.querySelectorAll("nav button")].some((b) => (b.textContent || "").includes("Rewards")) || crashed(doc));
+    click7(d.window, [...doc.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("Rewards")));
+  };
+
+  const monUser = await api("signup", { username: `monok_${suffix}`, display_name: "Monetized Render", password: "test-pass-123" });
+  check("monetized render user signed up", monUser.ok === true, JSON.stringify(monUser).slice(0, 160));
+  const nowMs7 = Date.now();
+  await db.execute({
+    sql: `INSERT INTO monetization_applications (user_id, full_name, dob, jazzcash_number, followers_snapshot, views_snapshot, status, created_at, decided_at) VALUES (?, 'Render Monetized', '2000-01-01', '03001234567', 5000, 50000, 'approved', ?, ?)`,
+    args: [monUser.user.id, nowMs7, nowMs7],
+  });
+  const applicant7 = await api("signup", { username: `monapp_${suffix}`, display_name: "Pending Applicant", password: "test-pass-123" });
+  check("pending applicant signed up", applicant7.ok === true);
+  await db.execute({
+    sql: `INSERT INTO monetization_applications (user_id, full_name, dob, jazzcash_number, followers_snapshot, views_snapshot, status, created_at) VALUES (?, 'Render Applicant Full', '2001-05-05', '03009998877', 5000, 50000, 'pending', ?)`,
+    args: [applicant7.user.id, nowMs7],
+  });
+
+  // Monetized user: withdraw unlocked, panel in the approved state.
+  const dM = bootAs7(monUser.token);
+  const docM = dM.window.document;
+  const textM = () => docM.body?.textContent || "";
+  await goRewards(dM, "monetized render");
+  await waitFor("monetized Rewards", () => textM().includes("Monetization — Active") || crashed(docM));
+  check("monetized user: Start Monetization shows Active ✅", textM().includes("Monetization — Active"));
+  const wdBtnM = [...docM.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "Request withdrawal");
+  check("monetized user: withdraw submit is ENABLED", Boolean(wdBtnM) && wdBtnM.disabled === false, `disabled=${wdBtnM?.disabled}`);
+  check("monetized user: no monetization hint on the withdraw form", !docM.querySelector("[data-withdraw-monetization-hint]"));
+  click7(dM.window, docM.querySelector("[data-start-monetization]"));
+  await waitFor("monetized panel state", () => Boolean(docM.querySelector('[data-monetization-state="approved"]')) || crashed(docM));
+  check("monetized panel shows the success state", textM().includes("Aap monetized hain — withdrawal khula hai"));
+  dM.window.close();
+
+  // Owner: the pending application renders in the admin review section.
+  const adminName7 = (process.env.ADMIN_USERNAME || "sajeel").toLowerCase();
+  let owner7 = await api("signup", { username: adminName7, display_name: "Zoomly Owner", password: "test-pass-123" });
+  if (!owner7.ok) owner7 = await api("login", { username: adminName7, password: "test-pass-123" });
+  check("owner account available for the monetization review render", owner7.ok === true);
+  const dA = bootAs7(owner7.token);
+  const docA = dA.window.document;
+  const textA = () => docA.body?.textContent || "";
+  await goRewards(dA, "owner monetization render");
+  await waitFor("monetization applications section", () => textA().includes("Monetization applications") || crashed(docA));
+  await waitFor("pending application card", () => Boolean(docA.querySelector("[data-monetization-application]")) || crashed(docA));
+  const monCard = docA.querySelector("[data-monetization-application]");
+  check("owner sees the pending monetization application card", Boolean(monCard));
+  const cardText = monCard?.textContent || "";
+  check("card shows applicant + form data (name, DOB + age, JazzCash)", cardText.includes(`@monapp_${suffix}`) && cardText.includes("Render Applicant Full") && cardText.includes("2001-05-05") && cardText.includes("03009998877"), cardText.slice(0, 200));
+  check("card shows followers/views numbers", cardText.includes("followers") && cardText.includes("views"), cardText.slice(0, 200));
+  check("card has Approve + Reject buttons", [...(monCard?.querySelectorAll("button") ?? [])].some((b) => (b.textContent || "").includes("Approve")) && [...(monCard?.querySelectorAll("button") ?? [])].some((b) => (b.textContent || "").includes("Reject")));
+  dA.window.close();
+} catch (err) {
+  check(`monetization render flow completed (${err.message})`, false);
 }
 
 if (failures > 0 || jsdomError) {
