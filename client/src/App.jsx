@@ -3023,7 +3023,7 @@ export function App() {
               >
                 🔴
               </span>
-              {item.label}
+              <span style={{ fontSize: 10, lineHeight: 1.1 }}>Go Live</span>
             </button>
           ) : (
             <button

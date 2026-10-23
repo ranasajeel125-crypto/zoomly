@@ -553,6 +553,10 @@ try {
   dom.window.eval(bundle);
   await waitForText("app boot", (t) => t.includes("Live") || t.includes("could not open"));
   check("app boots without crash", !bodyText().includes("could not open"));
+  // The raised centre nav button carries a small "Go Live" caption under
+  // its circle (the broadcast entry — the feed's TV icon is for watching).
+  const goLiveCaptionBtn = [...document.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("Go Live"));
+  check("centre nav LIVE button shows the 'Go Live' caption", Boolean(goLiveCaptionBtn));
   // The owner rejected the big red 🔴 LIVE pill in the feed header. Instead
   // the feed carries a small TikTok-style TV "LIVE" icon at the top-left of
   // the header: icon-only, no red pill, and NOT the 🔴-emoji text button.
