@@ -24,8 +24,9 @@ deployable on Render's free tier. Same proven stack as the SMM panel.
   and a video grid, delete your own videos.
 - **Referral system** — every user gets a personal code (`ZOOM-<id>-<USERNAME>`)
   to copy/share from the Rewards tab. A new user can enter a code at signup
-  or claim one later: the inviter gets **+20 coins**, the new user gets
-  **+10 welcome coins**. Profiles show referral count and "my referrals".
+  or claim one later: the signup is linked as the inviter's referral
+  (count only — referrals mint no coins). Profiles show referral count
+  and "my referrals".
 - **Coin system** — coin balance per user. The Buy Coins page shows the
   owner's JazzCash number **03266040350** (Muhammad Sajeel) and 5 packs:
   100 coins/Rs.100 · 550/Rs.500 · 1,150/Rs.1,000 · 6,000/Rs.5,000 ·
@@ -97,7 +98,7 @@ Setup (one time, in the [Google Cloud Console](https://console.cloud.google.com)
 How it works: the server redirects to Google, exchanges the code with
 plain `fetch` calls, and matches accounts by Google account id. New
 Google users choose a unique username first (referral codes work there
-too, with the same +20/+10 crediting); their Google picture becomes
+too, linking the referrer without minting any coins); their Google picture becomes
 their DP if they have none. Username+password accounts keep working
 unchanged, and the `ADMIN_USERNAME` owner logic applies to whichever
 account claims that username, Google-created or not.

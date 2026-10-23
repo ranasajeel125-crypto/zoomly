@@ -13,8 +13,8 @@
 //   - the callback rejects a mismatched state
 //   - GET /api/auth/google/pending returns the profile + suggested username
 //   - POST /api/auth/google/complete creates the account: chosen username,
-//     Google picture as DP, referral crediting (+20 inviter / +10 new user),
-//     and a working session token
+//     Google picture as DP, referral linking (NO coins minted for either
+//     side — referrals are count-only), and a working session token
 //   - a second completion for the same Google account is rejected
 //   - a tampered pending cookie is rejected
 import crypto from "node:crypto";
@@ -103,9 +103,10 @@ const complete = await fetch(`${BASE}/api/auth/google/complete`, {
 }).then((r) => r.json());
 check("google signup completes", complete.ok === true, JSON.stringify(complete));
 check("google picture became the DP", complete.user?.avatar_url === profile.picture, complete.user?.avatar_url);
-check("new google user got 10 welcome coins", complete.user?.coin_balance === 10, `balance=${complete.user?.coin_balance}`);
+check("new google user got NO free welcome coins", complete.user?.coin_balance === 0, `balance=${complete.user?.coin_balance}`);
 const inviterAfter = (await api("getMe", { token: inviter.token })).user;
-check("inviter got +20 coins", inviterAfter.coin_balance === inviterBefore + 20, `before=${inviterBefore} after=${inviterAfter.coin_balance}`);
+check("inviter got NO referral coins", inviterAfter.coin_balance === inviterBefore, `before=${inviterBefore} after=${inviterAfter.coin_balance}`);
+check("inviter referral count is 1", inviterAfter.referral_count === 1, `count=${inviterAfter.referral_count}`);
 const meCheck = await api("getMe", { token: complete.token });
 check("google session token works (getMe)", meCheck.ok === true && meCheck.user.username === `gfan_${suffix}`, JSON.stringify(meCheck).slice(0, 160));
 

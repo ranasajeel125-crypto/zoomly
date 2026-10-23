@@ -12,8 +12,6 @@ import {
   ICE_SERVERS,
   JAZZCASH,
   LEADERBOARD_LIMIT,
-  REFERRAL_INVITER_COINS,
-  REFERRAL_WELCOME_COINS,
   giftForKey,
   giftSplit,
   isAdminUser,
@@ -186,7 +184,9 @@ function liveSessionDto(session, broadcaster) {
 }
 
 // ---- Referral -------------------------------------------------------------
-// First valid claim only: sets referred_by, inviter +20 coins, claimer +10.
+// First valid claim only: sets referred_by so the inviter's referral
+// COUNT goes up (leaderboard + profile counts). It credits NO coins to
+// either side — referrals must never mint free coins (see config.mjs).
 async function applyReferral(user, rawCode) {
   const code = String(rawCode || "").trim().toUpperCase();
   if (!code) return { ok: false, message: "Enter a referral code." };
@@ -195,11 +195,8 @@ async function applyReferral(user, rawCode) {
   const inviter = inviters[0];
   if (!inviter) return { ok: false, message: "That referral code was not found." };
   if (inviter.id === user.id) return { ok: false, message: "You cannot use your own referral code." };
-  await db.batch([
-    db.update(schema.users).set({ referredBy: inviter.id, coinBalance: sql`${schema.users.coinBalance} + ${REFERRAL_WELCOME_COINS}` }).where(eq(schema.users.id, user.id)),
-    db.update(schema.users).set({ coinBalance: sql`${schema.users.coinBalance} + ${REFERRAL_INVITER_COINS}` }).where(eq(schema.users.id, inviter.id)),
-  ]);
-  return { ok: true, message: `Referral claimed! You got ${REFERRAL_WELCOME_COINS} welcome coins and @${inviter.username} got ${REFERRAL_INVITER_COINS}.` };
+  await db.update(schema.users).set({ referredBy: inviter.id }).where(eq(schema.users.id, user.id));
+  return { ok: true, message: `Referral claimed! @${inviter.username} is now counted as your referrer.` };
 }
 
 // ---- Google sign-in ---------------------------------------------------------
@@ -225,8 +222,8 @@ export async function googleSignIn(profile) {
 
 // Finalizes a first-time Google signup once the user has picked a username.
 // Mirrors the password signup: referral code is generated, an optional
-// referral claim credits inviter +20 / new user +10, and the Google profile
-// picture becomes the account's DP.
+// referral claim links the referrer (count only — no coins are minted),
+// and the Google profile picture becomes the account's DP.
 export async function googleCompleteSignup(profile, rawArgs) {
   const parsed = z
     .object({

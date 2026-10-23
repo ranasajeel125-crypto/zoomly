@@ -133,7 +133,7 @@ const viewer = await api("signup", { username: viewerName, display_name: "Live F
 check("viewer signup (with referral)", viewer.ok === true);
 const viewerToken = viewer.token;
 const viewerId = viewer.user.id;
-check("viewer starts with 10 welcome coins", viewer.user.coin_balance === 10, `bal=${viewer.user.coin_balance}`);
+check("viewer starts with 0 coins (referrals mint no free coins)", viewer.user.coin_balance === 0, `bal=${viewer.user.coin_balance}`);
 
 // Fund the viewer properly: coin request for pack 3 (6000 coins) + admin approve.
 const tid = `LIVETID${Date.now()}`;
@@ -145,7 +145,7 @@ check("admin sees the request", Boolean(myReq));
 const review = await api("reviewCoinRequest", { token: adminToken, request_id: myReq.id, decision: "approved" });
 check("admin approves", review.ok === true);
 const viewerFunded = (await api("getMe", { token: viewerToken })).user;
-check("viewer funded to 6010", viewerFunded.coin_balance === 6010, `bal=${viewerFunded.coin_balance}`);
+check("viewer funded to 6000", viewerFunded.coin_balance === 6000, `bal=${viewerFunded.coin_balance}`);
 
 // ---- startLive / listLive / getLive --------------------------------------------
 
@@ -172,7 +172,7 @@ check(
   byKey.rose === 10 && byKey.chocolate === 25 && byKey.heart === 50 && byKey.giftbox === 100 && byKey.crown === 250 && byKey.rocket === 500 && byKey.diamond === 1000 && byKey.lion === 2500,
   JSON.stringify(byKey)
 );
-check("getLive reports my balance", detail.my_coin_balance === 6010, `bal=${detail.my_coin_balance}`);
+check("getLive reports my balance", detail.my_coin_balance === 6000, `bal=${detail.my_coin_balance}`);
 
 // ---- TURN / ICE configuration ------------------------------------------------
 // The fix for live video on carrier-grade NAT (mobile data): the server

@@ -1,9 +1,10 @@
 // End-to-end smoke test for Zoomly. Boots against an already-running server
 // (BASE_URL) and exercises the key flows:
-//   signup (x2, admin via ADMIN_USERNAME), referral at signup (25/10 coins),
-//   login, create post metadata, like, comment, follow, referral double-claim
-//   rejection, coin request, duplicate TID rejection, admin approve (coins
-//   credited), leaderboards shape (<= 50 rows), DP avatar field round-trip.
+//   signup (x2, admin via ADMIN_USERNAME), referral at signup (links only —
+//   referrals mint NO coins), login, create post metadata, like, comment,
+//   follow, referral double-claim rejection, coin request, duplicate TID
+//   rejection, admin approve (coins credited), leaderboards shape (<= 50 rows),
+//   DP avatar field round-trip.
 // Usage:  BASE_URL=http://localhost:3100 ADMIN_USERNAME=sajeel npm run smoke
 const BASE = process.env.BASE_URL || "http://localhost:3100";
 const ADMIN = (process.env.ADMIN_USERNAME || "sajeel").toLowerCase();
@@ -45,14 +46,15 @@ const adminCode = admin.user.referral_code;
 check("admin has referral code", /^ZOOM-\d+-/.test(adminCode), adminCode);
 check("admin flagged is_admin", admin.user.is_admin === true);
 
-// Signup user B WITH admin's referral code -> B +10, admin +20
+// Signup user B WITH admin's referral code -> linked as a referral, but
+// NO coins are minted for either side (referrals are count-only now).
 const before = (await api("getMe", { token: adminToken })).user.coin_balance;
 const bSignup = await api("signup", { username: userB, display_name: "Test Fan", password: "test-pass-123", referral_code: adminCode });
 check("user B signup with referral", bSignup.ok === true, JSON.stringify(bSignup));
-check("user B got 10 welcome coins", bSignup.user.coin_balance === 10, `balance=${bSignup.user.coin_balance}`);
+check("user B got NO free welcome coins", bSignup.user.coin_balance === 0, `balance=${bSignup.user.coin_balance}`);
 const bToken = bSignup.token;
 const adminAfter = (await api("getMe", { token: adminToken })).user;
-check("admin got +20 referral coins", adminAfter.coin_balance === before + 20, `before=${before} after=${adminAfter.coin_balance}`);
+check("admin got NO referral coins", adminAfter.coin_balance === before, `before=${before} after=${adminAfter.coin_balance}`);
 check("admin referral count is >= 1", adminAfter.referral_count >= 1);
 
 // Double claim must fail
@@ -107,7 +109,7 @@ check("coin request created", req.ok === true, JSON.stringify(req));
 const dup = await api("requestCoins", { token: bToken, pack_index: 0, tid });
 check("duplicate TID rejected", dup.ok === false, JSON.stringify(dup));
 
-// Admin approves -> B balance 10 + 100 = 110
+// Admin approves -> B balance 0 + 100 = 100
 const pending = await api("getAdminCoinRequests", { token: adminToken });
 const myReq = pending.requests?.find((r) => r.tid === tid);
 check("admin sees pending request", Boolean(myReq) && myReq.status === "pending", JSON.stringify(pending).slice(0, 200));
@@ -116,8 +118,8 @@ check("non-admin blocked from admin view", nonAdmin.ok === false);
 const review = await api("reviewCoinRequest", { token: adminToken, request_id: myReq.id, decision: "approved" });
 check("admin approve ok", review.ok === true, JSON.stringify(review));
 const bAfter = (await api("getMe", { token: bToken })).user;
-check("coins credited after approve (110)", bAfter.coin_balance === 110, `balance=${bAfter.coin_balance}`);
-check("level after 110 coins is Bronze", bAfter.level === "Bronze", bAfter.level);
+check("coins credited after approve (100)", bAfter.coin_balance === 100, `balance=${bAfter.coin_balance}`);
+check("level after 100 coins is Bronze", bAfter.level === "Bronze", bAfter.level);
 const reReview = await api("reviewCoinRequest", { token: adminToken, request_id: myReq.id, decision: "approved" });
 check("double approve rejected", reReview.ok === false);
 

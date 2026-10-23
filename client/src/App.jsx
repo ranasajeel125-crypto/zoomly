@@ -206,7 +206,7 @@ function GoogleSetupView({ onAuthed, onCancel }) {
           {busy ? "Please wait…" : "Create my account"}
         </button>
       </form>
-      <p style={{ color: "var(--dim)", fontSize: 13, marginTop: 12 }}>Your Google profile photo becomes your Zoomly photo (DP) — you can change it later. A friend's referral code gives you 10 welcome coins — and them 20.</p>
+      <p style={{ color: "var(--dim)", fontSize: 13, marginTop: 12 }}>Your Google profile photo becomes your Zoomly photo (DP) — you can change it later. Signing up with a friend&apos;s referral code counts you as their referral.</p>
       <button className="btn" onClick={onCancel} style={{ marginTop: 6 }}>
         ← Back to log in
       </button>
@@ -293,7 +293,7 @@ function AuthView({ onAuthed }) {
         <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
       </div>
       <GoogleButton />
-      {mode === "signup" && <p style={{ color: "var(--dim)", fontSize: 13, marginTop: 12 }}>Signing up with a friend&apos;s referral code gives you 10 welcome coins — and them 20.</p>}
+      {mode === "signup" && <p style={{ color: "var(--dim)", fontSize: 13, marginTop: 12 }}>Signing up with a friend&apos;s referral code counts you as their referral.</p>}
     </div>
   );
 }
@@ -1256,7 +1256,7 @@ function RewardsView({ me, refreshMe }) {
   }
 
   async function shareCode() {
-    const text = `Join me on Zoomly! Use my referral code ${data?.my_code} when you sign up — you get 10 welcome coins and I get 20.`;
+    const text = `Join me on Zoomly! Use my referral code ${data?.my_code} when you sign up and we both climb the referral board.`;
     if (navigator.share) {
       try {
         await navigator.share({ title: "Zoomly", text });
@@ -1346,7 +1346,7 @@ function RewardsView({ me, refreshMe }) {
       <div className="card" style={{ marginTop: 14 }}>
         <h3 style={{ margin: "0 0 4px" }}>🔗 Your referral code</h3>
         <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>
-          Share your code — every friend who joins with it earns you <strong style={{ color: "var(--text)" }}>20 coins</strong>, and they get <strong style={{ color: "var(--text)" }}>10 welcome coins</strong>. You have {data.referral_count} referral{data.referral_count === 1 ? "" : "s"} so far.
+          Share your code — every friend who joins with it counts as your referral and climbs you up the Top Referrals board. You have {data.referral_count} referral{data.referral_count === 1 ? "" : "s"} so far.
         </p>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <code style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, padding: "9px 12px", fontWeight: 700, fontSize: 15 }}>{data.my_code}</code>
@@ -1361,7 +1361,7 @@ function RewardsView({ me, refreshMe }) {
           <form onSubmit={claim} style={{ display: "flex", gap: 8, marginTop: 14 }}>
             <input className="input" placeholder="Have a friend's code? Enter it here" value={claimCode} onChange={(e) => setClaimCode(e.target.value)} />
             <button className="btn" type="submit" disabled={busy}>
-              Claim +10
+              Claim
             </button>
           </form>
         )}

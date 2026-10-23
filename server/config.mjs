@@ -74,8 +74,10 @@ export function googleConfig() {
   return { clientId, clientSecret, configured: Boolean(clientId && clientSecret) };
 }
 
-export const REFERRAL_INVITER_COINS = 20;
-export const REFERRAL_WELCOME_COINS = 10;
+// Referrals mint NO coins (owner decision 2026-10-23): a referral only
+// links the two accounts so the inviter's referral COUNT goes up. With
+// cash withdrawals in the app, free referral coins would be real money
+// out of the owner's pocket — no code path may credit them.
 export const LEADERBOARD_LIMIT = 50;
 
 // ---- Live gifts -------------------------------------------------------------
