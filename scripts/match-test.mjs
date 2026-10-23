@@ -8,10 +8,15 @@
 //     TURSO_DATABASE_URL=file:/tmp/zoomly-match.db npm start
 //   BASE_URL=http://localhost:3105 ADMIN_USERNAME=sajeel \
 //     TEST_DB_URL=file:/tmp/zoomly-match.db node scripts/match-test.mjs
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createClient } from "@libsql/client";
 import { WebSocket } from "ws";
+import { JSDOM } from "jsdom";
 
 const BASE = process.env.BASE_URL || "http://localhost:3105";
+const DIST_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "client", "dist");
 const ADMIN = (process.env.ADMIN_USERNAME || "sajeel").toLowerCase();
 const DB_URL = process.env.TEST_DB_URL || "file:/tmp/zoomly-match.db";
 
@@ -299,6 +304,125 @@ const finalRow3 = await dbOne("SELECT * FROM live_matches WHERE id = ?", [starte
 check("live-ended match persisted (B wins 0–100)", finalRow3 && finalRow3.ended_at !== null && finalRow3.winner_user_id === userB.user.id && finalRow3.score_b === 100, JSON.stringify(finalRow3));
 const listAfter = await api("listLive", { token: fanB.token });
 check("B is still live after the match ended", listAfter.lives?.some((l) => l.id === sidB) === true && !listAfter.lives?.some((l) => l.id === sidA));
+
+// ---- jsdom: a VIEWER sees the split stage + top score bar ----------------------
+// Fresh hosts D and E; a fresh fan pre-stages in D's watch room, THEN
+// the match starts (this server runs 5-second matches, so every poll
+// below is fast). Assertions: single layout before, 50/50 split + both
+// tiles + score bar during, live score/fill updates from gifts, and a
+// return to single when the match ends.
+try {
+  const userD = await makeUser(`pk_d_${suffix}`, "PK Host D");
+  const userE = await makeUser(`pk_e_${suffix}`, "PK Host E");
+  const fanF = await makeUser(`pk_fanf_${suffix}`, "Fan F");
+  const liveD = await api("startLive", { token: userD.token, title: "D ki live" });
+  const liveE = await api("startLive", { token: userE.token, title: "E ki live" });
+  const sidD = liveD.session.id;
+  const sidE = liveE.session.id;
+  check("render-check lives started", Boolean(sidD && sidE));
+  const sockD = await connectSocket(userD.token);
+  const sockE = await connectSocket(userE.token);
+  sockD.send({ type: "join", liveSessionId: sidD });
+  sockE.send({ type: "join", liveSessionId: sidE });
+  await sockD.waitFor((m) => m.type === "joined", 9000, "D joined");
+  await sockE.waitFor((m) => m.type === "joined", 9000, "E joined");
+
+  const indexHtml = fs.readFileSync(path.join(DIST_DIR, "index.html"), "utf8");
+  const bundleName = fs.readdirSync(path.join(DIST_DIR, "assets")).find((f) => f.endsWith(".js"));
+  const bundle = fs.readFileSync(path.join(DIST_DIR, "assets", bundleName), "utf8");
+  check("bundle contains the PK split + score bar hooks", bundle.includes("data-pk-scorebar") && bundle.includes("data-stage-layout"));
+
+  const dom = new JSDOM(indexHtml, {
+    url: `${BASE}/`,
+    runScripts: "dangerously",
+    pretendToBeVisual: true,
+    beforeParse(window) {
+      window.localStorage.setItem("zoomly_token", fanF.token);
+      window.fetch = (u, o = {}) => {
+        const { signal, ...rest } = o;
+        return fetch(new URL(u, BASE), rest);
+      };
+      window.IntersectionObserver = class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      };
+      window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+      window.HTMLMediaElement.prototype.pause = () => {};
+      window.HTMLMediaElement.prototype.load = () => {};
+      window.scrollTo = () => {};
+      if (!window.WebSocket) {
+        window.WebSocket = class {
+          constructor() {
+            this.readyState = 0;
+          }
+          send() {}
+          close() {
+            this.readyState = 3;
+          }
+        };
+      }
+    },
+  });
+  const { document } = dom.window;
+  const bodyText = () => document.body?.textContent || "";
+  const waitFast = async (desc, pred, timeoutMs = 6000) => {
+    const t0 = Date.now();
+    for (;;) {
+      if (pred()) return;
+      if (Date.now() - t0 > timeoutMs) throw new Error(`Timed out waiting for: ${desc}`);
+      await sleep(100);
+    }
+  };
+  const click = (el) => el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  dom.window.eval(bundle);
+  await waitFast("fan app boot", () => bodyText().includes("For You") || bodyText().includes("could not open"), 25000);
+  check("pk fan app boots without crash", !bodyText().includes("could not open"));
+  const liveIconBtn = document.querySelector('button[aria-label="Open Live"]');
+  check("pk fan: feed LIVE icon found", Boolean(liveIconBtn));
+  click(liveIconBtn);
+  await waitFast("D broadcast listed", () => bodyText().includes("D ki live") || bodyText().includes("could not open"), 25000);
+  const watchBtnD = [...document.querySelectorAll("button")].find(
+    (b) => (b.textContent || "").trim() === "Watch" && (b.closest(".card")?.textContent || "").includes("D ki live")
+  );
+  check("pk fan: Watch button for D found", Boolean(watchBtnD));
+  click(watchBtnD);
+  await waitFast("D watch room chrome", () => bodyText().includes("Join Live") || bodyText().includes("could not open"), 25000);
+  check("viewer starts in the single layout (no match yet)", Boolean(document.querySelector('[data-stage-layout="single"]')) && !document.querySelector("[data-pk-scorebar]"));
+
+  // Start the match — D invites, E accepts (5s matches on this server).
+  sockD.send({ type: "match-invite", toLiveSessionId: sidE });
+  const renderInvite = await sockE.waitFor((m) => m.type === "match-invite", 9000, "render-match invite");
+  sockE.send({ type: "match-respond", inviteId: renderInvite.inviteId, accept: true });
+  await waitFast("viewer stage splits", () => Boolean(document.querySelector('[data-stage-layout="pk"]')), 4000);
+  check("viewer stage splits 50/50 during the match", Boolean(document.querySelector('[data-stage-layout="pk"]')));
+  check("viewer split renders both peer tiles", document.querySelectorAll("[data-stage-tile]").length === 2);
+  const vBarText = document.querySelector("[data-pk-scorebar]")?.textContent || "";
+  check("viewer score bar shows both broadcasters + scores", vBarText.includes(`@${userD.user.username}`) && vBarText.includes(`@${userE.user.username}`), vBarText.slice(0, 140));
+  check("viewer score bar has the centre countdown", Boolean(document.querySelector("[data-pk-countdown]")));
+
+  const giftToD = await api("sendGift", { token: fanA.token, live_session_id: sidD, gift_key: "giftbox" });
+  check("gift to D during the render match ok", giftToD.ok === true, JSON.stringify(giftToD).slice(0, 160));
+  await waitFast("viewer score A updates", () => (document.querySelector('[data-pk-score="a"]')?.textContent || "").includes("100"), 3000);
+  check("viewer score bar updates live (A = 100)", (document.querySelector('[data-pk-score="a"]')?.textContent || "").includes("100"));
+  check("viewer fill swings fully to A (100%)", document.querySelector('[data-pk-fill="a"]')?.style.width === "100%", document.querySelector('[data-pk-fill="a"]')?.style.width);
+  const giftToE = await api("sendGift", { token: fanA.token, live_session_id: sidE, gift_key: "giftbox" });
+  check("gift to E during the render match ok", giftToE.ok === true, JSON.stringify(giftToE).slice(0, 160));
+  await waitFast("viewer score B updates", () => (document.querySelector('[data-pk-score="b"]')?.textContent || "").includes("100"), 3000);
+  check("viewer fill rebalances to 50% at 100–100", document.querySelector('[data-pk-fill="a"]')?.style.width === "50%", document.querySelector('[data-pk-fill="a"]')?.style.width);
+
+  // The 5s timer ends the match: score bar gone, stage back to single.
+  await waitFast("viewer stage returns to single", () => !document.querySelector("[data-pk-scorebar]") && Boolean(document.querySelector('[data-stage-layout="single"]')), 12000);
+  check("viewer stage returns to single after match-ended", !document.querySelector("[data-pk-scorebar]"));
+
+  dom.window.close();
+  await api("endLive", { token: userD.token, live_session_id: sidD });
+  await api("endLive", { token: userE.token, live_session_id: sidE });
+  sockD.close();
+  sockE.close();
+} catch (err) {
+  check(`jsdom PK render check (${err.message})`, false);
+}
 
 // Cleanup
 await api("endLive", { token: userB.token, live_session_id: sidB });

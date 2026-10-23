@@ -46,8 +46,9 @@ function LiveBadge() {
 // ---- full-screen stage (watch + broadcast rooms) ------------------------------
 // TikTok-style: the video fills the whole viewport (the stage is fixed, so
 // it covers the bottom nav too) and every control floats over it — top bar
-// with a fade, notices under it, chat + actions in a bottom gradient, the
-// PK score bar across the middle seam when the stage is split in two.
+// with a fade, notices under it, chat + actions in a bottom gradient. In a
+// PK match the stage splits into two side-by-side columns and the PK
+// score bar pins to the top, right under the header.
 const stageStyle = {
   position: "fixed",
   inset: 0,
@@ -89,16 +90,6 @@ const noticeStackStyle = {
   zIndex: 6,
   display: "grid",
   gap: 6,
-  pointerEvents: "none",
-};
-const seamBarStyle = {
-  position: "absolute",
-  top: "50%",
-  left: 0,
-  right: 0,
-  transform: "translateY(-50%)",
-  padding: "0 10px",
-  zIndex: 5,
   pointerEvents: "none",
 };
 const darkChipStyle = { background: "rgba(0,0,0,0.5)", borderColor: "rgba(255,255,255,0.25)", color: "#fff" };
@@ -475,6 +466,11 @@ function ChatInput({ onSend, disabled, placeholder }) {
 
 // ---- PK match: score bar + result --------------------------------------------
 
+// TikTok-style PK score bar, pinned at the TOP of the stage during a
+// match: side A's avatar/name/score at the left end, side B's at the
+// right end, the match countdown in the centre, and a proportional
+// two-colour fill underneath that swings toward whoever is ahead.
+// Scores arrive live via the match-score broadcasts (match state).
 function MatchBar({ match }) {
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -487,24 +483,33 @@ function MatchBar({ match }) {
   const ss = String(secondsLeft % 60).padStart(2, "0");
   const total = match.scoreA + match.scoreB;
   const aPct = total === 0 ? 50 : Math.round((match.scoreA / total) * 100);
+  const sideStyle = { display: "flex", alignItems: "center", gap: 6, minWidth: 0 };
+  const nameStyle = { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13.5 };
   return (
-    <div>
+    <div data-pk-scorebar="">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 14, gap: 8 }}>
-        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          ⚔️ <strong>@{match.a.user.username}</strong> · 🪙 {match.scoreA}
+        <span style={sideStyle}>
+          <Avatar user={match.a.user} size={26} />
+          <span style={nameStyle}>@{match.a.user.username}</span>
+          <strong data-pk-score="a" style={{ fontSize: 17, whiteSpace: "nowrap" }}>
+            🪙 {match.scoreA}
+          </strong>
         </span>
-        <span className="chip" style={{ borderColor: "#e0245e", color: "#ff7aa8" }}>
+        <span className="chip" data-pk-countdown="" style={{ borderColor: "#e0245e", color: "#ff7aa8", flexShrink: 0 }}>
           ⏱ {mm}:{ss}
         </span>
-        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "right" }}>
-          🪙 {match.scoreB} · <strong>@{match.b.user.username}</strong>
+        <span style={{ ...sideStyle, justifyContent: "flex-end" }}>
+          <strong data-pk-score="b" style={{ fontSize: 17, whiteSpace: "nowrap" }}>
+            🪙 {match.scoreB}
+          </strong>
+          <span style={nameStyle}>@{match.b.user.username}</span>
+          <Avatar user={match.b.user} size={26} />
         </span>
       </div>
       <div style={{ display: "flex", height: 12, borderRadius: 999, overflow: "hidden", marginTop: 6, background: "var(--surface-2)" }}>
-        <div style={{ width: `${aPct}%`, background: "var(--accent)", transition: "width 0.4s" }} />
-        <div style={{ flex: 1, background: "#e0245e", transition: "width 0.4s" }} />
+        <div data-pk-fill="a" style={{ width: `${aPct}%`, background: "var(--accent)", transition: "width 0.4s" }} />
+        <div data-pk-fill="b" style={{ flex: 1, background: "#e0245e", transition: "width 0.4s" }} />
       </div>
-      <div style={{ textAlign: "center", color: "var(--dim)", fontSize: 12, marginTop: 4 }}>PK Match — zyada gifts wali side jeetegi!</div>
     </div>
   );
 }
@@ -1218,14 +1223,30 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
   return (
     <div style={stageStyle}>
       {/* video layer: own camera fills the stage; in a PK match the stage
-          splits into two halves — me on top, the opponent below */}
-      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
-        <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+          splits into two equal side-by-side columns (me | opponent,
+          TikTok-style); with a seated guest it stacks top/bottom as
+          before. Outside both, a single full-screen video. */}
+      <div
+        data-stage-layout={match ? "pk" : splitView ? "guest" : "single"}
+        style={{ position: "absolute", inset: 0, display: "flex", flexDirection: match ? "row" : "column" }}
+      >
+        <div data-stage-tile="main" style={{ position: "relative", flex: 1, minHeight: 0, minWidth: 0 }}>
           <video ref={videoRef} autoPlay muted playsInline style={videoFillStyle} />
           {splitView && <div style={tileLabelStyle("rgba(0,0,0,0.65)")}>Tum · @{me.username}</div>}
         </div>
         {splitView && (
-          <div style={{ position: "relative", flex: 1, minHeight: 0, borderTop: "2px solid rgba(255,255,255,0.18)" }}>
+          <div
+            data-stage-tile="second"
+            style={{
+              position: "relative",
+              flex: 1,
+              minHeight: 0,
+              minWidth: 0,
+              ...(match
+                ? { borderLeft: "2px solid rgba(255,255,255,0.18)" }
+                : { borderTop: "2px solid rgba(255,255,255,0.18)" }),
+            }}
+          >
             <video ref={secondVideoRef} autoPlay playsInline style={videoFillStyle} />
             {match ? (
               <div style={tileLabelStyle("rgba(224,36,94,0.85)")}>⚔️ @{opponent?.user?.username}</div>
@@ -1250,9 +1271,10 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
       {/* gift animation: the room-wide overlay (host sees it too) */}
       <GiftAnimationOverlay anim={room.giftAnim} />
 
-      {/* top bar over the video */}
-      <div style={topBarStyle}>
-        <LiveBadge />
+      {/* header zone: top bar + the PK score bar pinned right under it */}
+      <div style={{ position: "relative", zIndex: 6 }}>
+        <div style={topBarStyle}>
+          <LiveBadge />
         <strong style={{ flex: 1, minWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#fff", textShadow: "0 1px 4px rgba(0,0,0,0.9)" }}>{session.title}</strong>
         <span className="chip" style={darkChipStyle}>
           👀 {room.viewerCount}
@@ -1263,16 +1285,17 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
         <span className="chip" style={darkChipStyle}>
           ⏱ {formatDuration(elapsed)}
         </span>
-      </div>
-
-      {/* PK score bar across the seam */}
-      {match && (
-        <div style={seamBarStyle}>
-          <div style={{ background: "rgba(0,0,0,0.6)", borderRadius: 14, padding: "8px 12px", backdropFilter: "blur(3px)" }}>
-            <MatchBar match={match} />
-          </div>
         </div>
-      )}
+
+        {/* PK score bar pinned at the top of the stage, under the header */}
+        {match && (
+          <div style={{ padding: "0 10px", marginTop: -20 }}>
+            <div style={{ background: "rgba(0,0,0,0.6)", borderRadius: 14, padding: "8px 12px", backdropFilter: "blur(3px)" }}>
+              <MatchBar match={match} />
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* floating status: session earnings + match result + errors */}
       <div style={noticeStackStyle}>
@@ -1906,9 +1929,14 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
   return (
     <div style={stageStyle}>
       {/* video layer: the broadcaster fills the stage; in a PK match the
-          stage splits — host on top, opponent below */}
-      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
-        <div style={{ position: "relative", flex: 1, minHeight: 0 }} onClick={handleStageTap}>
+          stage splits into two equal side-by-side columns (host |
+          opponent, TikTok-style); with a seated guest it stacks
+          top/bottom as before. */}
+      <div
+        data-stage-layout={match ? "pk" : seatedGuest ? "guest" : "single"}
+        style={{ position: "absolute", inset: 0, display: "flex", flexDirection: match ? "row" : "column" }}
+      >
+        <div data-stage-tile="main" style={{ position: "relative", flex: 1, minHeight: 0, minWidth: 0 }} onClick={handleStageTap}>
           <video ref={videoRef} autoPlay playsInline muted={muted} style={videoFillStyle} />
           <FloatingHearts hearts={hearts} />
           {room.ended ? (
@@ -1961,7 +1989,18 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
           {match && <div style={tileLabelStyle("rgba(0,0,0,0.65)")}>@{broadcaster?.username}</div>}
         </div>
         {(match || seatedGuest) && (
-          <div style={{ position: "relative", flex: 1, minHeight: 0, borderTop: "2px solid rgba(255,255,255,0.18)" }}>
+          <div
+            data-stage-tile="second"
+            style={{
+              position: "relative",
+              flex: 1,
+              minHeight: 0,
+              minWidth: 0,
+              ...(match
+                ? { borderLeft: "2px solid rgba(255,255,255,0.18)" }
+                : { borderTop: "2px solid rgba(255,255,255,0.18)" }),
+            }}
+          >
             {amGuest ? (
               <video ref={myVideoRef} autoPlay muted playsInline style={videoFillStyle} />
             ) : (
@@ -1979,9 +2018,10 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
       {/* gift animation: the room-wide overlay (viewers + seated guest) */}
       <GiftAnimationOverlay anim={room.giftAnim} />
 
-      {/* top bar over the video */}
-      <div style={topBarStyle}>
-        <button
+      {/* header zone: top bar + the PK score bar pinned right under it */}
+      <div style={{ position: "relative", zIndex: 6 }}>
+        <div style={topBarStyle}>
+          <button
           className="btn btn-small"
           onClick={onBack}
           style={{ background: "rgba(20,20,20,0.6)", borderColor: "rgba(255,255,255,0.3)", color: "#fff", backdropFilter: "blur(3px)" }}
@@ -2045,14 +2085,15 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
         </div>
       </div>
 
-      {/* PK score bar across the seam */}
-      {match && (
-        <div style={seamBarStyle}>
-          <div style={{ background: "rgba(0,0,0,0.6)", borderRadius: 14, padding: "8px 12px", backdropFilter: "blur(3px)" }}>
-            <MatchBar match={match} />
+        {/* PK score bar pinned at the top of the stage, under the header */}
+        {match && (
+          <div style={{ padding: "0 10px", marginTop: -20 }}>
+            <div style={{ background: "rgba(0,0,0,0.6)", borderRadius: 14, padding: "8px 12px", backdropFilter: "blur(3px)" }}>
+              <MatchBar match={match} />
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* floating status: connecting / errors / results */}
       <div style={noticeStackStyle}>

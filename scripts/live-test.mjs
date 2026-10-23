@@ -995,6 +995,45 @@ try {
     check("chat feed still recorded the rose gift line (host)", bodyText().includes("sent Rose"));
   }
 
+  // PK split-screen on the HOST's own stage: a rival broadcaster (raw
+  // socket) challenges this jsdom host; accepting must flip the stage
+  // into the 50/50 side-by-side split with the TikTok-style score bar
+  // pinned at the top, a gift must move the score + fill live, and the
+  // stage must return to single when the match ends.
+  if (myLive) {
+    const foeName = `pkfoe_${suffix}`;
+    const foe = await api("signup", { username: foeName, display_name: "PK Foe", password: "test-pass-123" });
+    check("pk rival signup", foe.ok === true, JSON.stringify(foe).slice(0, 160));
+    const foeLive = await api("startLive", { token: foe.token, title: "Foe ki live" });
+    check("pk rival live", foeLive.ok === true, JSON.stringify(foeLive).slice(0, 160));
+    const foeSock = await connectSocket(foe.token);
+    foeSock.send({ type: "join", liveSessionId: foeLive.session.id });
+    await foeSock.waitFor((m) => m.type === "joined", 8000, "rival joined its room");
+    foeSock.send({ type: "match-invite", toLiveSessionId: myLive.id });
+    await waitFor("PK invite panel on the host", () => bodyText().includes("challenge bheja hai") || bodyText().includes("could not open"));
+    const acceptBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("match shuru karo"));
+    check("host sees the PK invite with an Accept button", Boolean(acceptBtn));
+    click(acceptBtn);
+    await waitFor("host stage splits for the match", () => Boolean(document.querySelector('[data-stage-layout="pk"]')));
+    check("host stage is in the PK split layout", Boolean(document.querySelector('[data-stage-layout="pk"]')));
+    check("host split renders both peer tiles", document.querySelectorAll("[data-stage-tile]").length === 2);
+    const barText = document.querySelector("[data-pk-scorebar]")?.textContent || "";
+    check("host score bar shows both broadcasters", barText.includes(`@${fhName}`) && barText.includes(`@${foeName}`), barText.slice(0, 140));
+    check("host score bar has the centre countdown", Boolean(document.querySelector("[data-pk-countdown]")), barText.slice(0, 140));
+    // The rival invited, so the rival is side A and this host is side B:
+    // a gift to THIS host must move score B and swing the fill to B.
+    const pkGift = await api("sendGift", { token: viewerToken, live_session_id: myLive.id, gift_key: "giftbox" });
+    check("PK gift to the jsdom host ok", pkGift.ok === true, JSON.stringify(pkGift).slice(0, 160));
+    await waitFor("host score B updates to 100", () => (document.querySelector('[data-pk-score="b"]')?.textContent || "").includes("100"), 10000);
+    check("host score bar updates live from match-score (B = 100)", (document.querySelector('[data-pk-score="b"]')?.textContent || "").includes("100"));
+    check("host fill swings fully to B (A fill 0%)", document.querySelector('[data-pk-fill="a"]')?.style.width === "0%", document.querySelector('[data-pk-fill="a"]')?.style.width);
+    // Ending the rival's live ends the match: stage back to single.
+    await api("endLive", { token: foe.token, live_session_id: foeLive.session.id });
+    await waitFor("host stage returns to single", () => !document.querySelector("[data-pk-scorebar]") && Boolean(document.querySelector('[data-stage-layout="single"]')), 10000);
+    check("host stage returns to single after match-ended", !document.querySelector("[data-pk-scorebar]"));
+    foeSock.close();
+  }
+
   // Tidy up: end this host's live through the API.
   const ll = await api("listLive", { token: fh.token });
   const mine = ll.lives?.find((l) => l.broadcaster?.username === fhName);
