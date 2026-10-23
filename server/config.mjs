@@ -147,21 +147,28 @@ export const MATCH_INVITE_TTL_MS = 30_000;
 
 // ---- WebRTC ICE servers (LIVE) -------------------------------------------------
 // Single source of truth for the peer-connection configuration: startLive
-// and getLive return iceServers() as `ice_servers`, and the client adopts
-// it (client/src/live.js keeps a built-in fallback copy) — so TURN
+// and getLive return getIceServers() as `ice_servers` (the async wrapper
+// around the sync iceServers() core), and the client adopts it
+// (client/src/live.js keeps a built-in fallback copy) — so TURN
 // credentials can be rotated server-side, with no client release.
 //
 // STUN alone cannot connect peers behind carrier-grade NAT — most mobile
 // data in Pakistan — so a working TURN relay is essential, not optional.
 //
 // TURN selection, in order:
+//  0. CLOUDFLARE Realtime TURN, when CF_TURN_KEY_ID + CF_TURN_API_TOKEN
+//     are set. Cloudflare issues no static credentials: getIceServers()
+//     mints short-lived ones from its API (cached until <1h of the TTL
+//     remains) and returns them after the STUN entries. On ANY mint
+//     failure it silently falls through to the options below, so a
+//     Cloudflare outage can never break live.
 //  1. A DEDICATED TURN service, when the owner configures one on Render:
 //       TURN_URL          e.g. turn:global.turn.twilio.com:3478
 //       TURN_USERNAME     the service's username
 //       TURN_CREDENTIAL   the service's password/credential
 //       TURN_URL_TCP      optional second URL (e.g. turns:...:5349?transport=tcp)
-//     (Cloudflare Calls TURN, Metered premium, Twilio NTS all fit this
-//     shape; static long-term credentials from the provider's dashboard.)
+//     (Metered premium, Twilio NTS and similar fit this shape; static
+//     long-term credentials from the provider's dashboard.)
 //  2. Otherwise, Metered's Open Relay via its STATIC-AUTH host. The old
 //     anonymous long-term credentials (openrelayproject/openrelayproject
 //     on openrelay.metered.ca) are dead: Metered's own Open Relay page now
@@ -173,7 +180,7 @@ export const MATCH_INVITE_TTL_MS = 30_000;
 //     username)) — which this server mints fresh, so no signup is
 //     needed. TURN_HOST / TURN_SECRET can override the defaults. It is
 //     still a shared community relay (Metered states 20 GB/month free):
-//     fine for launch, replace with option 1 when it gets busy.
+//     fine for launch, replace with option 0/1 when it gets busy.
 import { createHmac } from "node:crypto";
 
 const STUN_ENTRIES = [
@@ -224,6 +231,86 @@ export function iceServers() {
 // Static snapshot kept for any importer that just needs a list shape;
 // actions use iceServers() for the fresh, credentialed list.
 export const ICE_SERVERS = buildIceServers();
+
+// ---- Cloudflare Realtime TURN (option 0 above) --------------------------------
+// https://developers.cloudflare.com/realtime/turn/generate-credentials/
+// POST /v1/turn/keys/<KEY_ID>/credentials/generate with a Bearer API token
+// returns { iceServers: { urls, username, credential } } — short-lived
+// credentials this server fetches and caches; nothing static exists to
+// put in env beyond the key id + token themselves.
+const CF_TURN_TTL_SECONDS = 86400; // requested credential lifetime (24h)
+const CF_TURN_REFRESH_MARGIN_MS = 60 * 60 * 1000; // refetch when <1h remains
+const CF_TURN_FETCH_TIMEOUT_MS = 8000;
+let cfCache = null; // { expiresAtMs, entry }
+let cfInFlight = null; // Promise<entry|null> while a mint is running
+
+async function fetchCloudflareTurnEntry(keyId, apiToken, doFetch) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CF_TURN_FETCH_TIMEOUT_MS);
+  try {
+    const res = await doFetch(
+      `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(keyId)}/credentials/generate`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ ttl: CF_TURN_TTL_SECONDS }),
+        signal: controller.signal,
+      },
+    );
+    if (!res || !res.ok) return null;
+    const data = await res.json();
+    const ice = data?.iceServers;
+    if (!ice || ice.urls == null || !ice.username || !ice.credential) return null;
+    const urls = Array.isArray(ice.urls) ? ice.urls : [ice.urls];
+    if (urls.length === 0) return null;
+    return { urls, username: String(ice.username), credential: String(ice.credential) };
+  } catch {
+    return null; // timeout / network / parse — caller falls back
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The async ICE list the live actions hand out. With the Cloudflare vars
+// set it prefers freshly minted Cloudflare credentials; without them —
+// or when a mint fails and no still-valid cached entry exists — it
+// returns the sync iceServers() list unchanged, so behaviour without
+// Cloudflare configured is byte-for-byte the old behaviour. `fetchImpl`
+// is a test seam; production callers pass nothing and get global fetch.
+export async function getIceServers(fetchImpl) {
+  const keyId = (process.env.CF_TURN_KEY_ID || "").trim();
+  const apiToken = (process.env.CF_TURN_API_TOKEN || "").trim();
+  if (!keyId || !apiToken) return iceServers();
+  const now = Date.now();
+  if (cfCache && cfCache.expiresAtMs - now > CF_TURN_REFRESH_MARGIN_MS) {
+    return [...STUN_ENTRIES, cfCache.entry];
+  }
+  if (!cfInFlight) {
+    const doFetch = typeof fetchImpl === "function" ? fetchImpl : globalThis.fetch;
+    cfInFlight = fetchCloudflareTurnEntry(keyId, apiToken, doFetch)
+      .then((entry) => {
+        if (entry) cfCache = { entry, expiresAtMs: Date.now() + CF_TURN_TTL_SECONDS * 1000 };
+        return entry;
+      })
+      .finally(() => {
+        cfInFlight = null;
+      });
+  }
+  const entry = await cfInFlight;
+  if (entry) return [...STUN_ENTRIES, entry];
+  // Mint failed: a cached entry that is still (barely) valid beats the
+  // fallback; only a fully expired/absent cache drops to the sync list.
+  if (cfCache && cfCache.expiresAtMs > Date.now()) return [...STUN_ENTRIES, cfCache.entry];
+  return iceServers();
+}
+
+// Test seam: clears both ICE caches so suites can re-drive env/fetch
+// combinations inside one process. Not used by production code.
+export function _resetIceCachesForTests() {
+  iceCache = null;
+  cfCache = null;
+  cfInFlight = null;
+}
 
 // ---- Content safety: word filter + report auto-hide ---------------------------
 // Auto-catch layer 1: this text filter, applied to comments, live chat,

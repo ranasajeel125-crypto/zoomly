@@ -12,7 +12,7 @@ import {
   MONETIZATION_CRITERIA,
   WITHDRAW_MIN_COINS,
   GIFT_CATALOG,
-  iceServers,
+  getIceServers,
   JAZZCASH,
   LEADERBOARD_LIMIT,
   REFERRAL_REWARD_COINS,
@@ -1328,7 +1328,7 @@ export const Actions = {
       } catch (err) {
         console.error("[notify] live-started fanout failed:", err?.message || err);
       }
-      return { ok: true, message: "You are live!", session: liveSessionDto(session, user), ice_servers: iceServers() };
+      return { ok: true, message: "You are live!", session: liveSessionDto(session, user), ice_servers: await getIceServers() };
     }
   ),
 
@@ -1416,7 +1416,7 @@ export const Actions = {
         ok: true,
         session: liveSessionDto(session, broadcaster),
         gifts: GIFT_CATALOG,
-        ice_servers: iceServers(),
+        ice_servers: await getIceServers(),
         my_coin_balance: user.coinBalance,
         is_mine: session.userId === user.id,
         broadcaster_followed: Boolean(followRow),
