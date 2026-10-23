@@ -3041,6 +3041,11 @@ function BroadWatchRoom({ me, session, refreshMe, onBack }) {
       if (cancelled) return;
       if (res.ok) {
         setDetail(res);
+        // Adopt the server's ICE list (STUN + TURN) like every other
+        // room — without this, broad watchers would keep the built-in
+        // fallback list and miss a server-side TURN rotation (e.g. a
+        // dedicated TURN configured via env).
+        setIceServers(res.ice_servers);
         if (typeof res.my_coin_balance === "number") setBalance(res.my_coin_balance);
         const b = res.session?.broadcaster;
         if (b) follows.setFollowed((prev) => ({ ...prev, [b.id]: Boolean(res.broadcaster_followed) }));

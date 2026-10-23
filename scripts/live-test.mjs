@@ -197,6 +197,11 @@ const SRC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "c
 const liveJsSrc = fs.readFileSync(path.join(SRC_DIR, "live.js"), "utf8");
 const liveJsxSrc = fs.readFileSync(path.join(SRC_DIR, "Live.jsx"), "utf8");
 check("client adopts the server ICE list", liveJsSrc.includes("setIceServers") && liveJsxSrc.includes("setIceServers(res.ice_servers)"));
+check(
+  "every room adopts the server ICE list (start + video watch + broad watch)",
+  liveJsxSrc.split("setIceServers(res.ice_servers)").length - 1 >= 3,
+  `adoptions=${liveJsxSrc.split("setIceServers(res.ice_servers)").length - 1}`
+);
 check("client fallback list carries TURN", liveJsSrc.includes("openrelay.metered.ca") && liveJsSrc.includes("FALLBACK_ICE_SERVERS"));
 check(
   "client retries failed peers via relay + renegotiate",
