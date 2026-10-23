@@ -72,6 +72,15 @@ check("payload packs have numeric coins + pricePkr", Array.isArray(rewards.packs
 check("payload jazzcash has number + title", typeof rewards.jazzcash?.number === "string" && typeof rewards.jazzcash?.title === "string");
 check("payload my_requests is an array", Array.isArray(rewards.my_requests));
 check("payload leaderboards have both boards", Array.isArray(rewards.leaderboards?.top_coins) && Array.isArray(rewards.leaderboards?.top_referrals));
+check(
+  "top_coins rows are anonymous (id + avatar_url + coin_balance + level; NO username/display_name keys)",
+  rewards.leaderboards.top_coins.every((r) => !("username" in r) && !("display_name" in r) && "id" in r && "avatar_url" in r && "coin_balance" in r && "level" in r),
+  JSON.stringify(rewards.leaderboards.top_coins[0] || {}),
+);
+check(
+  "top_referrals rows still carry username + display_name",
+  rewards.leaderboards.top_referrals.every((r) => "username" in r && "display_name" in r),
+);
 
 // ---- 2. render the built client and open Rewards -----------------------------
 const indexHtml = fs.readFileSync(path.join(DIST_DIR, "index.html"), "utf8");
@@ -126,6 +135,7 @@ try {
   check("no 'Rs.undefined' anywhere", !t.includes("Rs.undefined"));
   check("JazzCash number rendered", t.includes(rewards.jazzcash.number));
   check("leaderboard rendered", t.includes("Leaderboard") && t.includes("Top Coins") && t.includes("Top Referrals"));
+  check("Top Coins board renders anonymously (ID # shown, own @username absent)", t.includes("ID #") && !t.includes(`@${me.username}`), `username=@${me.username}`);
   // Switch to the Top Referrals board and confirm it renders too.
   const refBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "") === "Top Referrals");
   if (refBtn) {

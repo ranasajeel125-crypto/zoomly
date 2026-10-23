@@ -182,6 +182,9 @@ check("top_coins <= 50 rows", Array.isArray(rewards.leaderboards?.top_coins) && 
 check("top_referrals <= 50 rows", Array.isArray(rewards.leaderboards?.top_referrals) && rewards.leaderboards.top_referrals.length <= 50);
 const topRow = rewards.leaderboards?.top_coins?.[0];
 check("leaderboard row shape (rank/id/avatar)", Boolean(topRow) && topRow.rank === 1 && "id" in topRow && "avatar_url" in topRow, JSON.stringify(topRow).slice(0, 200));
+check("top_coins rows are anonymous (no name/username sent; DP + balance + level kept)", Boolean(topRow) && !("username" in topRow) && !("display_name" in topRow) && "coin_balance" in topRow && "level" in topRow, JSON.stringify(topRow).slice(0, 200));
+const topRefRow = rewards.leaderboards?.top_referrals?.[0];
+check("top_referrals rows keep name/username", Boolean(topRefRow) && "username" in topRefRow && "display_name" in topRefRow, JSON.stringify(topRefRow).slice(0, 200));
 
 // Upload without Cloudinary configured must fail with a clear message
 const form = new FormData();

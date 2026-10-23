@@ -630,7 +630,18 @@ export const Actions = {
       my_requests: myRequests.map((r) => ({ id: r.id, pack_coins: r.packCoins, price_pkr: r.pricePkr, is_custom: Boolean(r.isCustom), tid: r.tid, status: r.status, created_at: r.createdAt.getTime() })),
       my_withdrawals: myWithdrawals.map(withdrawalDto),
       leaderboards: {
-        top_coins: byCoins.slice(0, LEADERBOARD_LIMIT).map((u, i) => ({ rank: i + 1, ...boardRow(u) })),
+        // Top Coins is ANONYMOUS by owner decision: rows carry rank, id,
+        // DP (avatar_url), balance and level only — display_name/username
+        // are never sent, so coin-rich users can't be identified from the
+        // payload. Top Referrals keeps full identities.
+        top_coins: byCoins.slice(0, LEADERBOARD_LIMIT).map((u, i) => ({
+          rank: i + 1,
+          id: u.id,
+          avatar_url: u.avatarUrl ?? null,
+          coin_balance: u.coinBalance,
+          ...levelFor(u.coinBalance),
+          is_me: u.id === user.id,
+        })),
         top_referrals: byReferrals.slice(0, LEADERBOARD_LIMIT).map((u, i) => ({ rank: i + 1, ...boardRow(u) })),
       },
     };

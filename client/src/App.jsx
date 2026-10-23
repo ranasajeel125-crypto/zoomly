@@ -1170,6 +1170,32 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout }) {
 // ---------- rewards: referrals + coins + leaderboards + admin ----------------------
 
 function BoardRow({ row, metric }) {
+  // Top Coins rows are anonymous: the payload carries no name/username —
+  // show the DP (or a generic coin placeholder, never name initials),
+  // "ID #<id>", the level badge and the balance.
+  if (metric === "coins") {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 2px", borderBottom: "1px solid var(--border)" }}>
+        <span style={{ width: 30, textAlign: "center", fontWeight: 800, fontSize: 15 }}>{row.rank <= 3 ? ["🥇", "🥈", "🥉"][row.rank - 1] : `#${row.rank}`}</span>
+        {row.avatar_url ? (
+          <img src={row.avatar_url} alt="" style={{ width: 40, height: 40, borderRadius: "50%", objectFit: "cover", flexShrink: 0, background: "var(--surface-2)" }} />
+        ) : (
+          <div style={{ width: 40, height: 40, borderRadius: "50%", background: "var(--surface-2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 19, flexShrink: 0 }}>🪙</div>
+        )}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700 }}>
+            ID #{row.id} <LevelBadge level={row.level} />
+            {row.is_me && (
+              <span className="chip" style={{ padding: "1px 7px", fontSize: 11 }}>
+                You
+              </span>
+            )}
+          </div>
+        </div>
+        <strong>🪙 {row.coin_balance}</strong>
+      </div>
+    );
+  }
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 2px", borderBottom: "1px solid var(--border)" }}>
       <span style={{ width: 30, textAlign: "center", fontWeight: 800, fontSize: 15 }}>{row.rank <= 3 ? ["🥇", "🥈", "🥉"][row.rank - 1] : `#${row.rank}`}</span>
@@ -1177,13 +1203,17 @@ function BoardRow({ row, metric }) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {row.display_name} <LevelBadge level={row.level} />
-          {row.is_me && <span className="chip" style={{ padding: "1px 7px", fontSize: 11 }}>You</span>}
+          {row.is_me && (
+            <span className="chip" style={{ padding: "1px 7px", fontSize: 11 }}>
+              You
+            </span>
+          )}
         </div>
         <div style={{ color: "var(--dim)", fontSize: 13 }}>
           @{row.username} · ID #{row.id}
         </div>
       </div>
-      <strong>{metric === "coins" ? `🪙 ${row.coin_balance}` : `👥 ${row.referral_count}`}</strong>
+      <strong>👥 {row.referral_count}</strong>
     </div>
   );
 }
