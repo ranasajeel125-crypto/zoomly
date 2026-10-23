@@ -271,6 +271,14 @@ check("processor publishes a canvas captureStream (viewers get the filtered vide
 check("beauty filter is a smoothing blend, not just a colour wash", filtersJsSrc.includes('currentKey === "beauty"') && filtersJsSrc.includes('blur(3px)') && filtersJsSrc.includes("globalAlpha"));
 check("unsupported browsers fall back (support probe + null processor)", filtersJsSrc.includes("filtersSupported") && filtersJsSrc.includes('ctx.filter = "blur(2px)"'));
 check(
+  "front camera is mirrored in the published canvas draw (translate + scale(-1,1))",
+  filtersJsSrc.includes("scale(-1, 1)") && filtersJsSrc.includes("translate(w, 0)") && filtersJsSrc.includes("mirrored")
+);
+check(
+  "mirror applies to the front camera only (rear/environment left unmirrored)",
+  filtersJsSrc.includes('facingMode !== "environment"') && filtersJsSrc.includes("settings.facingMode")
+);
+check(
   "host path: camera runs through the processor, room publishes the given stream",
   liveJsxSrc.includes("createVideoProcessor(s, getLiveFilter())") && liveJsxSrc.includes("onStart(res.session, stream, proc)") && liveJsxSrc.includes("for (const track of stream.getTracks()) pc.addTrack(track, stream)")
 );
@@ -826,7 +834,7 @@ try {
       });
       window.__canvasCaptures = 0;
       window.HTMLCanvasElement.prototype.getContext = function () {
-        return { filter: "", globalAlpha: 1, drawImage() {} };
+        return { filter: "", globalAlpha: 1, drawImage() {}, save() {}, restore() {}, translate() {}, scale() {} };
       };
       window.HTMLCanvasElement.prototype.captureStream = function () {
         window.__canvasCaptures += 1;

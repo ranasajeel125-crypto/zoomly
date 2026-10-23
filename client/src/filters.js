@@ -10,6 +10,17 @@
 // replaced, so a mid-broadcast switch cannot drop or renegotiate the
 // broadcast.
 //
+// Mirroring: the front (user-facing) camera is flipped horizontally in
+// the same canvas draw, so the broadcaster looks like a mirror image —
+// their right side appears on the right, like every selfie view. The
+// flip lives in the published track itself, so viewers receive the
+// mirrored picture too, and the local preview (which shows the
+// published stream) matches automatically. A rear/environment track,
+// if one is ever published, is left unmirrored. The raw-camera paths
+// (filters unsupported, or the stall rescue's replaceTrack fallback)
+// cannot mirror — they publish exactly what the camera sees, as
+// before.
+//
 // These are colour/beauty filters. Face-tracked AR stickers (dog ears
 // or sunglasses that follow the face) are NOT part of this — they need
 // a face-landmark engine and are a separate future job.
@@ -106,6 +117,12 @@ export function createVideoProcessor(sourceStream, initialKey = "normal") {
     if (!videoTrack || !filtersSupported()) return null;
 
     const settings = videoTrack.getSettings?.() ?? {};
+    // Mirror the front camera (see header). getSettings().facingMode is
+    // "user" for the front camera and "environment" for the rear one;
+    // where the browser doesn't report it, Zoomly's getUserMedia calls
+    // ask for the default camera, which is the front one on phones —
+    // so an unreported facing mode is treated as front (mirrored).
+    const mirrored = settings.facingMode !== "environment";
     const canvas = document.createElement("canvas");
     canvas.width = settings.width || 640;
     canvas.height = settings.height || 480;
@@ -140,6 +157,15 @@ export function createVideoProcessor(sourceStream, initialKey = "normal") {
     const drawFrame = () => {
       const w = canvas.width;
       const h = canvas.height;
+      // Mirror flip for the front camera: translate+scale(-1,1) around
+      // every draw in this frame (beauty draws twice — both passes must
+      // be flipped or the blend would smear). save/restore also resets
+      // filter/alpha, which the passes set explicitly anyway.
+      ctx.save();
+      if (mirrored) {
+        ctx.translate(w, 0);
+        ctx.scale(-1, 1);
+      }
       if (currentKey === "beauty") {
         // Soft skin: a sharp, gently brightened base with a blurred
         // copy blended over it at low alpha smooths skin texture
@@ -158,6 +184,7 @@ export function createVideoProcessor(sourceStream, initialKey = "normal") {
         ctx.drawImage(video, 0, 0, w, h);
         ctx.filter = "none";
       }
+      ctx.restore();
     };
 
     const tryDraw = () => {
@@ -260,6 +287,7 @@ export function createVideoProcessor(sourceStream, initialKey = "normal") {
     return {
       stream,
       sourceStream,
+      mirrored,
       get filter() {
         return currentKey;
       },
