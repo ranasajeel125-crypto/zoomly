@@ -11,7 +11,7 @@ import {
   CUSTOM_BUY_MIN_COINS,
   WITHDRAW_MIN_COINS,
   GIFT_CATALOG,
-  ICE_SERVERS,
+  iceServers,
   JAZZCASH,
   LEADERBOARD_LIMIT,
   REFERRAL_REWARD_COINS,
@@ -1059,6 +1059,29 @@ export const Actions = {
   // Sessions live in the DB (live_sessions); who is connected right now is
   // tracked by the WebSocket hub (live.mjs) — viewer counts come from there.
 
+  // ICE diagnostics: clients report the FINAL outcome of a peer connection
+  // (connected — and via which candidate type — or failed even through the
+  // relay) so real-world connection problems are visible in the server log
+  // instead of guesswork. Log-only; never stored, never shown to users.
+  iceReport: withValidation(
+    z.object({
+      token: tokenArg,
+      role: z.string().trim().max(24),
+      kind: z.string().trim().max(24).optional(),
+      state: z.string().trim().max(32),
+      via: z.string().trim().max(16).optional(),
+      relay: z.boolean().optional(),
+    }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      console.log(
+        `[ice] @${user.username} role=${args.role} kind=${args.kind ?? "-"} state=${args.state} via=${args.via ?? "-"} relay=${args.relay ? "yes" : "no"}`
+      );
+      return { ok: true };
+    }
+  ),
+
   // The title is asked ONCE: whatever title a live is started with is
   // saved on the account, and later startLive calls may omit it entirely
   // to reuse the saved one. With neither, a default is used (and saved),
@@ -1099,7 +1122,7 @@ export const Actions = {
       } catch (err) {
         console.error("[notify] live-started fanout failed:", err?.message || err);
       }
-      return { ok: true, message: "You are live!", session: liveSessionDto(session, user), ice_servers: ICE_SERVERS };
+      return { ok: true, message: "You are live!", session: liveSessionDto(session, user), ice_servers: iceServers() };
     }
   ),
 
@@ -1187,7 +1210,7 @@ export const Actions = {
         ok: true,
         session: liveSessionDto(session, broadcaster),
         gifts: GIFT_CATALOG,
-        ice_servers: ICE_SERVERS,
+        ice_servers: iceServers(),
         my_coin_balance: user.coinBalance,
         is_mine: session.userId === user.id,
         broadcaster_followed: Boolean(followRow),

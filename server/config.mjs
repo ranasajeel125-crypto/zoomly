@@ -135,25 +135,83 @@ export const MATCH_INVITE_TTL_MS = 30_000;
 
 // ---- WebRTC ICE servers (LIVE) -------------------------------------------------
 // Single source of truth for the peer-connection configuration: startLive
-// and getLive return this list as `ice_servers`, and the client adopts it
-// (client/src/live.js keeps an identical built-in fallback copy) — so TURN
-// credentials can be rotated here, server-side, with no client release.
+// and getLive return iceServers() as `ice_servers`, and the client adopts
+// it (client/src/live.js keeps a built-in fallback copy) — so TURN
+// credentials can be rotated server-side, with no client release.
 //
 // STUN alone cannot connect peers behind carrier-grade NAT — most mobile
-// data in Pakistan — so alongside Google STUN the list carries the free
-// public Metered Open Relay (openrelay.metered.ca) TURN servers. That is a
-// shared community relay (bandwidth-limited, can be congested at peak
-// times); a dedicated TURN account's servers can simply replace these
-// entries here when needed.
-export const ICE_SERVERS = [
+// data in Pakistan — so a working TURN relay is essential, not optional.
+//
+// TURN selection, in order:
+//  1. A DEDICATED TURN service, when the owner configures one on Render:
+//       TURN_URL          e.g. turn:global.turn.twilio.com:3478
+//       TURN_USERNAME     the service's username
+//       TURN_CREDENTIAL   the service's password/credential
+//       TURN_URL_TCP      optional second URL (e.g. turns:...:5349?transport=tcp)
+//     (Cloudflare Calls TURN, Metered premium, Twilio NTS all fit this
+//     shape; static long-term credentials from the provider's dashboard.)
+//  2. Otherwise, Metered's Open Relay via its STATIC-AUTH host. The old
+//     anonymous long-term credentials (openrelayproject/openrelayproject
+//     on openrelay.metered.ca) are dead: Metered's own Open Relay page now
+//     requires a signed-up account + API key for that host, and two
+//     real-world two-phone tests failed black+silent through them. The
+//     static-auth host (documented on the same page for Nextcloud Talk
+//     etc.) instead uses coturn's REST credential scheme — username
+//     "<expiry-unix>:<label>", credential base64(HMAC-SHA1(secret,
+//     username)) — which this server mints fresh, so no signup is
+//     needed. TURN_HOST / TURN_SECRET can override the defaults. It is
+//     still a shared community relay (Metered states 20 GB/month free):
+//     fine for launch, replace with option 1 when it gets busy.
+import { createHmac } from "node:crypto";
+
+const STUN_ENTRIES = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
   { urls: "stun:openrelay.metered.ca:80" },
-  { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turns:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
 ];
+
+const TURN_CRED_TTL_MS = 6 * 60 * 60 * 1000; // minted credentials live 6h
+let iceCache = null; // { expiresAtMs, list }
+
+function buildIceServers(now = Date.now()) {
+  const turnUrl = (process.env.TURN_URL || "").trim();
+  const turnUser = (process.env.TURN_USERNAME || "").trim();
+  const turnCred = (process.env.TURN_CREDENTIAL || "").trim();
+  if (turnUrl && turnUser && turnCred) {
+    const entries = [{ urls: turnUrl, username: turnUser, credential: turnCred }];
+    const tcp = (process.env.TURN_URL_TCP || "").trim();
+    if (tcp) entries.push({ urls: tcp, username: turnUser, credential: turnCred });
+    return [...STUN_ENTRIES, ...entries];
+  }
+  const host = (process.env.TURN_HOST || "").trim() || "staticauth.openrelay.metered.ca";
+  const secret = (process.env.TURN_SECRET || "").trim() || "openrelayprojectsecret";
+  const expiry = Math.floor((now + TURN_CRED_TTL_MS) / 1000);
+  const username = `${expiry}:zoomly`;
+  const credential = createHmac("sha1", secret).update(username).digest("base64");
+  const auth = { username, credential };
+  return [
+    ...STUN_ENTRIES,
+    { urls: `turn:${host}:80`, ...auth },
+    { urls: `turn:${host}:443`, ...auth },
+    { urls: `turn:${host}:443?transport=tcp`, ...auth },
+    { urls: `turns:${host}:443?transport=tcp`, ...auth },
+  ];
+}
+
+// The live ICE list. Minted staticauth credentials are cached until they
+// near expiry so startLive and getLive hand out the identical list (and
+// clients aren't churning credentials mid-session).
+export function iceServers() {
+  const now = Date.now();
+  if (iceCache && iceCache.expiresAtMs - now > 30 * 60 * 1000) return iceCache.list;
+  const list = buildIceServers(now);
+  iceCache = { list, expiresAtMs: now + TURN_CRED_TTL_MS };
+  return list;
+}
+
+// Static snapshot kept for any importer that just needs a list shape;
+// actions use iceServers() for the fresh, credentialed list.
+export const ICE_SERVERS = buildIceServers();
 
 // ---- Content safety: word filter + report auto-hide ---------------------------
 // Auto-catch layer 1: this text filter, applied to comments, live chat,

@@ -203,6 +203,43 @@ check(
 );
 check("client logs the selected candidate pair type", liveJsSrc.includes("logSelectedCandidatePair") && liveJsxSrc.includes("logSelectedCandidatePair"));
 
+// ---- TURN credentials: staticauth REST scheme (the dead-cred fix) -------------
+// The old anonymous openrelayproject long-term credentials no longer
+// allocate (Metered now requires an account for that host — two real
+// two-phone tests failed black+silent). The server now mints coturn
+// REST credentials for the static-auth host: username "<expiry>:zoomly",
+// credential base64(HMAC-SHA1(secret, username)). Verify the served
+// credentials cryptographically, here in the test.
+{
+  const { createHmac } = await import("node:crypto");
+  const turn = turnEntries.find((s) => String(s.urls).includes("staticauth.openrelay.metered.ca"));
+  check("TURN entries point at the static-auth Open Relay host", Boolean(turn), JSON.stringify(iceList));
+  const expiry = Number(String(turn?.username ?? "").split(":")[0]);
+  check(
+    "TURN username is a future expiry in REST format",
+    /^\d+:zoomly$/.test(String(turn?.username ?? "")) && expiry * 1000 > Date.now(),
+    String(turn?.username)
+  );
+  const expected = createHmac("sha1", "openrelayprojectsecret").update(String(turn?.username ?? "")).digest("base64");
+  check("TURN credential is the valid HMAC of the username", turn?.credential === expected);
+  check(
+    "client fallback mints the same staticauth scheme",
+    liveJsSrc.includes("staticauth.openrelay.metered.ca") && liveJsSrc.includes("hmacSha1Base64") && liveJsSrc.includes("mintFallbackIceServers")
+  );
+}
+
+// ---- ICE diagnostics: clients report final outcomes to the server log ---------
+{
+  const rep = await api("iceReport", { token: creatorToken, role: "watch", kind: "main", state: "connected", via: "relay", relay: true });
+  check("iceReport accepts a signed-in report", rep.ok === true, JSON.stringify(rep).slice(0, 160));
+  const repBad = await api("iceReport", { token: "bogus-token", role: "watch", state: "failed" });
+  check("iceReport rejects an invalid token", repBad.ok === false);
+  check(
+    "client reports ICE outcomes (connected + final failures)",
+    liveJsSrc.includes("reportIce") && liveJsSrc.includes("/api/iceReport") && liveJsxSrc.includes("reportIce")
+  );
+}
+
 // ---- Sound: ON by default everywhere -------------------------------------------
 // The owner's rule: videos are never muted by default — muting is the
 // viewer's own persisted choice. Browsers can force a muted autoplay,
@@ -246,6 +283,14 @@ check(
   liveJsxSrc.includes("Face Filters") && liveJsxSrc.includes("LIVE_FILTERS.map") && (liveJsxSrc.match(/aria-label="Filters"/g) ?? []).length >= 2 && liveJsxSrc.includes("processor?.setFilter(key)") && liveJsxSrc.includes("guestProcessorRef.current?.setFilter(key)")
 );
 check("picking a filter persists it for the next live", liveJsxSrc.includes("setLiveFilter(key)"));
+check(
+  "filter pipeline is stall-proof (multi-scheduler draw loop + stall hook + frames counter)",
+  filtersJsSrc.includes("requestVideoFrameCallback") && filtersJsSrc.includes("setInterval") && filtersJsSrc.includes("setOnStall") && filtersJsSrc.includes("framesDrawn") && filtersJsSrc.includes("halt")
+);
+check(
+  "rooms rescue a stalled filter by swapping senders to the raw camera track",
+  liveJsxSrc.includes("rawFallbackRef") && liveJsxSrc.includes("replaceTrack(rawTrack)") && liveJsxSrc.includes("guestStreamRef.current = stream")
+);
 
 // ---- WebSocket: join, presence, signaling relay, chat ---------------------------
 

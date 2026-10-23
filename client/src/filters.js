@@ -77,16 +77,29 @@ export function filtersSupported() {
 }
 
 // Runs a camera stream through the filter canvas.
-// Returns { stream, filter, setFilter(key), stop() } — or null when
-// processing is unavailable/failed, in which case the caller publishes
-// the raw source stream unchanged.
+// Returns { stream, filter, setFilter(key), stop(), halt(),
+// setOnStall(fn), framesDrawn, sourceStream } — or null when processing
+// is unavailable/failed, in which case the caller publishes the raw
+// source stream unchanged.
 //
 // `stream` carries the processed video track + the source's audio
 // tracks (audio is passed through untouched). stop() cancels the draw
 // loop, stops the processed track, and stops the source VIDEO track it
 // consumed (nothing else can use that feed once the processor is gone);
 // the source's audio tracks ride inside `stream`, so the caller's usual
-// stream cleanup stops them.
+// stream cleanup stops them. halt() is the gentler stop: it ends
+// processing and the canvas track but leaves the raw camera track
+// running — used when the room swaps its senders to the raw track
+// after a stall (see setOnStall).
+//
+// Real-world failure this guards against: on some phones the canvas
+// pipeline never produces a frame (the detached <video> never starts
+// presenting frames, or requestAnimationFrame is throttled to zero),
+// which would otherwise publish a silent black rectangle forever. The
+// draw loop therefore runs on THREE schedulers (video frame callbacks,
+// RAF, and a plain timer watchdog), and if no frame has been drawn for
+// a few seconds the stall hook fires so the room can fall back to the
+// raw camera track (replaceTrack — no renegotiation needed).
 export function createVideoProcessor(sourceStream, initialKey = "normal") {
   try {
     const videoTrack = sourceStream?.getVideoTracks?.()[0];
@@ -116,6 +129,13 @@ export function createVideoProcessor(sourceStream, initialKey = "normal") {
     let currentKey = filterByKey(initialKey).key;
     let stopped = false;
     let raf = 0;
+    let vfcHandle = 0;
+    let watchdog = 0;
+    let framesDrawn = 0;
+    let lastDrawAt = 0;
+    const startedAt = Date.now();
+    let stallFired = false;
+    let onStall = null;
 
     const drawFrame = () => {
       const w = canvas.width;
@@ -140,19 +160,57 @@ export function createVideoProcessor(sourceStream, initialKey = "normal") {
       }
     };
 
-    const draw = () => {
+    const tryDraw = () => {
       if (stopped) return;
       try {
         if (video.readyState >= 2) {
           if (video.videoWidth > 0 && canvas.width !== video.videoWidth) sizeFromVideo();
           drawFrame();
+          framesDrawn += 1;
+          lastDrawAt = Date.now();
         }
       } catch {
         /* a transient draw error must not kill the loop */
       }
+    };
+
+    // Scheduler 1: animation frames (the normal path).
+    const draw = () => {
+      if (stopped) return;
+      tryDraw();
       raf = requestAnimationFrame(draw);
     };
     draw();
+    // Scheduler 2: the video element's own frame callbacks — these fire
+    // per presented camera frame even where page RAF is throttled.
+    const pumpVideoFrames = () => {
+      if (stopped) return;
+      tryDraw();
+      if (typeof video.requestVideoFrameCallback === "function") {
+        vfcHandle = video.requestVideoFrameCallback(pumpVideoFrames);
+      }
+    };
+    if (typeof video.requestVideoFrameCallback === "function") pumpVideoFrames();
+    // Scheduler 3 + stall watchdog: a plain timer that redraws when the
+    // other schedulers have gone quiet, re-kicks a paused video element,
+    // and reports a stall when frames simply never come.
+    watchdog = setInterval(() => {
+      if (stopped) return;
+      const now = Date.now();
+      if (now - lastDrawAt > 350) {
+        if (video.paused && video.readyState >= 2) video.play().catch(() => {});
+        tryDraw();
+      }
+      const quietFor = now - Math.max(startedAt, lastDrawAt);
+      if (!stallFired && quietFor > 3000 && videoTrack.readyState === "live") {
+        stallFired = true;
+        try {
+          onStall?.();
+        } catch {
+          /* the hook must never break the processor */
+        }
+      }
+    }, 400);
 
     let outTrack = null;
     try {
@@ -164,6 +222,7 @@ export function createVideoProcessor(sourceStream, initialKey = "normal") {
     if (!outTrack) {
       stopped = true;
       cancelAnimationFrame(raf);
+      clearInterval(watchdog);
       try {
         video.pause();
       } catch {
@@ -174,29 +233,48 @@ export function createVideoProcessor(sourceStream, initialKey = "normal") {
     }
 
     const stream = new MediaStream([outTrack, ...sourceStream.getAudioTracks()]);
+    const halt = () => {
+      if (stopped) return;
+      stopped = true;
+      cancelAnimationFrame(raf);
+      clearInterval(watchdog);
+      if (vfcHandle && typeof video.cancelVideoFrameCallback === "function") {
+        try {
+          video.cancelVideoFrameCallback(vfcHandle);
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        outTrack.stop();
+      } catch {
+        /* ignore */
+      }
+      try {
+        video.pause();
+      } catch {
+        /* ignore */
+      }
+      video.srcObject = null;
+    };
     return {
       stream,
+      sourceStream,
       get filter() {
         return currentKey;
+      },
+      get framesDrawn() {
+        return framesDrawn;
       },
       setFilter(key) {
         if (LIVE_FILTERS.some((f) => f.key === key)) currentKey = key;
       },
+      setOnStall(fn) {
+        onStall = typeof fn === "function" ? fn : null;
+      },
+      halt,
       stop() {
-        if (stopped) return;
-        stopped = true;
-        cancelAnimationFrame(raf);
-        try {
-          outTrack.stop();
-        } catch {
-          /* ignore */
-        }
-        try {
-          video.pause();
-        } catch {
-          /* ignore */
-        }
-        video.srcObject = null;
+        halt();
         try {
           videoTrack.stop();
         } catch {

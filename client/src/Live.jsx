@@ -19,7 +19,7 @@
 // on carrier-grade NAT / mobile data, where STUN-only cannot connect.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { call } from "./api";
-import { logSelectedCandidatePair, openLiveSocket, peerConnectionConfig, setIceServers } from "./live";
+import { logSelectedCandidatePair, openLiveSocket, peerConnectionConfig, reportIce, setIceServers } from "./live";
 import { setViewerMuted, viewerMuted } from "./sound";
 import { LIVE_FILTERS, createVideoProcessor, getLiveFilter, setLiveFilter } from "./filters";
 import { Avatar, Notice, OwnerBadge, ReportDialog } from "./App.jsx";
@@ -500,7 +500,10 @@ function GoLiveSetup({ me, onStart, onCancel }) {
       streamRef.current = s;
       const proc = createVideoProcessor(s, getLiveFilter());
       processorRef.current = proc;
-      // Preview the same processed picture viewers will receive.
+      // Preview the same processed picture viewers will receive. (If
+      // the pipeline turns out to produce nothing on this device, the
+      // broadcast room's stall rescue swaps everyone to the raw camera
+      // — working video beats filters, always.)
       setStream(proc ? proc.stream : s);
     } catch (err) {
       if (err && (err.name === "NotAllowedError" || err.name === "SecurityError")) {
@@ -692,12 +695,42 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
   // processor's canvas — the published track never changes.
   const [filterKey, setFilterKey] = useState(() => processor?.filter ?? getLiveFilter());
   const [showFilters, setShowFilters] = useState(false);
+  // Set when the filter pipeline stalls mid-broadcast and the room has
+  // fallen back to publishing the raw camera track (see the effect).
+  // The ref mirror is what wirePeer reads when later peers connect.
+  const [processorDead, setProcessorDead] = useState(false);
+  const rawFallbackRef = useRef(false);
 
   function pickFilter(key) {
     setFilterKey(key);
     setLiveFilter(key);
     processor?.setFilter(key);
   }
+
+  // Stall rescue: if the filter canvas stops producing frames while
+  // live, swap every peer's video sender to the RAW camera track
+  // (replaceTrack — no renegotiation) and halt the processor, so
+  // viewers get plain camera video instead of a frozen/black canvas.
+  useEffect(() => {
+    if (!processor || processorDead) return;
+    processor.setOnStall(() => {
+      const rawTrack = processor.sourceStream?.getVideoTracks?.()[0];
+      const processedTrack = stream.getVideoTracks()[0];
+      if (rawTrack && processedTrack && rawTrack !== processedTrack) {
+        for (const entry of pcsRef.current.values()) {
+          for (const sender of entry.pc.getSenders()) {
+            if (sender.track === processedTrack) sender.replaceTrack(rawTrack).catch(() => {});
+          }
+        }
+      }
+      processor.halt();
+      rawFallbackRef.current = true;
+      setProcessorDead(true);
+      room.pushMsg({ kind: "system", text: "⚠️ Filter ruk gaya tha — video ab seedhi camera se chal rahi hai (bina filter ke)." });
+    });
+    return () => processor.setOnStall(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [processor, stream, processorDead]);
 
   const room = useLiveRoom(session.id, {
     onGift: (msg) => {
@@ -803,8 +836,10 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
   }, [room.viewerCount]);
 
   useEffect(() => {
-    if (videoRef.current) videoRef.current.srcObject = stream;
-  }, [stream]);
+    if (videoRef.current) {
+      videoRef.current.srcObject = processorDead && processor?.sourceStream ? processor.sourceStream : stream;
+    }
+  }, [stream, processorDead, processor]);
 
   useEffect(() => {
     const t = setInterval(() => setElapsed(Math.floor((Date.now() - session.started_at) / 1000)), 1000);
@@ -876,7 +911,11 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
     const pc = new RTCPeerConnection(peerConnectionConfig(relayOnly));
     const entry = { pc, pendingIce: [], kind, relayOnly, retried, initiator, disconnectTimer: null, renegoTimer: null, giveUpTimer: null, pairLogged: false };
     pcsRef.current.set(peerId, entry);
-    for (const track of stream.getTracks()) pc.addTrack(track, stream);
+    // After a filter stall the room publishes the processor's raw source
+    // stream instead of the (dead) processed one — for every later peer
+    // too, not just the ones connected when the stall hit.
+    const publishStream = rawFallbackRef.current && processor?.sourceStream ? processor.sourceStream : stream;
+    for (const track of publishStream.getTracks()) pc.addTrack(track, publishStream);
     pc.ontrack = (e) => {
       if ((kind === "match-peer" || kind === "guest-peer") && secondVideoRef.current && e.streams[0]) {
         secondVideoRef.current.srcObject = e.streams[0];
@@ -919,7 +958,9 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
     if (!entry) return;
     clearEntryTimers(entry);
     if (entry.retried) {
-      // Already retried via relay and still failing — let it go.
+      // Already retried via relay and still failing — let it go (and
+      // leave a trace in the server log for diagnosis).
+      reportIce({ role: "broadcast", kind: entry.kind, state: "failed", relay: entry.relayOnly });
       closePeer(peerId);
       return;
     }
@@ -1162,7 +1203,7 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
           </button>
         </div>
       </div>
-      {showFilters && <FilterSheet activeKey={filterKey} supported={Boolean(processor)} onPick={pickFilter} onClose={() => setShowFilters(false)} />}
+      {showFilters && <FilterSheet activeKey={filterKey} supported={Boolean(processor) && !processorDead} onPick={pickFilter} onClose={() => setShowFilters(false)} />}
     </div>
   );
 }
@@ -1384,6 +1425,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
   }
 
   function showVideoFailure(kind) {
+    reportIce({ role: "watch", kind, state: "failed" });
     setVideoStatus("");
     if (kind === "main") setVideoError("Video connection nahi ban saka — is network par direct (P2P) connection mushkil hai. Chat phir bhi chal raha hai.");
     else if (kind === "guest") setVideoError("Guest ki video connect nahi ho saki — chat phir bhi chal raha hai.");
@@ -1506,7 +1548,30 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
       const proc = createVideoProcessor(stream, getLiveFilter());
       guestProcessorRef.current = proc;
       guestStreamRef.current = proc ? proc.stream : stream;
-      if (proc) setGuestFilterKey(proc.filter);
+      if (proc) {
+        setGuestFilterKey(proc.filter);
+        // Same safety net as the host path: a filter pipeline that
+        // produces no frames (or stalls) must never leave viewers with
+        // a black rectangle — swap every sender carrying the processed
+        // track to the raw camera track and halt the processor.
+        proc.setOnStall(() => {
+          const rawTrack = stream.getVideoTracks()[0];
+          const processedTrack = guestStreamRef.current?.getVideoTracks?.()[0];
+          if (rawTrack && processedTrack && rawTrack !== processedTrack) {
+            for (const entry of pcsRef.current.values()) {
+              for (const sender of entry.pc.getSenders()) {
+                if (sender.track === processedTrack) sender.replaceTrack(rawTrack).catch(() => {});
+              }
+            }
+          }
+          proc.halt();
+          if (guestProcessorRef.current === proc) guestProcessorRef.current = null;
+          // Future offers publish the raw stream too, not the dead one.
+          guestStreamRef.current = stream;
+          setShowGuestFilters(false);
+          setNotice("Filter ruk gaya tha — tumhari video ab seedhi camera se chal rahi hai.");
+        });
+      }
       amGuestRef.current = true;
       setAmGuest(true);
       sockRef.current?.send({ type: "guest-ready" });
@@ -1594,6 +1659,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
     clearEntryTimers(entry);
     closePcEntry(peerId, entry);
     if (!entry.retried) void publishToViewer(peerId, { relayOnly: true });
+    else reportIce({ role: "guest-publish", kind: "guest-viewer", state: "failed", relay: true });
   }
 
   async function toggleFollow() {
