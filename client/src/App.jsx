@@ -1526,6 +1526,7 @@ function AdminSection({ refreshMe }) {
   const [requests, setRequests] = useState([]);
   const [withdrawals, setWithdrawals] = useState([]);
   const [platformGiftCoins, setPlatformGiftCoins] = useState(null);
+  const [platformEvents, setPlatformEvents] = useState([]);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
@@ -1534,6 +1535,7 @@ function AdminSection({ refreshMe }) {
     if (res.ok) {
       setRequests(res.requests);
       if (Array.isArray(res.withdrawals)) setWithdrawals(res.withdrawals);
+      if (Array.isArray(res.platform_gift_events)) setPlatformEvents(res.platform_gift_events);
       if (typeof res.platform_gift_coins === "number") setPlatformGiftCoins(res.platform_gift_coins);
     }
   }, []);
@@ -1583,6 +1585,15 @@ function AdminSection({ refreshMe }) {
         <p style={{ fontSize: 14, margin: "0 0 10px" }}>
           🔴 Platform earnings from LIVE gifts (30% cut, recorded): <strong>🪙 {platformGiftCoins.toLocaleString()}</strong>
         </p>
+      )}
+      {platformEvents.length > 0 && (
+        <div style={{ display: "grid", gap: 4, margin: "0 0 12px" }}>
+          {platformEvents.slice(0, 10).map((e) => (
+            <div key={e.id} style={{ fontSize: 13, color: "var(--dim)" }}>
+              {e.gift_emoji} @{e.sender?.username} → @{e.creator?.username} · {e.gift_name} {e.coins} · platform <strong style={{ color: "var(--text)" }}>+{e.platform_share}</strong> · {timeAgo(e.created_at)}
+            </div>
+          ))}
+        </div>
       )}
       <Notice text={error} bad />
       <Notice text={notice} />
@@ -1801,6 +1812,42 @@ function ModerationSection() {
           {groups.length - pendingGroups.length} decided group(s) — sirf pending dikh rahe hain.
         </p>
       )}
+    </div>
+  );
+}
+
+// Creator-facing gift earnings (Rewards tab): totals + who gifted what.
+function GiftEarningsCard() {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    (async () => {
+      const res = await call("getGiftEarnings", {});
+      if (res.ok) setData(res);
+    })();
+  }, []);
+  if (!data) return null;
+  return (
+    <div className="card" style={{ marginTop: 14 }}>
+      <h3 style={{ margin: "0 0 4px" }}>🎁 Gift earnings</h3>
+      <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>
+        Live gifts se total kamai:{" "}
+        <strong style={{ color: "var(--text)" }}>🪙 {data.total_earned.toLocaleString()}</strong> ({data.gift_count} gift{data.gift_count === 1 ? "" : "s"} — har gift ka 70% tumhara hissa).
+      </p>
+      {data.earnings.length === 0 && <p style={{ color: "var(--dim)", fontSize: 14, margin: 0 }}>Abhi tak koi gift nahi mila — live jao aur gifts kamao!</p>}
+      <div style={{ display: "grid", gap: 8 }}>
+        {data.earnings.map((e) => (
+          <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {e.sender ? <Avatar user={e.sender} size={34} /> : <span style={{ fontSize: 22 }}>🎁</span>}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14 }}>
+                <strong>{e.sender?.display_name ?? "Someone"}</strong> sent {e.gift_emoji} {e.gift_name}
+              </div>
+              <div style={{ color: "var(--dim)", fontSize: 12.5 }}>{timeAgo(e.created_at)}</div>
+            </div>
+            <strong style={{ color: "var(--accent)" }}>+{e.creator_share}</strong>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2104,6 +2151,8 @@ function RewardsView({ me, refreshMe }) {
           </>
         )}
       </div>
+
+      <GiftEarningsCard />
 
       <div className="card" style={{ marginTop: 14 }}>
         <h3 style={{ margin: "0 0 4px" }}>🏆 Leaderboard</h3>

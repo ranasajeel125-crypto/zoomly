@@ -322,6 +322,20 @@ check("session totals after both gifts (125 / 38)", totals2?.total_gift_coins ==
 const adminView = await api("getAdminCoinRequests", { token: adminToken });
 check("admin view reports platform gift earnings (38)", adminView.platform_gift_coins === 38, `got=${adminView.platform_gift_coins}`);
 
+// ---- Gift earnings history (creator + platform) ----------------------------------
+const earnings = await api("getGiftEarnings", { token: creatorToken });
+check("gift earnings totals (87 earned of 125 gross, 2 gifts)", earnings.total_earned === 87 && earnings.total_gift_coins === 125 && earnings.gift_count === 2, JSON.stringify(earnings).slice(0, 200));
+check(
+  "gift earnings list newest-first with sender + 70% shares",
+  earnings.earnings?.length === 2 && earnings.earnings[0].creator_share === 17 && earnings.earnings[1].creator_share === 70 && earnings.earnings[0].sender?.username === viewer.user.username,
+  JSON.stringify(earnings.earnings).slice(0, 200),
+);
+check(
+  "admin platform gift events listed (30 + 8 = 38)",
+  Array.isArray(adminView.platform_gift_events) && adminView.platform_gift_events.reduce((s, e) => s + e.platform_share, 0) === 38,
+  JSON.stringify(adminView.platform_gift_events).slice(0, 200),
+);
+
 // ---- Gift rejections ----------------------------------------------------------------
 
 const poor = await api("signup", { username: `poor_${suffix}`, display_name: "No Coins", password: "test-pass-123" });

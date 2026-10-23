@@ -895,6 +895,45 @@ export const Actions = {
     }
   ),
 
+  // Creator-facing gift earnings: every gift received, who sent it, and
+  // the creator's 70% share — plus all-time totals. Source: gift_events.
+  getGiftEarnings: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const rows = await db.select().from(schema.giftEvents).where(eq(schema.giftEvents.creatorId, user.id)).orderBy(desc(schema.giftEvents.createdAt)).limit(50);
+    const totals = await db
+      .select({
+        earned: sql`coalesce(sum(${schema.giftEvents.creatorShare}), 0)`.mapWith(Number),
+        gross: sql`coalesce(sum(${schema.giftEvents.coins}), 0)`.mapWith(Number),
+        count: sql`count(*)`.mapWith(Number),
+      })
+      .from(schema.giftEvents)
+      .where(eq(schema.giftEvents.creatorId, user.id));
+    const senderIds = [...new Set(rows.map((r) => r.senderId))];
+    const senders = senderIds.length ? await db.select().from(schema.users).where(inArray(schema.users.id, senderIds)) : [];
+    const senderMap = new Map(senders.map((s) => [s.id, s]));
+    return {
+      ok: true,
+      total_earned: totals[0]?.earned ?? 0,
+      total_gift_coins: totals[0]?.gross ?? 0,
+      gift_count: totals[0]?.count ?? 0,
+      earnings: rows.map((r) => {
+        const gift = giftForKey(r.giftKey);
+        return {
+          id: r.id,
+          gift_key: r.giftKey,
+          gift_name: gift?.name ?? r.giftKey,
+          gift_emoji: gift?.emoji ?? "🎁",
+          coins: r.coins,
+          creator_share: r.creatorShare,
+          platform_share: r.platformShare,
+          created_at: r.createdAt.getTime(),
+          sender: senderMap.has(r.senderId) ? authorDto(senderMap.get(r.senderId)) : null,
+        };
+      }),
+    };
+  }),
+
   // ---- LIVE: broadcasts, gifts ---------------------------------------------
   // Sessions live in the DB (live_sessions); who is connected right now is
   // tracked by the WebSocket hub (live.mjs) — viewer counts come from there.
@@ -1160,6 +1199,11 @@ export const Actions = {
       .innerJoin(schema.users, eq(schema.withdrawalRequests.userId, schema.users.id))
       .orderBy(sql`case when ${schema.withdrawalRequests.status} = 'pending' then 0 else 1 end`, desc(schema.withdrawalRequests.createdAt))
       .limit(100);
+    // Recent platform gift earnings (the 30% side of every gift).
+    const giftEventRows = await db.select().from(schema.giftEvents).orderBy(desc(schema.giftEvents.createdAt)).limit(50);
+    const giftUserIds = [...new Set(giftEventRows.flatMap((r) => [r.senderId, r.creatorId]))];
+    const giftUsers = giftUserIds.length ? await db.select().from(schema.users).where(inArray(schema.users.id, giftUserIds)) : [];
+    const giftUserMap = new Map(giftUsers.map((u) => [u.id, u]));
     return {
       ok: true,
       platform_gift_coins: giftTotals[0]?.total ?? 0,
@@ -1174,6 +1218,21 @@ export const Actions = {
         buyer: authorDto(r.buyer),
       })),
       withdrawals: wdRows.map((r) => ({ ...withdrawalDto(r.withdrawal), requester: authorDto(r.requester) })),
+      platform_gift_events: giftEventRows.map((r) => {
+        const gift = giftForKey(r.giftKey);
+        return {
+          id: r.id,
+          gift_key: r.giftKey,
+          gift_name: gift?.name ?? r.giftKey,
+          gift_emoji: gift?.emoji ?? "🎁",
+          coins: r.coins,
+          creator_share: r.creatorShare,
+          platform_share: r.platformShare,
+          created_at: r.createdAt.getTime(),
+          sender: giftUserMap.has(r.senderId) ? authorDto(giftUserMap.get(r.senderId)) : null,
+          creator: giftUserMap.has(r.creatorId) ? authorDto(giftUserMap.get(r.creatorId)) : null,
+        };
+      }),
     };
   }),
 
