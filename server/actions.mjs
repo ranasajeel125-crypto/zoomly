@@ -1446,6 +1446,43 @@ export const Actions = {
     return { ok: true, message: "User unblocked." };
   }),
 
+  // ---- Password help --------------------------------------------------------------
+  // Self-serve: a signed-in user changes their password with the current
+  // one. (There is no email-based reset: password accounts have no
+  // verified email, so recovery is the owner-assisted reset below.)
+  changePassword: withValidation(
+    z.object({ token: tokenArg, current_password: z.string().min(1).max(200), new_password: z.string().min(6).max(200) }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      if (!user.passwordHash || !(await verifyPassword(args.current_password, user.passwordHash))) {
+        return { ok: false, message: "Current password galat hai." };
+      }
+      if (args.new_password === args.current_password) return { ok: false, message: "New password purane se alag rakho." };
+      await db.update(schema.users).set({ passwordHash: await hashPassword(args.new_password) }).where(eq(schema.users.id, user.id));
+      return { ok: true, message: "Password change ho gaya ✓ Ab is new password se login hoga." };
+    }
+  ),
+
+  // Owner-assisted reset: the admin sets a temporary password for a user
+  // (their sessions are killed so a lost account is secured too). The
+  // user logs in with it and changes it via changePassword.
+  adminResetPassword: withValidation(
+    z.object({ token: tokenArg, user_id: z.number().int().positive(), temp_password: z.string().min(6).max(200) }),
+    async (args) => {
+      const admin = await authUser(args.token);
+      if (!admin || !isAdminUser(admin)) return { ok: false, message: "Admin only." };
+      const target = (await db.select().from(schema.users).where(eq(schema.users.id, args.user_id)).limit(1))[0];
+      if (!target) return { ok: false, message: "User not found." };
+      await db.update(schema.users).set({ passwordHash: await hashPassword(args.temp_password) }).where(eq(schema.users.id, target.id));
+      await db.delete(schema.sessions).where(eq(schema.sessions.userId, target.id));
+      return {
+        ok: true,
+        message: `@${target.username} (ID #${target.id}) ka password reset ho gaya. Ye temporary password user ko do — woh login karke Profile se apna password change kar sakta hai.`,
+      };
+    }
+  ),
+
   getBlockedUsers: withValidation(z.object({ token: tokenArg }), async (args) => {
     const user = await authUser(args.token);
     if (!user) return { ok: false, message: "Please sign in." };

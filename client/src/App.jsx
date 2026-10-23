@@ -1550,6 +1550,10 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
   const [error, setError] = useState("");
   const [reportOpen, setReportOpen] = useState(false);
   const [storyOpen, setStoryOpen] = useState(false);
+  const [pwOpen, setPwOpen] = useState(false);
+  const [pwCurrent, setPwCurrent] = useState("");
+  const [pwNew, setPwNew] = useState("");
+  const [pwConfirm, setPwConfirm] = useState("");
   const dpInputRef = useRef(null);
 
   const load = useCallback(async () => {
@@ -1707,6 +1711,9 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
           <button className="btn" onClick={() => dpInputRef.current?.click()} disabled={dpBusy}>
             {dpBusy ? "Uploading…" : profile.avatar_url ? "Change profile photo (DP)" : "Upload profile photo (DP)"}
           </button>
+          <button className="btn" onClick={() => setPwOpen((v) => !v)}>
+            🔑 Change password
+          </button>
           {profile.avatar_url && (
             <button className="btn btn-danger" onClick={removeDp} disabled={dpBusy}>
               Remove DP
@@ -1716,6 +1723,38 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
             Log out
           </button>
           <input ref={dpInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => pickDp(e.target.files?.[0])} />
+          {pwOpen && (
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setError("");
+                setNotice("");
+                if (pwNew !== pwConfirm) {
+                  setError("New password aur confirm password match nahi karte.");
+                  return;
+                }
+                const res = await call("changePassword", { current_password: pwCurrent, new_password: pwNew });
+                if (!res.ok) {
+                  setError(res.message || "Password change failed.");
+                  return;
+                }
+                setNotice(res.message);
+                setPwCurrent("");
+                setPwNew("");
+                setPwConfirm("");
+                setPwOpen(false);
+              }}
+              style={{ flexBasis: "100%", display: "grid", gap: 8, marginTop: 4 }}
+            >
+              <input className="input" type="password" placeholder="Current password" value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} required />
+              <input className="input" type="password" placeholder="New password (min 6 characters)" value={pwNew} onChange={(e) => setPwNew(e.target.value)} required minLength={6} />
+              <input className="input" type="password" placeholder="Confirm new password" value={pwConfirm} onChange={(e) => setPwConfirm(e.target.value)} required minLength={6} />
+              <button className="btn btn-primary btn-small" type="submit" style={{ justifySelf: "start" }}>
+                Password change karo
+              </button>
+              <span style={{ fontSize: 12.5, color: "var(--dim)" }}>Password bhool gaye ho to owner se temporary password le lo (email reset available nahi — Google users Google se login karein).</span>
+            </form>
+          )}
         </div>
       ) : (
         <div style={{ marginTop: 16, display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -1931,6 +1970,8 @@ function AdminSection({ refreshMe }) {
   const [platformEvents, setPlatformEvents] = useState([]);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [resetId, setResetId] = useState("");
+  const [resetTemp, setResetTemp] = useState("");
 
   const load = useCallback(async () => {
     const res = await call("getAdminCoinRequests", {});
@@ -2094,6 +2135,33 @@ function AdminSection({ refreshMe }) {
           </div>
         </>
       )}
+
+      <h4 style={{ margin: "20px 0 6px" }}>🔑 Reset user password (owner)</h4>
+      <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>
+        Jo user apna password bhool jaye, us ke liye temporary password set karo aur use de do — woh login karke Profile se khud change kar lega. Reset par user ki purani sessions band ho jati hain.
+      </p>
+      <form
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setError("");
+          setNotice("");
+          const res = await call("adminResetPassword", { user_id: Number(resetId), temp_password: resetTemp });
+          if (!res.ok) {
+            setError(res.message || "Reset failed.");
+            return;
+          }
+          setNotice(res.message);
+          setResetId("");
+          setResetTemp("");
+        }}
+        style={{ display: "flex", gap: 8, flexWrap: "wrap" }}
+      >
+        <input className="input" type="number" min="1" placeholder="User ID #" value={resetId} onChange={(e) => setResetId(e.target.value)} style={{ width: 130 }} required />
+        <input className="input" type="text" placeholder="Temporary password (min 6)" value={resetTemp} onChange={(e) => setResetTemp(e.target.value)} style={{ flex: 1, minWidth: 180 }} required minLength={6} />
+        <button className="btn btn-primary btn-small" type="submit">
+          Reset password
+        </button>
+      </form>
     </div>
   );
 }
