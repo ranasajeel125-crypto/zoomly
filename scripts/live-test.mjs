@@ -530,7 +530,7 @@ try {
   feedLiveBtn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
   await waitForText("Live tab opened from the feed LIVE button", (t) => t.includes("Go Live") || t.includes("could not open"));
   check("feed LIVE button opens the Live tab", bodyText().includes("Go Live"));
-  const liveBtn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("Live"));
+  const liveBtn = [...document.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("Live"));
   check("Live nav button found", Boolean(liveBtn));
   liveBtn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
   await waitForText("live list shows the running broadcast", (t) => t.includes("Live test show") || t.includes("could not open"), 25000);
