@@ -749,6 +749,214 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
   );
 }
 
+// ---------- stories (24h) ---------------------------------------------------------
+function storyRingStyle(unseen) {
+  return {
+    display: "inline-flex",
+    borderRadius: "50%",
+    padding: 2.5,
+    background: unseen ? "conic-gradient(from 210deg, #feda75, #fa7e1e, #d62976, #962fbf, #4f5bd5, #feda75)" : "var(--border)",
+  };
+}
+
+// Full-screen story player: tap right/left to move through an author's
+// stories, then on to the next author. Views are recorded once per story;
+// the owner gets the view count, a viewers list and a delete button.
+export function StoryViewer({ groups, startAuthorId, me, onClose, onChanged }) {
+  const [gIdx, setGIdx] = useState(() => Math.max(0, groups.findIndex((g) => g.author?.id === startAuthorId)));
+  const [sIdx, setSIdx] = useState(0);
+  const [viewers, setViewers] = useState(null);
+  const viewedRef = useRef(new Set());
+  const group = groups[gIdx];
+  const story = group?.stories?.[sIdx];
+
+  useEffect(() => {
+    setViewers(null);
+  }, [gIdx, sIdx]);
+
+  useEffect(() => {
+    if (!story) return;
+    if (!viewedRef.current.has(story.id)) {
+      viewedRef.current.add(story.id);
+      call("viewStory", { story_id: story.id });
+    }
+  }, [story?.id]);
+
+  if (!group || !story) return null;
+  const isMine = group.author?.id === me?.id;
+
+  function next() {
+    if (sIdx + 1 < group.stories.length) setSIdx(sIdx + 1);
+    else if (gIdx + 1 < groups.length) {
+      setGIdx(gIdx + 1);
+      setSIdx(0);
+    } else onClose();
+  }
+  function prev() {
+    if (sIdx > 0) setSIdx(sIdx - 1);
+    else if (gIdx > 0) {
+      setGIdx(gIdx - 1);
+      setSIdx(groups[gIdx - 1].stories.length - 1);
+    }
+  }
+  async function showViewers() {
+    const res = await call("getStoryViewers", { story_id: story.id });
+    if (res.ok) setViewers(res.viewers);
+  }
+  async function remove() {
+    if (!window.confirm("Story delete kar dein?")) return;
+    const res = await call("deleteStory", { story_id: story.id });
+    if (res.ok) {
+      onChanged?.();
+      onClose();
+    }
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#000", zIndex: 90, display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "flex", gap: 4, padding: "10px 12px 0" }}>
+        {group.stories.map((s, i) => (
+          <div key={s.id} style={{ flex: 1, height: 3, borderRadius: 999, background: i < sIdx ? "#fff" : i === sIdx ? "#fff" : "rgba(255,255,255,0.35)", opacity: i <= sIdx ? 1 : 0.5 }} />
+        ))}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px" }}>
+        <Avatar user={group.author} size={36} />
+        <div style={{ flex: 1, color: "#fff" }}>
+          <strong>{group.author?.display_name}</strong>{" "}
+          <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 13 }}>
+            @{group.author?.username} · {timeAgo(story.created_at)}
+          </span>
+        </div>
+        {isMine && (
+          <button className="btn btn-small" onClick={remove} style={{ background: "rgba(20,20,20,0.6)", color: "#ff9a8a", borderColor: "rgba(255,255,255,0.3)" }}>
+            🗑
+          </button>
+        )}
+        <button className="btn btn-small" onClick={onClose} style={{ background: "rgba(20,20,20,0.6)", color: "#fff", borderColor: "rgba(255,255,255,0.3)" }}>
+          ✕
+        </button>
+      </div>
+      <div style={{ flex: 1, position: "relative", display: "flex", alignItems: "center", justifyContent: "center", minHeight: 0 }}>
+        {story.media_type === "video" ? (
+          <video src={story.media_url} autoPlay loop playsInline style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
+        ) : (
+          <img src={story.media_url} alt="Story" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
+        )}
+        <button onClick={prev} aria-label="Previous story" style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: "32%", background: "none", border: "none" }} />
+        <button onClick={next} aria-label="Next story" style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: "32%", background: "none", border: "none" }} />
+      </div>
+      {isMine && (
+        <div style={{ padding: "10px 12px calc(12px + env(safe-area-inset-bottom))", color: "#fff" }}>
+          <button className="btn btn-small" onClick={showViewers} style={{ background: "rgba(20,20,20,0.6)", color: "#fff", borderColor: "rgba(255,255,255,0.3)" }}>
+            👀 {story.view_count} views — viewers dekho
+          </button>
+          {viewers && (
+            <div style={{ marginTop: 8, display: "grid", gap: 6, maxHeight: "30vh", overflowY: "auto" }}>
+              {viewers.length === 0 && <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 13.5 }}>Abhi tak kisi ne nahi dekha.</span>}
+              {viewers.map((v) => (
+                <div key={v.viewer.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <Avatar user={v.viewer} size={28} />
+                  <span style={{ fontSize: 14 }}>
+                    {v.viewer.display_name} <span style={{ color: "rgba(255,255,255,0.65)" }}>@{v.viewer.username} · {timeAgo(v.viewed_at)}</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The story strip on top of the feed: my own story (with + to add) and
+// every followee with active stories, ring-colored while unseen.
+function StoriesRow({ me }) {
+  const [groups, setGroups] = useState([]);
+  const [viewer, setViewer] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [note, setNote] = useState("");
+  const fileRef = useRef(null);
+
+  const load = useCallback(async () => {
+    const res = await call("getStories", {});
+    if (res.ok) setGroups(res.groups);
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function pickStory(f) {
+    if (!f) return;
+    setUploading(true);
+    setNote("");
+    const kind = f.type.startsWith("video") ? "video" : "image";
+    const up = await uploadMedia(f, kind);
+    if (!up.ok) {
+      setUploading(false);
+      setNote(up.message || "Story upload failed.");
+      return;
+    }
+    const res = await call("createStory", { media_url: up.url, media_public_id: up.public_id, media_type: kind });
+    setUploading(false);
+    if (res.ok) {
+      setNote("Story lag gayi ✓ (24 ghante rahegi)");
+      load();
+    } else setNote(res.message || "Story could not be posted.");
+  }
+
+  const myGroup = groups.find((g) => g.author?.id === me?.id);
+  const otherGroups = groups.filter((g) => g.author?.id !== me?.id);
+
+  return (
+    <div style={{ padding: "6px 10px 0" }}>
+      <div className="no-scrollbar" style={{ display: "flex", gap: 12, overflowX: "auto" }}>
+        <div style={{ textAlign: "center", flexShrink: 0, width: 66 }}>
+          <button onClick={() => (myGroup ? setViewer(me.id) : fileRef.current?.click())} style={{ background: "none", border: "none", padding: 0, position: "relative" }} aria-label="Your story">
+            <span style={storyRingStyle(myGroup ? myGroup.has_unseen : false)}>
+              <Avatar user={me} size={54} />
+            </span>
+            <span
+              onClick={(e) => {
+                e.stopPropagation();
+                fileRef.current?.click();
+              }}
+              style={{ position: "absolute", right: -1, bottom: -1, background: "var(--accent)", color: "#06280f", borderRadius: "50%", width: 20, height: 20, fontSize: 14, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", border: "2px solid var(--bg)" }}
+            >
+              +
+            </span>
+          </button>
+          <div style={{ fontSize: 11.5, color: "var(--dim)", marginTop: 3 }}>{uploading ? "Uploading…" : "Your story"}</div>
+        </div>
+        {otherGroups.map((g) => (
+          <div key={g.author.id} style={{ textAlign: "center", flexShrink: 0, width: 66 }}>
+            <button onClick={() => setViewer(g.author.id)} style={{ background: "none", border: "none", padding: 0 }} aria-label={`Story by ${g.author.username}`}>
+              <span style={storyRingStyle(g.has_unseen)}>
+                <Avatar user={g.author} size={54} />
+              </span>
+            </button>
+            <div style={{ fontSize: 11.5, color: "var(--dim)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.author.username}</div>
+          </div>
+        ))}
+      </div>
+      {note && <div style={{ fontSize: 12.5, color: "var(--dim)", marginTop: 2 }}>{note}</div>}
+      <input ref={fileRef} type="file" accept="image/*,video/*" style={{ display: "none" }} onChange={(e) => pickStory(e.target.files?.[0])} />
+      {viewer && (
+        <StoryViewer
+          groups={groups}
+          startAuthorId={viewer}
+          me={me}
+          onClose={() => {
+            setViewer(null);
+            load();
+          }}
+          onChanged={load}
+        />
+      )}
+    </div>
+  );
+}
+
 function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications, sharedPostId }) {
   const [stream, setStream] = useState("foryou");
   const [posts, setPosts] = useState([]);
@@ -846,6 +1054,7 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
           🪙 {me?.coin_balance ?? 0}
         </span>
       </div>
+      <StoriesRow me={me} />
       <div className="feed-snap" style={{ flex: 1, marginTop: 8 }}>
         {loading && <p style={{ padding: 20, color: "var(--dim)" }}>{waking ? WAKING_TEXT : "Loading videos…"}</p>}
         {!loading && loadError && posts.length === 0 && (
@@ -1182,6 +1391,7 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout }) {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [reportOpen, setReportOpen] = useState(false);
+  const [storyOpen, setStoryOpen] = useState(false);
   const dpInputRef = useRef(null);
 
   const load = useCallback(async () => {
@@ -1284,7 +1494,15 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout }) {
   return (
     <div style={{ padding: "14px 14px 20px", maxWidth: 640, margin: "0 auto" }}>
       <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
-        <Avatar user={profile} size={76} />
+        {data.stories?.length > 0 ? (
+          <button onClick={() => setStoryOpen(true)} style={{ background: "none", border: "none", padding: 0 }} aria-label="Watch story" title="Story dekho">
+            <span style={storyRingStyle(data.stories.some((s) => !s.seen_by_me))}>
+              <Avatar user={profile} size={76} />
+            </span>
+          </button>
+        ) : (
+          <Avatar user={profile} size={76} />
+        )}
         <div style={{ minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <span style={{ fontSize: 20, fontWeight: 800 }}>{profile.display_name}</span>
@@ -1370,6 +1588,24 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout }) {
         </div>
       )}
       {reportOpen && <ReportDialog targetType="user" targetId={profile.id} label={`@${profile.username}`} onClose={() => setReportOpen(false)} />}
+      {storyOpen && data.stories?.length > 0 && (
+        <StoryViewer
+          groups={[
+            {
+              author: { id: profile.id, username: profile.username, display_name: profile.display_name, avatar_url: profile.avatar_url },
+              stories: data.stories,
+              has_unseen: data.stories.some((s) => !s.seen_by_me),
+            },
+          ]}
+          startAuthorId={profile.id}
+          me={me}
+          onClose={() => {
+            setStoryOpen(false);
+            load();
+          }}
+          onChanged={load}
+        />
+      )}
 
       <Notice text={error} bad />
       <Notice text={notice} />
