@@ -120,6 +120,26 @@ try {
   await waitFor("app boot", () => bodyText().includes("Rewards") || bodyText().includes("could not open"));
   check("app boots to the shell (no crash)", !bodyText().includes("could not open"));
 
+  // ---- stories placement: strip is OUT of the feed, in a Watch section -----
+  // Owner fix 2026-10-23: the story strip at the top of the feed ate vertical
+  // space and made feed videos render shorter. Feed must have no strip;
+  // stories live in their own "Stories" section at the top of the Watch tab.
+  await sleep(2000); // let the feed settle — a strip, if present, loads by now
+  check("feed (Home) does NOT render the story strip", !bodyText().includes("Your story"));
+  check(
+    "feed has no story-create button",
+    ![...document.querySelectorAll("button")].some((b) => (b.getAttribute("aria-label") || "") === "Your story"),
+  );
+  const watchBtn = [...document.querySelectorAll("nav button")].find((b) => (b.textContent || "").includes("Watch"));
+  check("Watch nav button found", Boolean(watchBtn));
+  watchBtn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await waitFor("Stories section in Watch", () => bodyText().includes("Your story"));
+  check("Watch tab renders a Stories section with the story strip", bodyText().includes("Stories") && bodyText().includes("Your story"));
+  check(
+    "story-create entry lives in the Watch section now",
+    [...document.querySelectorAll("button")].some((b) => (b.getAttribute("aria-label") || "") === "Your story"),
+  );
+
   const btn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").includes("Rewards"));
   check("Rewards nav button found", Boolean(btn));
   btn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));

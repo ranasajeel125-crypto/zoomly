@@ -1,5 +1,6 @@
-// End-to-end tests for Zoomly stories (Phase 3E): 24h stories on the feed
-// strip (own + followees only), view recording, the owner's viewers list,
+// End-to-end tests for Zoomly stories (Phase 3E): 24h stories on the story
+// strip (own + followees only; strip lives in the Watch tab's Stories
+// section since 2026-10-23), view recording, the owner's viewers list,
 // profile story payload, deletion, and expiry (a 25h-old story is not
 // shown and is cleaned up on read). Needs direct DB access (TEST_DB_URL)
 // to plant the expired story.

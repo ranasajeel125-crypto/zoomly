@@ -869,8 +869,10 @@ export function StoryViewer({ groups, startAuthorId, me, onClose, onChanged }) {
   );
 }
 
-// The story strip on top of the feed: my own story (with + to add) and
-// every followee with active stories, ring-colored while unseen.
+// The story strip in its own Stories section at the top of the Watch tab:
+// my own story (with + to add) and every followee with active stories,
+// ring-colored while unseen. (Moved out of the feed 2026-10-23 — the strip
+// ate vertical space and made feed videos render shorter.)
 function StoriesRow({ me }) {
   const [groups, setGroups] = useState([]);
   const [viewer, setViewer] = useState(null);
@@ -1060,7 +1062,6 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
           🪙 {me?.coin_balance ?? 0}
         </span>
       </div>
-      <StoriesRow me={me} />
       <div className="feed-snap" style={{ flex: 1, marginTop: 8 }}>
         {loading && <p style={{ padding: 20, color: "var(--dim)" }}>{waking ? WAKING_TEXT : "Loading videos…"}</p>}
         {!loading && loadError && posts.length === 0 && (
@@ -1126,7 +1127,7 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
 
 // ---------- watch / browse -----------------------------------------------------
 
-function WatchView({ onOpenProfile }) {
+function WatchView({ me, onOpenProfile }) {
   const [query, setQuery] = useState("");
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1155,7 +1156,9 @@ function WatchView({ onOpenProfile }) {
 
   return (
     <div style={{ padding: "14px 14px 20px", maxWidth: 720, margin: "0 auto" }}>
-      <h2 style={{ margin: "2px 0 12px" }}>Watch</h2>
+      <h2 style={{ margin: "2px 0 6px" }}>Stories</h2>
+      <StoriesRow me={me} />
+      <h2 style={{ margin: "20px 0 12px" }}>Watch</h2>
       <input className="input" placeholder="Search videos…" value={query} onChange={(e) => setQuery(e.target.value)} />
       {loading && <p style={{ color: "var(--dim)", marginTop: 14 }}>Loading…</p>}
       {!loading && posts.length === 0 && <p style={{ color: "var(--dim)", marginTop: 14 }}>No videos found.</p>}
@@ -2946,7 +2949,7 @@ export function App() {
     <div style={{ height: "100dvh", display: "flex", flexDirection: "column", maxWidth: 860, margin: "0 auto" }}>
       <div style={{ flex: 1, minHeight: 0, overflowY: tab === "feed" ? "hidden" : "auto" }} className={tab === "feed" ? "" : "no-scrollbar"}>
         {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} onOpenNotifications={() => setShowNotifs(true)} sharedPostId={sharedPostId} />}
-        {tab === "watch" && <WatchView onOpenProfile={openProfile} />}
+        {tab === "watch" && <WatchView me={me} onOpenProfile={openProfile} />}
         {tab === "live" && <LiveView me={me} refreshMe={refreshMe} onOpenProfile={openProfile} />}
         {tab === "upload" && (
           <UploadView
