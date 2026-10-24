@@ -13,7 +13,7 @@ import { Actions, authUser, googleCompleteSignup, googleSignIn } from "./actions
 import { attachLiveServer } from "./live.mjs";
 import { initDb } from "./db.mjs";
 import { uploadToCloudinary } from "./cloudinary.mjs";
-import { cloudinaryConfig, googleConfig } from "./config.mjs";
+import { adsenseConfig, cloudinaryConfig, googleConfig } from "./config.mjs";
 import {
   GOOGLE_PENDING_COOKIE,
   GOOGLE_PENDING_TTL_MS,
@@ -33,7 +33,8 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "2mb" }));
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, service: "zoomly", media_configured: cloudinaryConfig().configured, google_configured: googleConfig().configured });
+  const adsense = adsenseConfig();
+  res.json({ ok: true, service: "zoomly", media_configured: cloudinaryConfig().configured, google_configured: googleConfig().configured, adsense_client_id: adsense.clientId, adsense_ad_slot: adsense.adSlot });
 });
 
 // ---- Public pages: Privacy Policy + Terms -----------------------------------

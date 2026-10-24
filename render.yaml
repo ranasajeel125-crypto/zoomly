@@ -25,5 +25,9 @@ services:
         sync: false # optional — Google sign-in (see README "Google sign-in")
       - key: GOOGLE_CLIENT_SECRET
         sync: false # optional — Google sign-in (secret)
+      - key: ADSENSE_CLIENT_ID
+        sync: false # optional — AdSense (owner decision 2026-10-24); unset = no ad, no script, no layout change
+      - key: ADSENSE_AD_SLOT
+        sync: false # optional — AdSense responsive ad-unit slot; unset = no ad unit rendered
       - key: NODE_VERSION
         value: "22.23.4" # patched per Render security advisory 2026-10-24 (Node.js TLS/eMudhra fixes); was "20"

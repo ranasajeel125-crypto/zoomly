@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { call, getToken, isWaking, setToken, subscribeWaking, uploadMedia } from "./api";
 import { LiveView } from "./Live.jsx";
+import AdSlot from "./AdSlot.jsx";
 import { setViewerMuted, viewerMuted } from "./sound.js";
 
 // Shown while the (free-tier) server is waking up and the client is
@@ -1416,6 +1417,7 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
               onDelete={handleDeleted}
             />
           ))}
+        {!loading && !loadError && posts.length > 0 && <AdSlot />}
       </div>
       {commentPost && (
         <CommentsSheet

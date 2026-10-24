@@ -96,6 +96,19 @@ export function googleConfig() {
   return { clientId, clientSecret, configured: Boolean(clientId && clientSecret) };
 }
 
+// Google AdSense (owner decision 2026-10-24): the ad slot is fully gated
+// on these env vars. Both are optional and unset by default, in which case
+// the client renders no ad, loads no AdSense script, and changes nothing.
+// Set them in the Render dashboard (no client rebuild needed — the client
+// reads them from GET /api/health). The publisher ID is public by nature:
+// it appears in page source once ads load, so exposing it via /api/health
+// leaks nothing. Never commit a real ID here; it lives only in Render.
+export function adsenseConfig() {
+  const clientId = (process.env.ADSENSE_CLIENT_ID || "").trim();
+  const adSlot = (process.env.ADSENSE_AD_SLOT || "").trim();
+  return { clientId: clientId || null, adSlot: adSlot || null, configured: Boolean(clientId) };
+}
+
 // Referral reward (owner decision 2026-10-23, superseding the earlier
 // no-coins rule): the INVITER earns this many coins per completed referral
 // signup, credited once inside applyReferral. The new user still gets NO
