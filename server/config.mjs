@@ -109,6 +109,20 @@ export function adsenseConfig() {
   return { clientId: clientId || null, adSlot: adSlot || null, configured: Boolean(clientId) };
 }
 
+// Monetag MultiTag (owner decision 2026-10-24): the tag loader is fully
+// gated on this env var. Unset by default, in which case the client loads
+// no Monetag script and changes nothing. Set it in the Render dashboard
+// (no client rebuild needed — the client reads it from GET /api/health)
+// to the full MultiTag <script src="..."> URL from the publisher's
+// Monetag dashboard (one URL per account). No ad format (popunder,
+// push, vignette, ...) is configured in code — formats are controlled
+// in the Monetag dashboard, never here. Never commit a real tag URL
+// here; it lives only in Render.
+export function monetagConfig() {
+  const tagUrl = (process.env.MONETAG_TAG_URL || "").trim();
+  return { tagUrl: tagUrl || null, configured: Boolean(tagUrl) };
+}
+
 // Referral reward (owner decision 2026-10-23, superseding the earlier
 // no-coins rule): the INVITER earns this many coins per completed referral
 // signup, credited once inside applyReferral. The new user still gets NO

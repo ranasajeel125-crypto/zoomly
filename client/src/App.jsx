@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { call, getToken, isWaking, setToken, subscribeWaking, uploadMedia } from "./api";
 import { LiveView } from "./Live.jsx";
 import AdSlot from "./AdSlot.jsx";
+import MonetagLoader from "./MonetagLoader.jsx";
 import { setViewerMuted, viewerMuted } from "./sound.js";
 
 // Shown while the (free-tier) server is waking up and the client is
@@ -3688,6 +3689,7 @@ export function App() {
 
   return (
     <div style={{ height: "100dvh", display: "flex", flexDirection: "column", maxWidth: 860, margin: "0 auto" }}>
+      <MonetagLoader />
       <div style={{ flex: 1, minHeight: 0, overflowY: tab === "feed" ? "hidden" : "auto" }} className={tab === "feed" ? "" : "no-scrollbar"}>
         {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} onOpenNotifications={() => setShowNotifs(true)} sharedPostId={sharedPostId} />}
         {tab === "watch" && <WatchView me={me} onOpenProfile={openProfile} />}
