@@ -436,32 +436,32 @@ check(
 const totals1 = await dbOne("SELECT total_gift_coins, platform_cut_coins FROM live_sessions WHERE id = ?", [sid]);
 check("session totals after 100 gift", totals1?.total_gift_coins === 100 && totals1?.platform_cut_coins === 30, JSON.stringify(totals1));
 
-// Odd price: chocolate 25 -> creator 17 (floor of 70%), platform 8.
+// Odd price: chocolate 25 -> creator 18 (70% rounded), platform 7.
 const gift25 = await api("sendGift", { token: viewerToken, live_session_id: sid, gift_key: "chocolate" });
 check("chocolate (25) sent", gift25.ok === true, JSON.stringify(gift25).slice(0, 160));
-check("odd split 25 → 17/8", gift25.creator_share === 17 && gift25.platform_share === 8, JSON.stringify(gift25));
+check("odd split 25 → 18/7", gift25.creator_share === 18 && gift25.platform_share === 7, JSON.stringify(gift25));
 const creatorAfter25 = (await api("getMe", { token: creatorToken })).user.coin_balance;
-check("broadcaster credited +17", creatorAfter25 === creatorAfter100 + 17, `after=${creatorAfter25}`);
+check("broadcaster credited +18", creatorAfter25 === creatorAfter100 + 18, `after=${creatorAfter25}`);
 const ev25 = await dbOne("SELECT * FROM gift_events WHERE live_session_id = ? AND gift_key = 'chocolate'", [sid]);
-check("gift_events row: 25 = 17 + 8", ev25 && ev25.creator_share === 17 && ev25.platform_share === 8, JSON.stringify(ev25));
+check("gift_events row: 25 = 18 + 7", ev25 && ev25.creator_share === 18 && ev25.platform_share === 7, JSON.stringify(ev25));
 const totals2 = await dbOne("SELECT total_gift_coins, platform_cut_coins FROM live_sessions WHERE id = ?", [sid]);
-check("session totals after both gifts (125 / 38)", totals2?.total_gift_coins === 125 && totals2?.platform_cut_coins === 38, JSON.stringify(totals2));
+check("session totals after both gifts (125 / 37)", totals2?.total_gift_coins === 125 && totals2?.platform_cut_coins === 37, JSON.stringify(totals2));
 
 // Owner sees the recorded platform take.
 const adminView = await api("getAdminCoinRequests", { token: adminToken });
-check("admin view reports platform gift earnings (38)", adminView.platform_gift_coins === 38, `got=${adminView.platform_gift_coins}`);
+check("admin view reports platform gift earnings (37)", adminView.platform_gift_coins === 37, `got=${adminView.platform_gift_coins}`);
 
 // ---- Gift earnings history (creator + platform) ----------------------------------
 const earnings = await api("getGiftEarnings", { token: creatorToken });
-check("gift earnings totals (87 earned of 125 gross, 2 gifts)", earnings.total_earned === 87 && earnings.total_gift_coins === 125 && earnings.gift_count === 2, JSON.stringify(earnings).slice(0, 200));
+check("gift earnings totals (88 earned of 125 gross, 2 gifts)", earnings.total_earned === 88 && earnings.total_gift_coins === 125 && earnings.gift_count === 2, JSON.stringify(earnings).slice(0, 200));
 check(
   "gift earnings list newest-first with sender + 70% shares",
-  earnings.earnings?.length === 2 && earnings.earnings[0].creator_share === 17 && earnings.earnings[1].creator_share === 70 && earnings.earnings[0].sender?.username === viewer.user.username,
+  earnings.earnings?.length === 2 && earnings.earnings[0].creator_share === 18 && earnings.earnings[1].creator_share === 70 && earnings.earnings[0].sender?.username === viewer.user.username,
   JSON.stringify(earnings.earnings).slice(0, 200),
 );
 check(
-  "admin platform gift events listed (30 + 8 = 38)",
-  Array.isArray(adminView.platform_gift_events) && adminView.platform_gift_events.reduce((s, e) => s + e.platform_share, 0) === 38,
+  "admin platform gift events listed (30 + 7 + 0 = 37)",
+  Array.isArray(adminView.platform_gift_events) && adminView.platform_gift_events.reduce((s, e) => s + e.platform_share, 0) === 37,
   JSON.stringify(adminView.platform_gift_events).slice(0, 200),
 );
 
@@ -772,7 +772,7 @@ check("live-ended broadcast on broadcaster disconnect", endedMsg.liveSessionId =
 await sleep(400);
 const endedRow = await dbOne("SELECT ended_at, total_gift_coins, platform_cut_coins, peak_viewers FROM live_sessions WHERE id = ?", [sid]);
 check("session marked ended in DB", endedRow?.ended_at !== null && endedRow?.ended_at !== undefined, JSON.stringify(endedRow));
-check("final totals persisted (125 / 38)", endedRow?.total_gift_coins === 125 && endedRow?.platform_cut_coins === 38, JSON.stringify(endedRow));
+check("final totals persisted (125 / 37)", endedRow?.total_gift_coins === 125 && endedRow?.platform_cut_coins === 37, JSON.stringify(endedRow));
 
 const listAfter = await api("listLive", { token: viewerToken });
 check("ended session leaves listLive", !listAfter.lives?.some((l) => l.id === sid));
@@ -807,23 +807,24 @@ check("startLive WITHOUT a title reuses the saved one", reused.ok === true && re
 await api("endLive", { token: creatorToken, live_session_id: reused.session.id });
 
 // ---- Rose = 1 coin (owner pricing) ----------------------------------------------
-// The flower costs exactly 1 coin now. The 70/30 split floors the
-// creator's share — floor(0.7 × 1) = 0 — so the platform keeps the
-// whole coin; that is the owner's price under the existing split
-// rules, pinned here so nobody "fixes" the rounding later. (Its own
-// no-title session, so the saved-title checks above stay untouched.)
+// The flower costs exactly 1 coin now. The 70/30 split ROUNDS the
+// creator's share — round(0.7 × 1) = 1 — so the creator receives the
+// coin and the platform keeps 0. (Owner decision 2026-10-24: a creator
+// must receive something even for a 1-coin gift; this deliberately
+// replaced the old floor rule that paid 0. Its own no-title session,
+// so the saved-title checks above stay untouched.)
 const started3 = await api("startLive", { token: creatorToken });
 check("rose-check startLive ok", started3.ok === true, JSON.stringify(started3).slice(0, 160));
 const viewerBeforeRose = (await api("getMe", { token: viewerToken })).user.coin_balance;
 const creatorBeforeRose = (await api("getMe", { token: creatorToken })).user.coin_balance;
 const roseGift = await api("sendGift", { token: viewerToken, live_session_id: started3.session.id, gift_key: "rose" });
 check("rose sent for exactly 1 coin", roseGift.ok === true && roseGift.gift?.coins === 1, JSON.stringify(roseGift).slice(0, 200));
-check("rose split: creator 0 / platform 1 (floor of 70%)", roseGift.creator_share === 0 && roseGift.platform_share === 1, JSON.stringify(roseGift));
+check("rose split: creator 1 / platform 0 (rounded 70%)", roseGift.creator_share === 1 && roseGift.platform_share === 0, JSON.stringify(roseGift));
 check("rose cost the sender exactly 1 coin", roseGift.my_balance === viewerBeforeRose - 1, `bal=${roseGift.my_balance} before=${viewerBeforeRose}`);
 const creatorAfterRose = (await api("getMe", { token: creatorToken })).user.coin_balance;
-check("broadcaster credited +0 for a rose", creatorAfterRose === creatorBeforeRose, `before=${creatorBeforeRose} after=${creatorAfterRose}`);
+check("broadcaster credited +1 for a rose", creatorAfterRose === creatorBeforeRose + 1, `before=${creatorBeforeRose} after=${creatorAfterRose}`);
 const evRose = await dbOne("SELECT * FROM gift_events WHERE live_session_id = ? AND gift_key = 'rose'", [started3.session.id]);
-check("gift_events row: rose 1 = 0 creator + 1 platform", evRose && evRose.coins === 1 && evRose.creator_share === 0 && evRose.platform_share === 1, JSON.stringify(evRose));
+check("gift_events row: rose 1 = 1 creator + 0 platform", evRose && evRose.coins === 1 && evRose.creator_share === 1 && evRose.platform_share === 0, JSON.stringify(evRose));
 await api("endLive", { token: creatorToken, live_session_id: started3.session.id });
 
 const freshName = `newbie_${suffix}`;
@@ -1340,7 +1341,7 @@ try {
   const giftAtHost = await bh.waitFor((m) => m.type === "gift" && m.gift?.key === "chocolate", 8000, "gift broadcast at broad host");
   check("gift broadcast reaches the broad room (animation rides it)", Boolean(giftAtHost));
   const hostAfter = (await api("getMe", { token: bHost.token })).user.coin_balance;
-  check("broad host earns the 70% creator share (25 -> 17)", hostAfter - hostBefore === 17, `${hostBefore} -> ${hostAfter}`);
+  check("broad host earns the 70% creator share (25 -> 18)", hostAfter - hostBefore === 18, `${hostBefore} -> ${hostAfter}`);
 
   // ---- jsdom: listener side — badge, stage, follow, seat via CTA ----
   try {

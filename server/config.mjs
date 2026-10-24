@@ -112,10 +112,13 @@ export const LEADERBOARD_LIMIT = 50;
 // prices come only from here. Field names are part of the API contract —
 // { key, name, emoji, coins } — keep them in sync with the client.
 // Revenue split (owner-set): the broadcaster (creator) receives 70% of
-// the gift price — floor(coins * 0.7) — into their normal coin balance;
-// the platform keeps the remaining 30%, recorded in the DB
-// (gift_events.platform_share + live_sessions.platform_cut_coins) and
-// credited nowhere.
+// the gift price — rounded to the nearest whole coin, so even a 1-coin
+// gift pays the creator (1 coin) instead of rounding down to 0 — into
+// their normal coin balance; the platform keeps the remaining 30%,
+// recorded in the DB (gift_events.platform_share +
+// live_sessions.platform_cut_coins) and credited nowhere. Rounding never
+// credits more than the gift price, so the house can never lose money
+// on a gift.
 export const GIFT_CATALOG = [
   { key: "rose", name: "Rose", emoji: "🌹", coins: 1 },
   { key: "chocolate", name: "Chocolate", emoji: "🍫", coins: 25 },
@@ -131,10 +134,12 @@ export function giftForKey(key) {
   return GIFT_CATALOG.find((g) => g.key === key) ?? null;
 }
 
-// Splits a gift's price: creator gets 70% (floored), platform keeps the
-// rest (so an odd price like 25 → creator 17, platform 8).
+// Splits a gift's price: creator gets 70% (rounded to the nearest whole
+// coin), platform keeps the rest (so 25 → creator 18, platform 7, and a
+// 1-coin gift → creator 1, platform 0 — the creator always receives
+// something, even for the smallest gift).
 export function giftSplit(coins) {
-  const creatorShare = Math.floor(coins * 0.7);
+  const creatorShare = Math.round(coins * 0.7);
   return { creatorShare, platformShare: coins - creatorShare };
 }
 

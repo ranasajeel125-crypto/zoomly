@@ -3014,6 +3014,8 @@ function RewardsView({ me, refreshMe }) {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [showMonetization, setShowMonetization] = useState(false);
+  const [fx, setFx] = useState(null);
+  const [fxCur, setFxCur] = useState("USD");
   const waking = useWaking();
 
   // Own-profile shortcut: Profile's "💰 Start Monetization" jumps to this
@@ -3041,6 +3043,20 @@ function RewardsView({ me, refreshMe }) {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Live FX rates for the balance converter (1 coin = Rs.1). Fetched once
+  // per visit; a failed fetch just hides the converter card.
+  useEffect(() => {
+    let alive = true;
+    call("getFxRates", {})
+      .then((res) => {
+        if (alive && res.ok && res.rates) setFx(res);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   async function copyCode() {
     const text = data?.my_code || "";
@@ -3183,6 +3199,38 @@ function RewardsView({ me, refreshMe }) {
         </div>
         <div style={{ color: "var(--dim)", fontSize: 13, marginTop: 8 }}>Levels: Starter → Bronze (100) → Silver (500) → Golden (1,500) → Platinum (5,000) → Diamond (14,000)</div>
       </div>
+
+      {fx && data ? (
+        <div className="card" style={{ marginTop: 14 }}>
+          <h3 style={{ margin: "0 0 4px" }}>💱 Balance ki value — har currency mein</h3>
+          <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>
+            1 coin = Rs.1 — apna balance kisi bhi currency mein live rate par check karein.
+          </p>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <select className="input" value={fxCur} onChange={(e) => setFxCur(e.target.value)} style={{ maxWidth: 220 }}>
+              {["USD", "EUR", "GBP", "AED", "SAR", "AUD", "CAD", "INR", "CNY", "TRY"]
+                .filter((c) => fx.rates[c])
+                .concat(Object.keys(fx.rates).filter((c) => !["USD", "EUR", "GBP", "AED", "SAR", "AUD", "CAD", "INR", "CNY", "TRY"].includes(c)).sort())
+                .map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+            </select>
+            <div style={{ fontSize: 20, fontWeight: 900 }}>
+              {(() => {
+                try {
+                  return new Intl.NumberFormat(undefined, { style: "currency", currency: fxCur, maximumFractionDigits: 2 }).format(data.coin_balance * (fx.rates[fxCur] || 0));
+                } catch {
+                  return `${(data.coin_balance * (fx.rates[fxCur] || 0)).toFixed(2)} ${fxCur}`;
+                }
+              })()}
+            </div>
+          </div>
+          <div style={{ color: "var(--dim)", fontSize: 13, marginTop: 8 }}>
+            🪙 {data.coin_balance.toLocaleString()} coins = Rs.{data.coin_balance.toLocaleString()} · 1 PKR = {fx.rates[fxCur]} {fxCur} (live market rate
+            {fx.updated_unix ? `, ${new Date(fx.updated_unix * 1000).toLocaleDateString()}` : ""})
+          </div>
+        </div>
+      ) : null}
 
       <button className="btn btn-primary" data-start-monetization="" onClick={() => setShowMonetization(true)} style={{ width: "100%", marginTop: 14, padding: "14px", fontSize: 16.5, fontWeight: 800, borderRadius: 14 }}>
         {data.monetization?.monetized ? "💰 Monetization — Active ✅" : "💰 Start Monetization"}

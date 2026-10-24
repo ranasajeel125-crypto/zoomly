@@ -76,6 +76,10 @@ async function createSession(userId) {
 
 // Exported so index.mjs can hand it to the live WebSocket hub (live.mjs)
 // for socket authentication — live.mjs must not import this module.
+
+// FX-rate cache for getFxRates (1h TTL, see the action below).
+let fxCache = null;
+
 export async function authUser(token) {
   if (!token) return null;
   const rows = await db
@@ -1062,6 +1066,27 @@ export const Actions = {
         top_referrals: byReferrals.slice(0, LEADERBOARD_LIMIT).map((u, i) => ({ rank: i + 1, ...boardRow(u) })),
       },
     };
+  }),
+
+  // ---- FX rates: currency converter for the Rewards balance ------------------
+  // Free keyless mid-market rates (1 coin = Rs.1, so a balance's PKR
+  // value is its coin count). Cached 1h server-side; a failed fetch never
+  // breaks the app — the client just hides the converter.
+  getFxRates: withValidation(z.object({}), async () => {
+    const now = Date.now();
+    if (fxCache && now - fxCache.at < 3600_000) return { ok: true, cached: true, ...fxCache.payload };
+    try {
+      const res = await fetch("https://open.er-api.com/v6/latest/PKR", { signal: AbortSignal.timeout(8000) });
+      if (!res.ok) throw new Error(`fx HTTP ${res.status}`);
+      const body = await res.json();
+      if (body.result !== "success" || !body.rates || typeof body.rates.USD !== "number") throw new Error("fx bad payload");
+      const payload = { base: "PKR", rates: body.rates, updated_unix: body.time_last_update_unix || Math.floor(now / 1000) };
+      fxCache = { at: now, payload };
+      return { ok: true, cached: false, ...payload };
+    } catch {
+      if (fxCache) return { ok: true, cached: true, stale: true, ...fxCache.payload };
+      return { ok: false, message: "Live rates abhi nahi mil sake — thori der baad dobara try karein." };
+    }
   }),
 
   // Monetization screen payload: criteria progress + application state.
