@@ -2453,7 +2453,7 @@ function AdminSection({ refreshMe }) {
         <div style={{ display: "grid", gap: 4, margin: "0 0 12px" }}>
           {platformEvents.slice(0, 10).map((e) => (
             <div key={e.id} style={{ fontSize: 13, color: "var(--dim)" }}>
-              {e.gift_emoji} @{e.sender?.username} → @{e.creator?.username} · {e.gift_name} {e.coins} · platform <strong style={{ color: "var(--text)" }}>+{e.platform_share}</strong> · {timeAgo(e.created_at)}
+              {e.gift_emoji} @{e.sender?.username} → @{e.creator?.username} · {e.gift_name} {e.coins} · platform <strong style={{ color: "var(--text)" }}>+{e.platform_share_exact ?? e.platform_share}</strong> · {timeAgo(e.created_at)}
             </div>
           ))}
         </div>
@@ -2776,7 +2776,8 @@ function GiftEarningsCard() {
       <h3 style={{ margin: "0 0 4px" }}>🎁 Gift earnings</h3>
       <p style={{ color: "var(--dim)", fontSize: 14, margin: "0 0 10px" }}>
         Live gifts se total kamai:{" "}
-        <strong style={{ color: "var(--text)" }}>🪙 {data.total_earned.toLocaleString()}</strong> ({data.gift_count} gift{data.gift_count === 1 ? "" : "s"} — har gift ka 70% tumhara hissa).
+        <strong style={{ color: "var(--text)" }}>🪙 {data.total_earned.toLocaleString()}</strong> ({data.gift_count} gift{data.gift_count === 1 ? "" : "s"} — har gift ka 70% tumhara hissa
+        {data.total_earned_exact != null && data.total_earned_exact !== String(data.total_earned) ? `, exact ${data.total_earned_exact} (baqi ${data.creator_pending_exact ?? "0"} pending)` : ""}).
       </p>
       {data.earnings.length === 0 && <p style={{ color: "var(--dim)", fontSize: 14, margin: 0 }}>Abhi tak koi gift nahi mila — live jao aur gifts kamao!</p>}
       <div style={{ display: "grid", gap: 8 }}>
@@ -2789,7 +2790,10 @@ function GiftEarningsCard() {
               </div>
               <div style={{ color: "var(--dim)", fontSize: 12.5 }}>{timeAgo(e.created_at)}</div>
             </div>
-            <strong style={{ color: "var(--accent)" }}>+{e.creator_share}</strong>
+            <strong style={{ color: "var(--accent)" }}>
+              +{e.creator_share_exact ?? e.creator_share}
+              {e.creator_credited_coins != null && e.creator_share_exact != null && Number(e.creator_share_exact) !== e.creator_credited_coins ? ` (${e.creator_credited_coins} credited)` : ""}
+            </strong>
           </div>
         ))}
       </div>

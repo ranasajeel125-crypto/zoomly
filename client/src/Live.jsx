@@ -2325,7 +2325,7 @@ function WatchRoom({ me, session, refreshMe, onBack }) {
               </button>
             </div>
             <div style={{ fontSize: 13, color: "var(--dim)", margin: "8px 0 10px" }}>
-              Gift ke 70% coins broadcaster ko jayenge{match ? ", aur poori value uski PK score me judegi" : ""}. Tumhara balance:{" "}
+              Gift ke 70% coins broadcaster ka hissa hain (fraction poora hone par poore coins balance me aayenge){match ? ", aur poori value uski PK score me judegi" : ""}. Tumhara balance:{" "}
               <strong style={{ color: "var(--text)" }}>🪙 {balance}</strong>
             </div>
             <Notice text={error} bad />

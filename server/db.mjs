@@ -43,7 +43,8 @@ export async function initDb() {
       referred_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
       signup_device TEXT,
       signup_ip TEXT,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      gift_earned_milli INTEGER NOT NULL DEFAULT 0
     )`,
     `CREATE TABLE IF NOT EXISTS sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -196,7 +197,9 @@ export async function initDb() {
       hidden INTEGER NOT NULL DEFAULT 0,
       peak_viewers INTEGER NOT NULL DEFAULT 0,
       total_gift_coins INTEGER NOT NULL DEFAULT 0,
-      platform_cut_coins INTEGER NOT NULL DEFAULT 0
+      platform_cut_coins INTEGER NOT NULL DEFAULT 0,
+      platform_cut_milli INTEGER NOT NULL DEFAULT 0,
+      creator_credited_coins INTEGER NOT NULL DEFAULT 0
     )`,
     `CREATE TABLE IF NOT EXISTS gift_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,6 +210,9 @@ export async function initDb() {
       coins INTEGER NOT NULL,
       creator_share INTEGER NOT NULL,
       platform_share INTEGER NOT NULL,
+      creator_share_milli INTEGER NOT NULL DEFAULT 0,
+      platform_share_milli INTEGER NOT NULL DEFAULT 0,
+      creator_credited_coins INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS live_matches (
@@ -261,4 +267,38 @@ export async function initDb() {
   const liveColNames = new Set(liveCols.rows.map((r) => r.name));
   if (!liveColNames.has("hidden")) await client.execute("ALTER TABLE live_sessions ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0");
   if (!liveColNames.has("kind")) await client.execute("ALTER TABLE live_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'");
+  // Exact 70/30 gift split (owner rule 2026-10-25): additive-only
+  // migration, run once per column (guarded by the column-existence
+  // checks, so repeat boots are no-ops and never double-backfill).
+  // gift_events: new milli columns backfill from the OLD rounded
+  // integer shares (legacy rows keep their rounded values as their
+  // "exact" history — the old over-credit on 1-coin roses is sunk,
+  // not clawed back); creator_credited_coins backfills to the old
+  // creator_share, i.e. what was actually credited then.
+  const giftCols = await client.execute("PRAGMA table_info(gift_events)");
+  const giftColNames = new Set(giftCols.rows.map((r) => r.name));
+  if (!giftColNames.has("creator_share_milli")) {
+    await client.execute("ALTER TABLE gift_events ADD COLUMN creator_share_milli INTEGER NOT NULL DEFAULT 0");
+    await client.execute("ALTER TABLE gift_events ADD COLUMN platform_share_milli INTEGER NOT NULL DEFAULT 0");
+    await client.execute("ALTER TABLE gift_events ADD COLUMN creator_credited_coins INTEGER NOT NULL DEFAULT 0");
+    await client.execute("UPDATE gift_events SET creator_share_milli = creator_share * 1000, platform_share_milli = platform_share * 1000, creator_credited_coins = creator_share");
+  }
+  // live_sessions: exact platform cut + session credited totals backfill
+  // from the legacy integer totals (creator_credited = gross - cut).
+  if (!liveColNames.has("platform_cut_milli")) {
+    await client.execute("ALTER TABLE live_sessions ADD COLUMN platform_cut_milli INTEGER NOT NULL DEFAULT 0");
+    await client.execute("ALTER TABLE live_sessions ADD COLUMN creator_credited_coins INTEGER NOT NULL DEFAULT 0");
+    await client.execute("UPDATE live_sessions SET platform_cut_milli = platform_cut_coins * 1000, creator_credited_coins = total_gift_coins - platform_cut_coins");
+  }
+  // users: per-creator exact cumulative. Backfilled to (old integer
+  // creator shares) * 1000 — always a multiple of 1000 — so the first
+  // gifts under the new rule credit exactly floor(new exact / 1000)
+  // and the carry remainder starts at 0 for every creator. No old
+  // balance is touched: coin_balance keeps what was already credited.
+  if (!colNames.has("gift_earned_milli")) {
+    await client.execute("ALTER TABLE users ADD COLUMN gift_earned_milli INTEGER NOT NULL DEFAULT 0");
+    await client.execute(
+      "UPDATE users SET gift_earned_milli = (SELECT COALESCE(SUM(creator_share), 0) * 1000 FROM gift_events WHERE gift_events.creator_id = users.id)",
+    );
+  }
 }

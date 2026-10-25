@@ -12,6 +12,16 @@ export const users = sqliteTable("users", {
   avatarUrl: text("avatar_url"), // profile photo (DP), hosted on Cloudinary
   avatarPublicId: text("avatar_public_id"),
   coinBalance: integer("coin_balance").notNull().default(0),
+  // Cumulative EXACT creator gift share, in milli-coins (1 coin =
+  // 1000 milli), across all gifts under the exact 70/30 rule. Whole
+  // coins actually credited = floor(giftEarnedMilli / 1000); the
+  // remainder (giftEarnedMilli % 1000) is the creator's pending
+  // fraction, credited only when it reaches a full coin. On migration
+  // from the old rounded rule this is backfilled to
+  // (sum of old integer creator shares) * 1000, a multiple of 1000,
+  // so future credited totals are exactly floor(new exact / 1000)
+  // and the house never loses on new gifts (see db.mjs).
+  giftEarnedMilli: integer("gift_earned_milli").notNull().default(0),
   liveTitle: text("live_title"), // last-used LIVE title — asked once, then reused by startLive
   banned: integer("banned").notNull().default(0), // 1 = banned by the owner (moderation)
   banReason: text("ban_reason"),
@@ -130,8 +140,11 @@ export const monetizationApplications = sqliteTable("monetization_applications",
 });
 
 // A LIVE broadcast. endedAt is null while the broadcast is running.
-// totalGiftCoins = gross gift coins received; platformCutCoins = the
-// platform's 30% share of those gifts (the creator received the other 70%).
+// totalGiftCoins = gross gift coins received. platformCutCoins is the
+// LEGACY integer (floored) platform cut, kept for backward
+// compatibility; the exact figures are platformCutMilli (30% in
+// milli-coins) and creatorCreditedCoins (whole coins actually
+// credited to the broadcaster during this session under the carry).
 export const liveSessions = sqliteTable("live_sessions", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
@@ -143,11 +156,21 @@ export const liveSessions = sqliteTable("live_sessions", {
   peakViewers: integer("peak_viewers").notNull().default(0),
   totalGiftCoins: integer("total_gift_coins").notNull().default(0),
   platformCutCoins: integer("platform_cut_coins").notNull().default(0),
+  platformCutMilli: integer("platform_cut_milli").notNull().default(0),
+  creatorCreditedCoins: integer("creator_credited_coins").notNull().default(0),
 });
 
 // One row per gift sent during a live broadcast. coins = full gift price
-// (deducted from the sender); creatorShare went to the broadcaster's coin
-// balance; platformShare is the platform cut (recorded, credited nowhere).
+// (deducted from the sender). creatorShareMilli / platformShareMilli
+// are the EXACT 70/30 shares in milli-coins (sum = coins * 1000).
+// creatorCreditedCoins is the whole coins actually credited to the
+// broadcaster's balance by THIS gift under the carry (often 0 for a
+// 1-coin rose, 17 for the second gift in a 100+25 sequence, etc.).
+// creatorShare / platformShare are LEGACY integer columns, kept for
+// backward compatibility: creatorShare = creatorCreditedCoins, and
+// platformShare = floor(platformShareMilli / 1000). They no longer
+// sum to the gift price when a fraction is pending — use the milli
+// columns for exact totals.
 export const giftEvents = sqliteTable("gift_events", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   liveSessionId: integer("live_session_id").notNull().references(() => liveSessions.id, { onDelete: "cascade" }),
@@ -157,6 +180,9 @@ export const giftEvents = sqliteTable("gift_events", {
   coins: integer("coins").notNull(),
   creatorShare: integer("creator_share").notNull(),
   platformShare: integer("platform_share").notNull(),
+  creatorShareMilli: integer("creator_share_milli").notNull().default(0),
+  platformShareMilli: integer("platform_share_milli").notNull().default(0),
+  creatorCreditedCoins: integer("creator_credited_coins").notNull().default(0),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 

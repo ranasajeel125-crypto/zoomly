@@ -138,14 +138,19 @@ export const LEADERBOARD_LIMIT = 50;
 // clients render exactly these entries (getLive returns them) and sendGift
 // prices come only from here. Field names are part of the API contract —
 // { key, name, emoji, coins } — keep them in sync with the client.
-// Revenue split (owner-set): the broadcaster (creator) receives 70% of
-// the gift price — rounded to the nearest whole coin, so even a 1-coin
-// gift pays the creator (1 coin) instead of rounding down to 0 — into
-// their normal coin balance; the platform keeps the remaining 30%,
-// recorded in the DB (gift_events.platform_share +
-// live_sessions.platform_cut_coins) and credited nowhere. Rounding never
-// credits more than the gift price, so the house can never lose money
-// on a gift.
+// Revenue split (owner-set, 2026-10-25 — supersedes the old rounding
+// rule): the broadcaster (creator) receives EXACTLY 70% of the gift
+// price and the platform keeps EXACTLY 30%, including a 1-coin gift
+// (0.7 creator / 0.3 platform). Coin balances are integers, so the
+// fractional part is NOT paid out immediately: it is carried per
+// creator in milli-coins (1 coin = 1000 milli, integer arithmetic
+// only, no floats for money — see giftSplit + users.gift_earned_milli
+// in actions.mjs). Whole coins are credited only when the creator's
+// accumulated exact share reaches a full coin, so over many gifts the
+// credited total converges to exactly 70% and can never exceed the
+// gift total: the house can never lose money on a gift. The platform
+// share is recorded in the DB (gift_events.*_share_milli +
+// live_sessions.platform_cut_milli) and credited nowhere.
 export const GIFT_CATALOG = [
   { key: "rose", name: "Rose", emoji: "🌹", coins: 1 },
   { key: "chocolate", name: "Chocolate", emoji: "🍫", coins: 25 },
@@ -161,13 +166,41 @@ export function giftForKey(key) {
   return GIFT_CATALOG.find((g) => g.key === key) ?? null;
 }
 
-// Splits a gift's price: creator gets 70% (rounded to the nearest whole
-// coin), platform keeps the rest (so 25 → creator 18, platform 7, and a
-// 1-coin gift → creator 1, platform 0 — the creator always receives
-// something, even for the smallest gift).
+// Splits a gift's price EXACTLY, in milli-coins (integer arithmetic
+// only): creator gets coins * 700 milli (70%), platform gets
+// coins * 300 milli (30%). So 1 → 700/300, 25 → 17500/7500,
+// 100 → 70000/30000. The two milli shares always sum to
+// coins * 1000, i.e. exactly the gift price — nothing is created
+// or lost by the split itself.
+//
+// `creatorShare` / `platformShare` are NOT in this return value on
+// purpose: a whole-coin share for a single gift does not exist under
+// the exact rule (0.7 of a coin cannot be credited), so callers must
+// use the carry in sendGift (actions.mjs) and report both the exact
+// share and the whole coins actually credited for that gift.
 export function giftSplit(coins) {
-  const creatorShare = Math.round(coins * 0.7);
-  return { creatorShare, platformShare: coins - creatorShare };
+  const price = Math.trunc(Number(coins));
+  return {
+    creatorShareMilli: price * 700,
+    platformShareMilli: price * 300,
+    creatorShareExact: formatMilli(price * 700),
+    platformShareExact: formatMilli(price * 300),
+  };
+}
+
+// Formats an integer milli-coin amount as a short decimal string
+// ("0.7", "17.5", "70", "0.3") — no floats, no rounding surprises.
+// Milli amounts here are always multiples of 100 (70/30 of whole
+// coins), so at most one decimal place is ever needed, but the
+// formatter is exact for any milli value.
+export function formatMilli(milli) {
+  const value = Math.trunc(Number(milli));
+  const sign = value < 0 ? "-" : "";
+  const abs = Math.abs(value);
+  const whole = Math.trunc(abs / 1000);
+  const rem = abs % 1000;
+  if (rem === 0) return `${sign}${whole}`;
+  return `${sign}${whole}.${String(rem).padStart(3, "0").replace(/0+$/, "")}`;
 }
 
 // ---- Live PK matches ----------------------------------------------------------

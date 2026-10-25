@@ -436,27 +436,27 @@ check(
 const totals1 = await dbOne("SELECT total_gift_coins, platform_cut_coins FROM live_sessions WHERE id = ?", [sid]);
 check("session totals after 100 gift", totals1?.total_gift_coins === 100 && totals1?.platform_cut_coins === 30, JSON.stringify(totals1));
 
-// Odd price: chocolate 25 -> creator 18 (70% rounded), platform 7.
+// Exact split (owner rule 2026-10-25): chocolate 25 -> creator 17.5 exact / 7.5 platform, 17 whole coins credited (0.5 pending).
 const gift25 = await api("sendGift", { token: viewerToken, live_session_id: sid, gift_key: "chocolate" });
 check("chocolate (25) sent", gift25.ok === true, JSON.stringify(gift25).slice(0, 160));
-check("odd split 25 → 18/7", gift25.creator_share === 18 && gift25.platform_share === 7, JSON.stringify(gift25));
+check("odd split 25 → 17.5/7.5 exact, 17 credited", gift25.creator_share === 17 && gift25.creator_share_exact === "17.5" && gift25.platform_share_exact === "7.5", JSON.stringify(gift25));
 const creatorAfter25 = (await api("getMe", { token: creatorToken })).user.coin_balance;
-check("broadcaster credited +18", creatorAfter25 === creatorAfter100 + 18, `after=${creatorAfter25}`);
+check("broadcaster credited +17", creatorAfter25 === creatorAfter100 + 17, `after=${creatorAfter25}`);
 const ev25 = await dbOne("SELECT * FROM gift_events WHERE live_session_id = ? AND gift_key = 'chocolate'", [sid]);
-check("gift_events row: 25 = 18 + 7", ev25 && ev25.creator_share === 18 && ev25.platform_share === 7, JSON.stringify(ev25));
+check("gift_events row: 25 = 17.5 + 7.5 exact, 17 credited", ev25 && ev25.creator_share_milli === 17500 && ev25.platform_share_milli === 7500 && ev25.creator_credited_coins === 17, JSON.stringify(ev25));
 const totals2 = await dbOne("SELECT total_gift_coins, platform_cut_coins FROM live_sessions WHERE id = ?", [sid]);
 check("session totals after both gifts (125 / 37)", totals2?.total_gift_coins === 125 && totals2?.platform_cut_coins === 37, JSON.stringify(totals2));
 
 // Owner sees the recorded platform take.
 const adminView = await api("getAdminCoinRequests", { token: adminToken });
-check("admin view reports platform gift earnings (37)", adminView.platform_gift_coins === 37, `got=${adminView.platform_gift_coins}`);
+check("admin view reports platform gift earnings exact (37.5)", adminView.platform_gift_coins === 37.5 && adminView.platform_gift_exact === "37.5", `got=${adminView.platform_gift_coins}`);
 
 // ---- Gift earnings history (creator + platform) ----------------------------------
 const earnings = await api("getGiftEarnings", { token: creatorToken });
-check("gift earnings totals (88 earned of 125 gross, 2 gifts)", earnings.total_earned === 88 && earnings.total_gift_coins === 125 && earnings.gift_count === 2, JSON.stringify(earnings).slice(0, 200));
+check("gift earnings totals (87 credited / 87.5 exact of 125 gross, 2 gifts)", earnings.total_earned === 87 && earnings.total_earned_exact === "87.5" && earnings.total_gift_coins === 125 && earnings.gift_count === 2, JSON.stringify(earnings).slice(0, 200));
 check(
   "gift earnings list newest-first with sender + 70% shares",
-  earnings.earnings?.length === 2 && earnings.earnings[0].creator_share === 18 && earnings.earnings[1].creator_share === 70 && earnings.earnings[0].sender?.username === viewer.user.username,
+  earnings.earnings?.length === 2 && earnings.earnings[0].creator_share === 17 && earnings.earnings[1].creator_share === 70 && earnings.earnings[0].sender?.username === viewer.user.username,
   JSON.stringify(earnings.earnings).slice(0, 200),
 );
 check(
@@ -1341,7 +1341,7 @@ try {
   const giftAtHost = await bh.waitFor((m) => m.type === "gift" && m.gift?.key === "chocolate", 8000, "gift broadcast at broad host");
   check("gift broadcast reaches the broad room (animation rides it)", Boolean(giftAtHost));
   const hostAfter = (await api("getMe", { token: bHost.token })).user.coin_balance;
-  check("broad host earns the 70% creator share (25 -> 18)", hostAfter - hostBefore === 18, `${hostBefore} -> ${hostAfter}`);
+  check("broad host earns the 70% creator share exact (25 -> 17.5, 17 credited)", hostAfter - hostBefore === 17, `${hostBefore} -> ${hostAfter}`);
 
   // ---- jsdom: listener side — badge, stage, follow, seat via CTA ----
   try {

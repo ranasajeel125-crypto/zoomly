@@ -18,6 +18,7 @@ import {
   REFERRAL_REWARD_COINS,
   REPORT_AUTOHIDE_THRESHOLD,
   findBannedContent,
+  formatMilli,
   giftForKey,
   giftSplit,
   isAdminUser,
@@ -438,7 +439,10 @@ function liveSessionDto(session, broadcaster) {
     peak_viewers: session.peakViewers,
     total_gift_coins: session.totalGiftCoins,
     platform_cut_coins: session.platformCutCoins,
-    creator_earned_coins: session.totalGiftCoins - session.platformCutCoins,
+    platform_cut_milli: session.platformCutMilli ?? session.platformCutCoins * 1000,
+    platform_cut_exact: formatMilli(session.platformCutMilli ?? session.platformCutCoins * 1000),
+    creator_earned_coins: session.creatorCreditedCoins ?? session.totalGiftCoins - session.platformCutCoins,
+    creator_credited_coins: session.creatorCreditedCoins ?? session.totalGiftCoins - session.platformCutCoins,
     broadcaster: broadcaster ? authorDto(broadcaster) : null,
   };
 }
@@ -1254,7 +1258,9 @@ export const Actions = {
     const rows = await db.select().from(schema.giftEvents).where(eq(schema.giftEvents.creatorId, user.id)).orderBy(desc(schema.giftEvents.createdAt)).limit(50);
     const totals = await db
       .select({
-        earned: sql`coalesce(sum(${schema.giftEvents.creatorShare}), 0)`.mapWith(Number),
+        earned: sql`coalesce(sum(${schema.giftEvents.creatorCreditedCoins}), 0)`.mapWith(Number),
+        earnedMilli: sql`coalesce(sum(${schema.giftEvents.creatorShareMilli}), 0)`.mapWith(Number),
+        platformMilli: sql`coalesce(sum(${schema.giftEvents.platformShareMilli}), 0)`.mapWith(Number),
         gross: sql`coalesce(sum(${schema.giftEvents.coins}), 0)`.mapWith(Number),
         count: sql`count(*)`.mapWith(Number),
       })
@@ -1263,9 +1269,21 @@ export const Actions = {
     const senderIds = [...new Set(rows.map((r) => r.senderId))];
     const senders = senderIds.length ? await db.select().from(schema.users).where(inArray(schema.users.id, senderIds)) : [];
     const senderMap = new Map(senders.map((s) => [s.id, s]));
+    const earnedMilli = totals[0]?.earnedMilli ?? 0;
+    const creatorRow = (await db.select({ giftEarnedMilli: schema.users.giftEarnedMilli }).from(schema.users).where(eq(schema.users.id, user.id)).limit(1))[0];
     return {
       ok: true,
+      // total_earned = whole coins actually credited to the balance
+      // (sum of creatorCreditedCoins). total_earned_exact is the exact
+      // 70% share accrued; the difference is the pending fraction
+      // (creator_pending_milli), credited when it reaches a full coin.
       total_earned: totals[0]?.earned ?? 0,
+      total_earned_milli: earnedMilli,
+      total_earned_exact: formatMilli(earnedMilli),
+      creator_pending_milli: creatorRow ? creatorRow.giftEarnedMilli % 1000 : 0,
+      creator_pending_exact: formatMilli(creatorRow ? creatorRow.giftEarnedMilli % 1000 : 0),
+      total_platform_milli: totals[0]?.platformMilli ?? 0,
+      total_platform_exact: formatMilli(totals[0]?.platformMilli ?? 0),
       total_gift_coins: totals[0]?.gross ?? 0,
       gift_count: totals[0]?.count ?? 0,
       earnings: rows.map((r) => {
@@ -1276,8 +1294,13 @@ export const Actions = {
           gift_name: gift?.name ?? r.giftKey,
           gift_emoji: gift?.emoji ?? "🎁",
           coins: r.coins,
-          creator_share: r.creatorShare,
-          platform_share: r.platformShare,
+          creator_share: r.creatorCreditedCoins ?? r.creatorShare,
+          platform_share: Math.trunc((r.platformShareMilli ?? r.platformShare * 1000) / 1000),
+          creator_share_milli: r.creatorShareMilli ?? r.creatorShare * 1000,
+          platform_share_milli: r.platformShareMilli ?? r.platformShare * 1000,
+          creator_share_exact: formatMilli(r.creatorShareMilli ?? r.creatorShare * 1000),
+          platform_share_exact: formatMilli(r.platformShareMilli ?? r.platformShare * 1000),
+          creator_credited_coins: r.creatorCreditedCoins ?? r.creatorShare,
           created_at: r.createdAt.getTime(),
           sender: senderMap.has(r.senderId) ? authorDto(senderMap.get(r.senderId)) : null,
         };
@@ -1381,8 +1404,11 @@ export const Actions = {
           duration_seconds: Math.max(0, Math.round(((final.endedAt?.getTime() ?? Date.now()) - final.startedAt.getTime()) / 1000)),
           peak_viewers: final.peakViewers,
           total_gift_coins: final.totalGiftCoins,
-          creator_earned_coins: final.totalGiftCoins - final.platformCutCoins,
+          creator_earned_coins: final.creatorCreditedCoins ?? final.totalGiftCoins - final.platformCutCoins,
+          creator_credited_coins: final.creatorCreditedCoins ?? final.totalGiftCoins - final.platformCutCoins,
           platform_cut_coins: final.platformCutCoins,
+          platform_cut_milli: final.platformCutMilli ?? final.platformCutCoins * 1000,
+          platform_cut_exact: formatMilli(final.platformCutMilli ?? final.platformCutCoins * 1000),
         },
       };
     }
@@ -1471,49 +1497,100 @@ export const Actions = {
       if (await blockExistsBetween(user.id, session.userId)) return { ok: false, message: "You can't send gifts on this live." };
       if (session.userId === user.id) return { ok: false, message: "You cannot send a gift to your own live." };
 
-      // Atomic, balance-guarded deduct: the WHERE clause makes the spend
-      // fail cleanly instead of overdrawing if the balance moved since the
-      // last read (double-tap, two tabs, ...).
-      const deducted = await db
-        .update(schema.users)
-        .set({ coinBalance: sql`${schema.users.coinBalance} - ${gift.coins}` })
-        .where(and(eq(schema.users.id, user.id), gte(schema.users.coinBalance, gift.coins)))
-        .returning({ coinBalance: schema.users.coinBalance });
-      if (deducted.length === 0) {
-        const fresh = (await db.select({ coinBalance: schema.users.coinBalance }).from(schema.users).where(eq(schema.users.id, user.id)).limit(1))[0];
-        return {
-          ok: false,
-          message: `Not enough coins — this gift costs ${gift.coins} coins and you have ${fresh?.coinBalance ?? 0}. Buy more coins from the Rewards + Monetization tab.`,
-          my_balance: fresh?.coinBalance ?? 0,
-        };
-      }
-      const myBalance = deducted[0].coinBalance;
-      const { creatorShare, platformShare } = giftSplit(gift.coins);
+      // Exact 70/30 split with a fractional carry (owner rule
+      // 2026-10-25). ALL money moves happen inside ONE transaction,
+      // so a failed gift changes nothing and a successful one can
+      // never credit more than the gift price:
+      //   1. Sender deduct, balance-guarded (fails cleanly instead of
+      //      overdrawing if the balance moved since the last read).
+      //   2. Creator credit, computed ATOMICALLY in SQL from the old
+      //      cumulative value: the SET expressions all read the
+      //      pre-update row, so concurrent gifts cannot double-credit
+      //      the same fraction. credit = floor((cum + exact) / 1000)
+      //      - floor(cum / 1000), where cum is the creator's
+      //      lifetime exact share in milli-coins. The RETURNING
+      //      clause gives cum-after, from which the credit is derived
+      //      exactly (cum-before = cum-after - exact), whatever other
+      //      gifts interleaved around this transaction.
+      //   3. Gift event (exact milli shares + whole coins credited)
+      //      and session totals, in the same transaction.
+      // Invariant: total whole coins credited to a creator over time
+      // = floor((backfilled legacy total + sum of new exact shares)
+      // / 1000), which is <= legacy credited + new exact / 1000 —
+      // i.e. new gifts never credit more than their exact 70%.
+      const split = giftSplit(gift.coins);
+      let myBalance;
+      let creatorCredited;
+      let creatorPendingMilli;
       try {
-        await db.batch([
-          db.update(schema.users).set({ coinBalance: sql`${schema.users.coinBalance} + ${creatorShare}` }).where(eq(schema.users.id, session.userId)),
-          db.insert(schema.giftEvents).values({
+        const result = await db.transaction(async (tx) => {
+          const deducted = await tx
+            .update(schema.users)
+            .set({ coinBalance: sql`${schema.users.coinBalance} - ${gift.coins}` })
+            .where(and(eq(schema.users.id, user.id), gte(schema.users.coinBalance, gift.coins)))
+            .returning({ coinBalance: schema.users.coinBalance });
+          if (deducted.length === 0) return { insufficient: true };
+          const creditedRows = await tx
+            .update(schema.users)
+            .set({
+              // CAST to INTEGER is load-bearing, not cosmetic: the
+              // libsql driver binds JS numbers as REAL, so without it
+              // (cum + X) / 1000 would be REAL division and leak
+              // fractions (0.7, 1.4, ...) into the INTEGER
+              // coin_balance column. CAST truncates toward zero, which
+              // for these non-negative amounts is floor division, and
+              // keeps every credited amount a whole coin.
+              coinBalance: sql`${schema.users.coinBalance} + (CAST((${schema.users.giftEarnedMilli} + ${split.creatorShareMilli}) / 1000 AS INTEGER) - CAST(${schema.users.giftEarnedMilli} / 1000 AS INTEGER))`,
+              giftEarnedMilli: sql`CAST(${schema.users.giftEarnedMilli} + ${split.creatorShareMilli} AS INTEGER)`,
+            })
+            .where(eq(schema.users.id, session.userId))
+            .returning({ giftEarnedMilli: schema.users.giftEarnedMilli });
+          if (creditedRows.length === 0) throw new Error("creator not found");
+          const cumAfter = creditedRows[0].giftEarnedMilli;
+          const cumBefore = cumAfter - split.creatorShareMilli;
+          const credited = Math.trunc(cumAfter / 1000) - Math.trunc(cumBefore / 1000);
+          await tx.insert(schema.giftEvents).values({
             liveSessionId: session.id,
             senderId: user.id,
             creatorId: session.userId,
             giftKey: gift.key,
             coins: gift.coins,
-            creatorShare,
-            platformShare,
-          }),
-          db
+            // Legacy integer columns: credited whole coins, and the
+            // floored platform share (exact figures are the milli
+            // columns — see schema.mjs).
+            creatorShare: credited,
+            platformShare: Math.trunc(split.platformShareMilli / 1000),
+            creatorShareMilli: split.creatorShareMilli,
+            platformShareMilli: split.platformShareMilli,
+            creatorCreditedCoins: credited,
+          });
+          await tx
             .update(schema.liveSessions)
             .set({
               totalGiftCoins: sql`${schema.liveSessions.totalGiftCoins} + ${gift.coins}`,
-              platformCutCoins: sql`${schema.liveSessions.platformCutCoins} + ${platformShare}`,
+              platformCutCoins: sql`${schema.liveSessions.platformCutCoins} + ${Math.trunc(split.platformShareMilli / 1000)}`,
+              platformCutMilli: sql`CAST(${schema.liveSessions.platformCutMilli} + ${split.platformShareMilli} AS INTEGER)`,
+              creatorCreditedCoins: sql`CAST(${schema.liveSessions.creatorCreditedCoins} + ${credited} AS INTEGER)`,
             })
-            .where(eq(schema.liveSessions.id, session.id)),
-        ]);
+            .where(eq(schema.liveSessions.id, session.id));
+          return { insufficient: false, myBalance: deducted[0].coinBalance, credited, pendingMilli: cumAfter % 1000 };
+        });
+        if (result.insufficient) {
+          const fresh = (await db.select({ coinBalance: schema.users.coinBalance }).from(schema.users).where(eq(schema.users.id, user.id)).limit(1))[0];
+          return {
+            ok: false,
+            message: `Not enough coins — this gift costs ${gift.coins} coins and you have ${fresh?.coinBalance ?? 0}. Buy more coins from the Rewards + Monetization tab.`,
+            my_balance: fresh?.coinBalance ?? 0,
+          };
+        }
+        myBalance = result.myBalance;
+        creatorCredited = result.credited;
+        creatorPendingMilli = result.pendingMilli;
       } catch (err) {
-        // The credit side failed after the deduct — refund the sender so a
-        // failed gift never costs anyone coins.
-        console.error("[api] sendGift credit failed, refunding sender:", err?.message || err);
-        await db.update(schema.users).set({ coinBalance: sql`${schema.users.coinBalance} + ${gift.coins}` }).where(eq(schema.users.id, user.id));
+        // The transaction rolled back, so the sender was NOT charged —
+        // no refund is needed (unlike the old batch code, where the
+        // deduct sat outside the batch).
+        console.error("[api] sendGift failed, nothing charged:", err?.message || err);
         return { ok: false, message: "The gift could not be sent. Your coins were not deducted — please try again." };
       }
 
@@ -1522,17 +1599,36 @@ export const Actions = {
         name: gift.name,
         emoji: gift.emoji,
         coins: gift.coins,
-        creator_share: creatorShare,
-        platform_share: platformShare,
+        // Legacy integer fields = whole coins credited / floored cut.
+        creator_share: creatorCredited,
+        platform_share: Math.trunc(split.platformShareMilli / 1000),
+        // Exact figures (new): always present so clients and tests
+        // never have to guess the split from the legacy integers.
+        creator_share_milli: split.creatorShareMilli,
+        platform_share_milli: split.platformShareMilli,
+        creator_share_exact: split.creatorShareExact,
+        platform_share_exact: split.platformShareExact,
+        creator_credited_coins: creatorCredited,
+        creator_pending_milli: creatorPendingMilli,
+        creator_pending_exact: formatMilli(creatorPendingMilli),
       };
       broadcastGift(session.id, { from: authorDto(user), gift: giftPayload, created_at: Date.now() });
+      // Honest notification: the exact share first, and — only when
+      // it differs — the whole coins actually credited now plus the
+      // fraction still pending. A 100-coin gift reads simply
+      // "you received 70 coins"; a 1-coin rose reads "you earned
+      // 0.7 coins (0 whole coins credited yet, 0.7 pending)".
+      const notifyText =
+        creatorCredited === split.creatorShareMilli / 1000 && creatorPendingMilli === 0
+          ? `@${user.username} sent you ${gift.emoji} ${gift.name} — you received ${creatorCredited} coins 🎁`
+          : `@${user.username} sent you ${gift.emoji} ${gift.name} — you earned ${split.creatorShareExact} coins (${creatorCredited} whole coins credited now, ${formatMilli(creatorPendingMilli)} pending in total) 🎁`;
       await notify({
         userId: session.userId,
         type: "gift",
         actorId: user.id,
         liveSessionId: session.id,
-        coins: creatorShare,
-        text: `@${user.username} sent you ${gift.emoji} ${gift.name} — you received ${creatorShare} coins 🎁`,
+        coins: creatorCredited,
+        text: notifyText,
       });
       // If this live is in a PK match, the gift's full value scores for
       // the broadcaster's side (balances above used the 70/30 split).
@@ -1541,8 +1637,15 @@ export const Actions = {
         ok: true,
         message: `You sent ${gift.emoji} ${gift.name} (${gift.coins} coins)!`,
         gift: giftPayload,
-        creator_share: creatorShare,
-        platform_share: platformShare,
+        creator_share: creatorCredited,
+        platform_share: Math.trunc(split.platformShareMilli / 1000),
+        creator_share_milli: split.creatorShareMilli,
+        platform_share_milli: split.platformShareMilli,
+        creator_share_exact: split.creatorShareExact,
+        platform_share_exact: split.platformShareExact,
+        creator_credited_coins: creatorCredited,
+        creator_pending_milli: creatorPendingMilli,
+        creator_pending_exact: formatMilli(creatorPendingMilli),
         my_balance: myBalance,
       };
     }
@@ -1562,8 +1665,13 @@ export const Actions = {
       .limit(100);
     // Total platform cut from LIVE gifts (recorded in gift_events; the
     // coins themselves are credited nowhere — this is the owner's tally).
+    // Exact total in milli-coins; the legacy integer total is kept
+    // alongside for any caller that still sums platform_share.
     const giftTotals = await db
-      .select({ total: sql`coalesce(sum(${schema.giftEvents.platformShare}), 0)`.mapWith(Number) })
+      .select({
+        totalMilli: sql`coalesce(sum(${schema.giftEvents.platformShareMilli}), 0)`.mapWith(Number),
+        total: sql`coalesce(sum(${schema.giftEvents.platformShare}), 0)`.mapWith(Number),
+      })
       .from(schema.giftEvents);
     // Withdrawal requests (coins already held at submission). Approving
     // only marks the payout the owner then sends manually via JazzCash;
@@ -1581,7 +1689,9 @@ export const Actions = {
     const giftUserMap = new Map(giftUsers.map((u) => [u.id, u]));
     return {
       ok: true,
-      platform_gift_coins: giftTotals[0]?.total ?? 0,
+      platform_gift_coins: giftTotals[0]?.totalMilli != null ? giftTotals[0].totalMilli / 1000 : (giftTotals[0]?.total ?? 0),
+      platform_gift_milli: giftTotals[0]?.totalMilli ?? 0,
+      platform_gift_exact: formatMilli(giftTotals[0]?.totalMilli ?? 0),
       requests: rows.map((r) => ({
         id: r.request.id,
         pack_coins: r.request.packCoins,
@@ -1601,8 +1711,13 @@ export const Actions = {
           gift_name: gift?.name ?? r.giftKey,
           gift_emoji: gift?.emoji ?? "🎁",
           coins: r.coins,
-          creator_share: r.creatorShare,
-          platform_share: r.platformShare,
+          creator_share: r.creatorCreditedCoins ?? r.creatorShare,
+          platform_share: Math.trunc((r.platformShareMilli ?? r.platformShare * 1000) / 1000),
+          creator_share_milli: r.creatorShareMilli ?? r.creatorShare * 1000,
+          platform_share_milli: r.platformShareMilli ?? r.platformShare * 1000,
+          creator_share_exact: formatMilli(r.creatorShareMilli ?? r.creatorShare * 1000),
+          platform_share_exact: formatMilli(r.platformShareMilli ?? r.platformShare * 1000),
+          creator_credited_coins: r.creatorCreditedCoins ?? r.creatorShare,
           created_at: r.createdAt.getTime(),
           sender: giftUserMap.has(r.senderId) ? authorDto(giftUserMap.get(r.senderId)) : null,
           creator: giftUserMap.has(r.creatorId) ? authorDto(giftUserMap.get(r.creatorId)) : null,
