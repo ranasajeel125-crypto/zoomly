@@ -1072,7 +1072,10 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
         ref={videoRef}
         src={post.video_url}
         poster={post.thumbnail_url || undefined}
-        style={{ width: "100%", height: "100%", objectFit: "cover", background: "var(--bg)" }}
+        // User order 2026-10-26: original aspect ratio, NEVER cropped —
+        // this overrides the earlier Section 71 center-crop rule.
+        // contain letterboxes landscape/portrait videos with old-bg bars.
+        style={{ width: "100%", height: "100%", objectFit: "contain", background: "var(--bg)" }}
         loop
         muted={muted}
         playsInline
@@ -1248,13 +1251,11 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
           )}
         </div>
       </div>
-      {/* Full-width bottom scrim (separate layer, pointer-transparent):
-          fades smoothly upward into the video with NO box around the
-          text and NO sharp vertical edge — the old caption container
-          ended at right:84 with its own gradient, which drew a hard
-          dark vertical edge mid-video and dark boxes beside the lines. */}
-      <div aria-hidden="true" style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 260, background: "linear-gradient(to top, rgba(10,15,13,0.82) 0%, rgba(10,15,13,0.5) 45%, rgba(10,15,13,0) 100%)", zIndex: 1, pointerEvents: "none" }} />
-      <div style={{ position: "absolute", left: 0, right: 84, bottom: 86, color: "#fff", textShadow: "0 1px 6px rgba(0,0,0,0.8)", padding: "6px 12px", zIndex: 2 }}>
+      {/* NO caption scrim, NO text-shadow — user order 2026-10-26:
+          the dark gradient/shadow beside the caption text is removed
+          entirely, by the user's explicit choice. Plain text on the
+          video only; do NOT reintroduce a scrim in another form. */}
+      <div style={{ position: "absolute", left: 0, right: 84, bottom: 8, color: "#fff", textShadow: "none", padding: "6px 12px", zIndex: 2 }}>
         <button onClick={() => onOpenProfile(post.author.id)} style={{ background: "none", border: "none", color: "#fff", padding: 0, fontWeight: 800, fontSize: 16 }}>
           @{post.author?.username}
         </button>{" "}
