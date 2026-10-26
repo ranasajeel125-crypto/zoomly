@@ -501,6 +501,15 @@ export function SettingsView({ me, onClose, onLogout, refreshMe }) {
           <Toggle checked={largeText} onChange={(v) => applyLocal({ largeText: v })} label="Large text" />
         </div>
 
+        <h3>Metrics &amp; data</h3>
+        <div className="settings-row">
+          <span>
+            <strong>Anonymous app metrics</strong>
+            <span style={{ display: "block", color: "var(--dim)", fontSize: 13 }}>Aggregate only (load time, playback failures, upload success, API latency, startup). Never message bodies, titles, passwords or private data. Off = nothing is sent.</span>
+          </span>
+          <Toggle checked={!getPrefs().metrics_opt_out} onChange={(v) => savePrefs({ metrics_opt_out: !v })} label="Anonymous app metrics" />
+        </div>
+
         <h3>Privacy</h3>
         <div className="settings-row">
           <span>

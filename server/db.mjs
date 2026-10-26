@@ -312,4 +312,28 @@ export async function initDb() {
       "UPDATE users SET gift_earned_milli = (SELECT COALESCE(SUM(creator_share), 0) * 1000 FROM gift_events WHERE gift_events.creator_id = users.id)",
     );
   }
+  // Phase 2 tables (2026-10-26): CREATE TABLE IF NOT EXISTS — additive only, existing rows untouched.
+  await client.execute(`CREATE TABLE IF NOT EXISTS post_events (id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, event TEXT NOT NULL, duration_ms INTEGER NOT NULL DEFAULT 0, watch_ms INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS post_shares (id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, UNIQUE(post_id, user_id))`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS hidden_for_viewer (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, scope TEXT NOT NULL, target_id INTEGER NOT NULL, created_at INTEGER NOT NULL, UNIQUE(user_id, scope, target_id))`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS saved_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, UNIQUE(user_id, post_id))`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS muted_users (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, muted_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, UNIQUE(user_id, muted_id))`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS comment_keywords (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, keyword TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(user_id, keyword))`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS moderation_appeals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, target_type TEXT NOT NULL, target_id INTEGER NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', decided_by INTEGER REFERENCES users(id), decided_at INTEGER, created_at INTEGER NOT NULL)`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS admin_audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, action TEXT NOT NULL, target_type TEXT NOT NULL, target_id INTEGER NOT NULL, details TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL)`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS playlists (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, created_at INTEGER NOT NULL)`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS playlist_items (id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE, post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, UNIQUE(playlist_id, post_id))`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS user_interests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, tag TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(user_id, tag))`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS client_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER REFERENCES users(id) ON DELETE SET NULL, kind TEXT NOT NULL, value_ms INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)`);
+  const _p2post = await client.execute("PRAGMA table_info(posts)"); const _p2pn = new Set(_p2post.rows.map((r) => r.name));
+  if (!_p2pn.has("comments_allowed")) await client.execute("ALTER TABLE posts ADD COLUMN comments_allowed INTEGER NOT NULL DEFAULT 1");
+  if (!_p2pn.has("duet_allowed")) await client.execute("ALTER TABLE posts ADD COLUMN duet_allowed INTEGER NOT NULL DEFAULT 1");
+  const _liveCols2 = await client.execute("PRAGMA table_info(live_sessions)"); const _liveNames = new Set(_liveCols2.rows.map((r) => r.name));
+  if (!_liveNames.has("category")) await client.execute("ALTER TABLE live_sessions ADD COLUMN category TEXT NOT NULL DEFAULT ''");
+  if (!_liveNames.has("cover_url")) await client.execute("ALTER TABLE live_sessions ADD COLUMN cover_url TEXT");
+  if (!_liveNames.has("audience")) await client.execute("ALTER TABLE live_sessions ADD COLUMN audience TEXT NOT NULL DEFAULT 'everyone'");
+  const _p2com = await client.execute("PRAGMA table_info(comments)"); const _p2cn = new Set(_p2com.rows.map((r) => r.name));
+  if (!_p2cn.has("pinned")) await client.execute("ALTER TABLE comments ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
+
+
 }

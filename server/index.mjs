@@ -144,6 +144,8 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
     const me = await Actions.getMe({ token });
     if (!me.ok) return res.status(401).json({ ok: false, message: "Please sign in." });
     if (!req.file) return res.status(400).json({ ok: false, message: "No file was uploaded." });
+    if (kind === "video" && !(req.file.mimetype || "").startsWith("video/")) return res.status(400).json({ ok: false, message: "That file is not a video. Please choose a video file." });
+    if (kind === "image" && !(req.file.mimetype || "").startsWith("image/")) return res.status(400).json({ ok: false, message: "That file is not an image. Please choose an image file." });
     if (kind === "image" && req.file.size > 10 * 1024 * 1024) {
       return res.status(400).json({ ok: false, message: "Profile photo must be under 10 MB." });
     }

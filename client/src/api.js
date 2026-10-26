@@ -27,6 +27,11 @@ const READ_ACTIONS = new Set([
   "getAdminMonetizationApplications",
   "listLive",
   "getLive",
+  "getLikedPosts", "getRankedFeed", "getTrending", "getByHashtag", "getSounds", "getSoundVideos",
+  "getSavedPosts", "getHiddenItems", "getMutedUsers", "getCommentKeywords", "getInterests",
+  "getCreatorAnalytics", "exportMyData", "getFollowRecommendations", "getFollowersList",
+  "getFollowingList", "listPlaylists", "getPlaylist", "getMyAppeals", "getMyNotices",
+  "getAppeals", "getAdminOverview", "getPublicFeed",
 ]);
 
 const RETRYABLE_STATUSES = new Set([502, 503, 504]);
@@ -174,14 +179,14 @@ export async function call(action, args = {}) {
 
 // Upload a media file (kind: "video" | "image"). Returns the server's JSON:
 // { ok, url, public_id, thumbnail_url } or { ok:false, message }.
-export async function uploadMedia(file, kind) {
+export async function uploadMedia(file, kind, signal) {
   const form = new FormData();
   form.append("token", getToken());
   form.append("kind", kind);
   form.append("file", file);
   let res;
   try {
-    res = await fetch("/api/upload", { method: "POST", body: form });
+    res = await fetch("/api/upload", { method: "POST", body: form, signal });
   } catch {
     return { ok: false, message: "Upload failed — network error. Please try again." };
   }

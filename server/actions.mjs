@@ -3,7 +3,7 @@
 // Mirrors the SMM panel's conventions: zod validation, PBKDF2 password
 // hashes, SHA-256-hashed session tokens stored in the DB.
 import { z } from "zod";
-import { and, desc, eq, gte, inArray, isNull, like, lt, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNull, like, lt, ne, notInArray, or, sql } from "drizzle-orm";
 import { db } from "./db.mjs";
 import * as schema from "./schema.mjs";
 import {
@@ -433,6 +433,9 @@ function liveSessionDto(session, broadcaster) {
     user_id: session.userId,
     title: session.title,
     kind: session.kind || "video",
+    category: session.category ?? "",
+    cover_url: session.coverUrl ?? null,
+    audience: session.audience ?? "everyone",
     started_at: session.startedAt.getTime(),
     ended_at: session.endedAt ? session.endedAt.getTime() : null,
     is_live: !session.endedAt,
@@ -620,6 +623,36 @@ const usernameRule = z
   .max(24)
   .regex(/^[a-zA-Z0-9_]+$/, "Username can only use letters, numbers and underscores.");
 
+
+// ---- Phase 2 helpers ----
+const _rateMap = new Map();
+function checkRateLimit(userId, key, limit, windowMs) {
+  const now = Date.now(); const k = `${userId}:${key}`;
+  const arr = (_rateMap.get(k) ?? []).filter((t) => now - t < windowMs);
+  if (arr.length >= limit) { _rateMap.set(k, arr); return false; }
+  arr.push(now); _rateMap.set(k, arr); return true;
+}
+async function logAdmin(adminId, action, targetType, targetId, details) {
+  try { await db.insert(schema.adminAuditLog).values({ adminId, action, targetType, targetId, details: details ?? "" }); } catch (e) { console.error("[audit] failed", e?.message); }
+}
+async function mutedIdsFor(userId) {
+  const rows = await db.select({ mutedId: schema.mutedUsers.mutedId }).from(schema.mutedUsers).where(eq(schema.mutedUsers.userId, userId));
+  return new Set(rows.map((r) => r.mutedId));
+}
+async function hiddenForViewer(userId) {
+  const rows = await db.select().from(schema.hiddenForViewer).where(eq(schema.hiddenForViewer.userId, userId));
+  return { postIds: new Set(rows.filter((r) => r.scope === "post").map((r) => r.targetId)), creatorIds: new Set(rows.filter((r) => r.scope === "creator").map((r) => r.targetId)) };
+}
+async function viewerKeywords(userId) {
+  const rows = await db.select({ keyword: schema.commentKeywords.keyword }).from(schema.commentKeywords).where(eq(schema.commentKeywords.userId, userId));
+  return rows.map((r) => r.keyword.toLowerCase());
+}
+function extractTags(text) {
+  const out = new Set();
+  for (const m of String(text ?? "").match(/#[\p{L}\p{N}_]+/gu) || []) out.add(m.slice(1).toLowerCase());
+  return [...out];
+}
+
 export const Actions = {
   signup: withValidation(
     z.object({
@@ -630,6 +663,7 @@ export const Actions = {
       device_id: z.string().trim().max(64).optional(),
     }),
     async (args, rawArgs) => {
+      if (!checkRateLimit(`signup:${rawArgs?.__ip ?? "unknown"}`, "signup", 5, 60 * 60 * 1000)) return { ok: false, message: "Too many new accounts from this network — try again later." };
       const username = args.username.toLowerCase();
       if (args.display_name && findBannedContent(args.display_name)) {
         return { ok: false, message: "Is display name me aisi language allowed nahi hai — koi aur name choose karein." };
@@ -672,6 +706,7 @@ export const Actions = {
   login: withValidation(
     z.object({ username: z.string().trim().min(1).max(24), password: z.string().min(1).max(128) }),
     async (args) => {
+      if (!checkRateLimit(`login:${args.username.toLowerCase()}`, "login", 10, 15 * 60 * 1000)) return { ok: false, message: "Too many login attempts — wait 15 minutes, then try again. (Automated throttling never bans an account; only the owner can restrict one, after review.)" };
       const rows = await db.select().from(schema.users).where(eq(schema.users.username, args.username.toLowerCase())).limit(1);
       const user = rows[0];
       if (!user || !(await verifyPassword(args.password, user.passwordHash))) {
@@ -897,6 +932,7 @@ export const Actions = {
   toggleLike: withValidation(z.object({ token: tokenArg, post_id: z.number().int().positive() }), async (args) => {
     const user = await authUser(args.token);
     if (!user) return { ok: false, message: "Please sign in." };
+    if (!checkRateLimit(user.id, "like", 60, 60000)) return { ok: false, message: "Too many likes — please wait a moment." };
     const post = (await db.select({ id: schema.posts.id, userId: schema.posts.userId }).from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
     if (!post) return { ok: false, message: "Video not found." };
     const existing = await db.select({ id: schema.likes.id }).from(schema.likes).where(and(eq(schema.likes.userId, user.id), eq(schema.likes.postId, args.post_id))).limit(1);
@@ -919,6 +955,8 @@ export const Actions = {
     const user = await authUser(args.token);
     if (!user) return { ok: false, message: "Please sign in." };
     const blocked = await blockedIdsFor(user.id);
+    const muted = await mutedIdsFor(user.id);
+    const keywords = await viewerKeywords(user.id);
     const post = (await db.select().from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
     if (!post) return { ok: false, message: "Video not found." };
     const rows = await db
@@ -926,17 +964,18 @@ export const Actions = {
       .from(schema.comments)
       .innerJoin(schema.users, eq(schema.comments.userId, schema.users.id))
       .where(eq(schema.comments.postId, args.post_id))
-      .orderBy(schema.comments.createdAt);
+      .orderBy(desc(schema.comments.pinned), schema.comments.createdAt);
     return {
       ok: true,
       comments: rows
-        .filter((r) => !blocked.has(r.author.id))
+        .filter((r) => !blocked.has(r.author.id) && !muted.has(r.author.id) && !(r.author.id !== user.id && keywords.some((k) => r.comment.body.toLowerCase().includes(k))))
         .map((r) => ({
           id: r.comment.id,
           parent_id: r.comment.parentId ?? null,
           body: r.comment.body,
           created_at: r.comment.createdAt.getTime(),
           author: authorDto(r.author),
+          pinned: Boolean(r.comment.pinned),
           is_mine: r.author.id === user.id,
           can_delete: r.author.id === user.id || post.userId === user.id || isAdminUser(user),
         })),
@@ -996,12 +1035,16 @@ export const Actions = {
   addComment: withValidation(z.object({ token: tokenArg, post_id: z.number().int().positive(), body: z.string().trim().min(1).max(500), parent_id: z.number().int().positive().optional() }), async (args) => {
     const user = await authUser(args.token);
     if (!user) return { ok: false, message: "Please sign in." };
+    if (!checkRateLimit(user.id, "comment", 20, 60000)) return { ok: false, message: "Too many comments — please wait a moment." };
+    const recentDup = await db.select({ id: schema.comments.id }).from(schema.comments).where(and(eq(schema.comments.userId, user.id), eq(schema.comments.body, args.body.trim()), gt(schema.comments.createdAt, new Date(Date.now() - 60 * 1000)))).limit(1);
+    if (recentDup.length) return { ok: false, message: "Same comment dobara bhejna block hai (60 seconds). Kuch naya likhein." };
     if (findBannedContent(args.body)) {
       return { ok: false, message: "Comment me aisi language ya link allowed nahi hai — comment nahi bheja gaya." };
     }
     const post = (await db.select().from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
     if (!post) return { ok: false, message: "Video not found." };
     if (post.hidden && post.userId !== user.id) return { ok: false, message: "Video not found." };
+    if (post.commentsAllowed === 0 && post.userId !== user.id && !isAdminUser(user)) return { ok: false, message: "Comments are turned off for this video." };
     if (post.userId !== user.id && (await blockExistsBetween(user.id, post.userId))) {
       return { ok: false, message: "You can't comment on this video." };
     }
@@ -1113,6 +1156,7 @@ export const Actions = {
         blocked_by_me: blockedByMe,
         private_account: Boolean(target.privateAccount),
         private_locked: isPrivateLocked,
+        is_live: (await db.select({ id: schema.liveSessions.id }).from(schema.liveSessions).where(and(eq(schema.liveSessions.userId, target.id), isNull(schema.liveSessions.endedAt), eq(schema.liveSessions.hidden, 0))).limit(1)).length > 0,
       },
       posts: await postDtos(postRows, viewer),
       referrals,
@@ -1439,7 +1483,7 @@ export const Actions = {
   // to reuse the saved one. With neither, a default is used (and saved),
   // so going live never blocks on typing a title.
   startLive: withValidation(
-    z.object({ token: tokenArg, title: z.string().trim().max(120).optional(), kind: z.enum(["video", "broad"]).optional() }),
+    z.object({ token: tokenArg, title: z.string().trim().max(120).optional(), kind: z.enum(["video", "broad"]).optional(), category: z.string().trim().max(40).optional(), cover_url: z.string().url().max(2000).optional(), audience: z.enum(["everyone", "followers"]).optional() }),
     async (args) => {
       const user = await authUser(args.token);
       if (!user) return { ok: false, message: "Please sign in." };
@@ -1455,7 +1499,7 @@ export const Actions = {
         .from(schema.liveSessions)
         .where(and(eq(schema.liveSessions.userId, user.id), isNull(schema.liveSessions.endedAt)));
       for (const p of previous) await endLiveSession(p.id);
-      const inserted = await db.insert(schema.liveSessions).values({ userId: user.id, title, kind }).returning();
+      const inserted = await db.insert(schema.liveSessions).values({ userId: user.id, title, kind, category: (args.category ?? "").trim(), coverUrl: args.cover_url ?? null, audience: args.audience ?? "everyone" }).returning();
       const session = inserted[0];
       if (!session) return { ok: false, message: "Could not start the live. Please try again." };
       // Tell every follower the broadcaster went live (in-app only).
@@ -1537,9 +1581,23 @@ export const Actions = {
       // blocked broadcasters never reach this viewer.
       if (r.session.hidden && r.session.userId !== user.id) continue;
       if (blocked.has(r.session.userId)) continue;
+      if (r.session.audience === "followers" && r.session.userId !== user.id && !isAdminUser(user)) {
+        const followsBc = (await db.select({ id: schema.follows.id }).from(schema.follows).where(and(eq(schema.follows.followerId, user.id), eq(schema.follows.followeeId, r.session.userId))).limit(1)).length > 0;
+        if (!followsBc) continue;
+      }
       lives.push(liveSessionDto(r.session, r.broadcaster));
     }
     return { ok: true, lives };
+  }),
+
+  adminEndLive: withValidation(z.object({ token: tokenArg, live_session_id: z.number().int().positive() }), async (args) => {
+    const admin = await authUser(args.token);
+    if (!admin || !isAdminUser(admin)) return { ok: false, message: "Owner access required." };
+    const session = (await db.select().from(schema.liveSessions).where(eq(schema.liveSessions.id, args.live_session_id)).limit(1))[0];
+    if (!session || session.endedAt) return { ok: false, message: "Live session not found or already ended." };
+    await endLiveSession(session.id);
+    await logAdmin(admin.id, "end_live", "live", session.id, "owner terminated live session");
+    return { ok: true, message: "Live session ended by owner." };
   }),
 
   getLive: withValidation(
@@ -1963,12 +2021,13 @@ export const Actions = {
       token: tokenArg,
       target_type: z.enum(["post", "live", "comment", "user"]),
       target_id: z.number().int().positive(),
-      reason: z.enum(["spam", "abuse", "nudity", "violence", "other"]),
+      reason: z.enum(["spam", "abuse", "nudity", "violence", "other", "copyright"]),
       details: z.string().trim().max(500).optional(),
     }),
     async (args) => {
       const user = await authUser(args.token);
       if (!user) return { ok: false, message: "Please sign in." };
+    if (!checkRateLimit(user.id, "report", 10, 60000)) return { ok: false, message: "Too many reports — please wait a moment." };
       const target = await resolveReportTarget(args.target_type, args.target_id);
       if (!target) return { ok: false, message: "Content not found." };
       if (target.ownerId === user.id) return { ok: false, message: "You can't report your own content." };
@@ -2122,6 +2181,18 @@ export const Actions = {
     await db.delete(schema.messages).where(or(eq(schema.messages.senderId, user.id), eq(schema.messages.recipientId, user.id)));
     await db.delete(schema.storyViews).where(eq(schema.storyViews.viewerId, user.id));
     await db.delete(schema.stories).where(eq(schema.stories.userId, user.id));
+    await db.delete(schema.savedPosts).where(eq(schema.savedPosts.userId, user.id));
+    const myPlaylistIds = (await db.select({ id: schema.playlists.id }).from(schema.playlists).where(eq(schema.playlists.userId, user.id))).map((r) => r.id);
+    if (myPlaylistIds.length) await db.delete(schema.playlistItems).where(inArray(schema.playlistItems.playlistId, myPlaylistIds));
+    await db.delete(schema.playlists).where(eq(schema.playlists.userId, user.id));
+    await db.delete(schema.hiddenForViewer).where(eq(schema.hiddenForViewer.userId, user.id));
+    await db.delete(schema.mutedUsers).where(eq(schema.mutedUsers.userId, user.id));
+    await db.delete(schema.commentKeywords).where(eq(schema.commentKeywords.userId, user.id));
+    await db.delete(schema.userInterests).where(eq(schema.userInterests.userId, user.id));
+    await db.delete(schema.postEvents).where(eq(schema.postEvents.userId, user.id));
+    await db.delete(schema.postShares).where(eq(schema.postShares.userId, user.id));
+    await db.delete(schema.clientMetrics).where(eq(schema.clientMetrics.userId, user.id));
+    await db.delete(schema.moderationAppeals).where(eq(schema.moderationAppeals.userId, user.id));
     await db.delete(schema.coinRequests).where(eq(schema.coinRequests.userId, user.id));
     await db.delete(schema.withdrawalRequests).where(eq(schema.withdrawalRequests.userId, user.id));
     await db.delete(schema.monetizationApplications).where(eq(schema.monetizationApplications.userId, user.id));
@@ -2310,7 +2381,7 @@ export const Actions = {
       const inserted = await db.insert(schema.messages).values({ senderId: user.id, recipientId: target.id, body: args.body }).returning();
       const msg = inserted[0];
       if (!msg) return { ok: false, message: "Message could not be sent." };
-      await notify({ userId: target.id, type: "dm", actorId: user.id, text: `@${user.username} sent you a message ✉️` });
+      if (!(await mutedIdsFor(target.id)).has(user.id)) await notify({ userId: target.id, type: "dm", actorId: user.id, text: `@${user.username} sent you a message ✉️` });
       return {
         ok: true,
         message: "Message sent.",
@@ -2339,10 +2410,12 @@ export const Actions = {
     const peerIds = [...byPeer.keys()];
     const peers = peerIds.length ? await db.select().from(schema.users).where(inArray(schema.users.id, peerIds)) : [];
     const peerMap = new Map(peers.map((p) => [p.id, p]));
+    const mutedSet = await mutedIdsFor(user.id);
     const conversations = [...byPeer.values()]
       .filter((e) => peerMap.has(e.peerId))
       .map((e) => ({
         user: authorDto(peerMap.get(e.peerId)),
+        muted: mutedSet.has(e.peerId),
         latest: { body: e.latest.body, created_at: e.latest.createdAt.getTime(), is_mine: e.latest.senderId === user.id },
         unread: e.unread,
       }))
@@ -2459,6 +2532,7 @@ export const Actions = {
       const admin = await authUser(args.token);
       if (!admin) return { ok: false, message: "Please sign in." };
       if (!isAdminUser(admin)) return { ok: false, message: "Owner access required." };
+      await logAdmin(admin.id, `moderate_${args.action}`, args.target_type, args.target_id, "moderation decision");
       const target = await resolveReportTarget(args.target_type, args.target_id);
       if (!target && args.action !== "dismiss") return { ok: false, message: "Content not found." };
       const ownerId = target?.ownerId;
@@ -2511,4 +2585,527 @@ export const Actions = {
       return { ok: true, message: `@${owner.username} unban ho gaya.` };
     }
   ),
+
+  // ---- Phase 2 (2026-10-26): ranking, watch events, saved/mute/hide, sounds, playlists, appeals, analytics, admin audit, metrics ----
+  // All actions are server-authorized (authUser first, owner checks server-side). No new env vars.
+
+  // ---- Helpers for phase 2 (kept beside the actions they serve) ----
+  // NOTE: these helpers are defined inside the actions file scope by the patch script.
+
+  recordWatchEvent: withValidation(
+    z.object({ token: tokenArg, post_id: z.number().int().positive(), event: z.enum(["started", "completed", "replay", "skip"]), duration_ms: z.number().int().min(0).max(3600000).optional(), watch_ms: z.number().int().min(0).max(3600000).optional() }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      if (!checkRateLimit(user.id, "watch", 120, 3600000)) return { ok: false, message: "Too many watch events — please wait a moment." };
+      const post = (await db.select({ id: schema.posts.id, userId: schema.posts.userId, hidden: schema.posts.hidden }).from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
+      if (!post || (post.hidden && post.userId !== user.id)) return { ok: false, message: "Video not found." };
+      if (post.userId !== user.id && (await blockExistsBetween(user.id, post.userId))) return { ok: false, message: "Video not available." };
+      await db.insert(schema.postEvents).values({ postId: args.post_id, userId: user.id, event: args.event, durationMs: args.duration_ms ?? 0, watchMs: args.watch_ms ?? 0 });
+      return { ok: true };
+    }
+  ),
+
+  recordShare: withValidation(z.object({ token: tokenArg, post_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const post = (await db.select({ id: schema.posts.id, userId: schema.posts.userId, hidden: schema.posts.hidden }).from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
+    if (!post || (post.hidden && post.userId !== user.id)) return { ok: false, message: "Video not found." };
+    await db.insert(schema.postShares).values({ postId: args.post_id, userId: user.id }).onConflictDoNothing();
+    const rows = await db.select({ count: sql`count(*)`.mapWith(Number) }).from(schema.postShares).where(eq(schema.postShares.postId, args.post_id));
+    return { ok: true, share_count: rows[0]?.count ?? 0 };
+  }),
+
+  getRankedFeed: withValidation(
+    z.object({ token: tokenArg, stream: z.enum(["foryou", "following"]).default("foryou"), limit: z.number().int().min(1).max(50).default(20), offset: z.number().int().min(0).default(0), exclude_ids: z.array(z.number().int().positive()).max(500).optional(), chronological: z.boolean().optional() }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      const blocked = await blockedIdsFor(user.id);
+      const muted = await mutedIdsFor(user.id);
+      const hidden = await hiddenForViewer(user.id);
+      const excluded = new Set([...(args.exclude_ids ?? []), ...hidden.postIds]);
+      const followRows = await db.select({ followeeId: schema.follows.followeeId }).from(schema.follows).where(eq(schema.follows.followerId, user.id));
+      const followSet = new Set(followRows.map((r) => r.followeeId));
+      const privateRows = await db.select({ id: schema.users.id }).from(schema.users).where(eq(schema.users.privateAccount, 1));
+      const hiddenPrivate = new Set(privateRows.map((r) => r.id).filter((id) => id !== user.id && !followSet.has(id)));
+      const conds = [or(eq(schema.posts.hidden, 0), eq(schema.posts.userId, user.id))];
+      if (args.stream === "following") {
+        const ids = [...followSet].filter((id) => !blocked.has(id) && !muted.has(id));
+        if (ids.length === 0) return { ok: true, posts: [], ranked: true };
+        conds.push(inArray(schema.posts.userId, ids));
+      } else {
+        if (blocked.size) conds.push(notInArray(schema.posts.userId, [...blocked]));
+        if (muted.size) conds.push(notInArray(schema.posts.userId, [...muted]));
+        if (hiddenPrivate.size) conds.push(notInArray(schema.posts.userId, [...hiddenPrivate]));
+        if (hidden.creatorIds.size) conds.push(notInArray(schema.posts.userId, [...hidden.creatorIds]));
+      }
+      const candidates = await db.select().from(schema.posts).where(and(...conds)).orderBy(desc(schema.posts.createdAt)).limit(200);
+      const visible = candidates.filter((p) => !excluded.has(p.id));
+      if (visible.length === 0) return { ok: true, posts: [], ranked: true };
+      const ids = visible.map((p) => p.id);
+      const [likeRows, commentRows, shareRows, eventRows, seenRows, likedRows, watchedRows, interestRows] = await Promise.all([
+        db.select({ postId: schema.likes.postId, count: sql`count(*)`.mapWith(Number) }).from(schema.likes).where(inArray(schema.likes.postId, ids)).groupBy(schema.likes.postId),
+        db.select({ postId: schema.comments.postId, count: sql`count(*)`.mapWith(Number) }).from(schema.comments).where(inArray(schema.comments.postId, ids)).groupBy(schema.comments.postId),
+        db.select({ postId: schema.postShares.postId, count: sql`count(*)`.mapWith(Number) }).from(schema.postShares).where(inArray(schema.postShares.postId, ids)).groupBy(schema.postShares.postId),
+        db.select({ postId: schema.postEvents.postId, event: schema.postEvents.event, count: sql`count(*)`.mapWith(Number) }).from(schema.postEvents).where(inArray(schema.postEvents.postId, ids)).groupBy(schema.postEvents.postId, schema.postEvents.event),
+        db.select({ postId: schema.postViews.postId }).from(schema.postViews).where(and(eq(schema.postViews.userId, user.id), inArray(schema.postViews.postId, ids))),
+        db.select({ postId: schema.likes.postId }).from(schema.likes).where(and(eq(schema.likes.userId, user.id), inArray(schema.likes.postId, ids))),
+        db.select({ post: schema.posts }).from(schema.postViews).innerJoin(schema.posts, eq(schema.postViews.postId, schema.posts.id)).where(eq(schema.postViews.userId, user.id)).limit(100),
+        db.select({ tag: schema.userInterests.tag }).from(schema.userInterests).where(eq(schema.userInterests.userId, user.id)),
+      ]);
+      const by = (rows, key = "postId") => new Map(rows.map((r) => [r[key], r.count]));
+      const likes = by(likeRows), comments = by(commentRows), shares = by(shareRows);
+      const events = new Map();
+      for (const r of eventRows) { const m = events.get(r.postId) ?? {}; m[r.event] = r.count; events.set(r.postId, m); }
+      const seen = new Set(seenRows.map((r) => r.postId));
+      const affinity = new Set();
+      for (const w of watchedRows) for (const t of extractTags(`${w.post.title} ${w.post.description}`)) affinity.add(t);
+      for (const l of likedRows) { /* liked post ids are not affinity tags; interests below cover tags */ }
+      const interests = new Set(interestRows.map((r) => r.tag.toLowerCase()));
+      const now = Date.now();
+      const scored = visible.map((p) => {
+        const ageDays = Math.max(0, (now - p.createdAt.getTime()) / 86400000);
+        const ev = events.get(p.id) ?? {};
+        const tags = extractTags(`${p.title} ${p.description}`);
+        const tagHit = tags.filter((t) => affinity.has(t) || interests.has(t)).length;
+        let score = (p.viewCount ?? 0) * 1 + (likes.get(p.id) ?? 0) * 3 + (comments.get(p.id) ?? 0) * 2 + (shares.get(p.id) ?? 0) * 5 + (ev.completed ?? 0) * 2 + (ev.replay ?? 0) * 2 - (ev.skip ?? 0) * 1 + tagHit * 6 + (followSet.has(p.userId) ? 10 : 0) + 30 / (1 + ageDays);
+        if (!seen.has(p.id)) score += 25; // unseen-first, same rule as the legacy feed
+        return { post: p, score: Math.round(score * 10) / 10 };
+      });
+      scored.sort((a, b) => args.chronological ? b.post.createdAt.getTime() - a.post.createdAt.getTime() : b.score - a.score || b.post.createdAt.getTime() - a.post.createdAt.getTime());
+      const page = scored.slice(args.offset, args.offset + args.limit);
+      const dtos = await postDtos(page.map((s) => s.post), user);
+      const shareMap = shares;
+      const out = dtos.map((d) => ({ ...d, rank_score: page.find((s) => s.post.id === d.id)?.score ?? 0, share_count: shareMap.get(d.id) ?? 0 }));
+      return { ok: true, posts: out, ranked: true, total_candidates: visible.length };
+    }
+  ),
+
+  getTrending: withValidation(z.object({ token: tokenArg, limit: z.number().int().min(1).max(50).default(20) }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const blocked = await blockedIdsFor(user.id);
+    const conds = [eq(schema.posts.hidden, 0)];
+    if (blocked.size) conds.push(notInArray(schema.posts.userId, [...blocked]));
+    const candidates = await db.select().from(schema.posts).where(and(...conds)).orderBy(desc(schema.posts.createdAt)).limit(200);
+    if (candidates.length === 0) return { ok: true, posts: [] };
+    const ids = candidates.map((p) => p.id);
+    const [likeRows, commentRows, shareRows, eventRows] = await Promise.all([
+      db.select({ postId: schema.likes.postId, count: sql`count(*)`.mapWith(Number) }).from(schema.likes).where(inArray(schema.likes.postId, ids)).groupBy(schema.likes.postId),
+      db.select({ postId: schema.comments.postId, count: sql`count(*)`.mapWith(Number) }).from(schema.comments).where(inArray(schema.comments.postId, ids)).groupBy(schema.comments.postId),
+      db.select({ postId: schema.postShares.postId, count: sql`count(*)`.mapWith(Number) }).from(schema.postShares).where(inArray(schema.postShares.postId, ids)).groupBy(schema.postShares.postId),
+      db.select({ postId: schema.postEvents.postId, event: schema.postEvents.event, count: sql`count(*)`.mapWith(Number) }).from(schema.postEvents).where(inArray(schema.postEvents.postId, ids)).groupBy(schema.postEvents.postId, schema.postEvents.event),
+    ]);
+    const by = (rows) => new Map(rows.map((r) => [r.postId, r.count]));
+    const likes = by(likeRows), comments = by(commentRows), shares = by(shareRows);
+    const events = new Map(); for (const r of eventRows) { const m = events.get(r.postId) ?? {}; m[r.event] = r.count; events.set(r.postId, m); }
+    const now = Date.now();
+    const scored = candidates.map((p) => { const ageDays = Math.max(0, (now - p.createdAt.getTime()) / 86400000); const ev = events.get(p.id) ?? {}; return { post: p, score: (p.viewCount ?? 0) * 2 + (likes.get(p.id) ?? 0) * 3 + (comments.get(p.id) ?? 0) * 2 + (shares.get(p.id) ?? 0) * 5 + (ev.completed ?? 0) * 2 + 30 / (1 + ageDays) }; });
+    scored.sort((a, b) => b.score - a.score);
+    const dtos = await postDtos(scored.slice(0, args.limit).map((s) => s.post), user);
+    return { ok: true, posts: dtos.map((d) => ({ ...d, trend_score: Math.round(scored.find((s) => s.post.id === d.id)?.score ?? 0), share_count: shares.get(d.id) ?? 0 })) };
+  }),
+
+  getByHashtag: withValidation(z.object({ token: tokenArg, tag: z.string().trim().min(1).max(60), limit: z.number().int().min(1).max(50).default(30), offset: z.number().int().min(0).default(0) }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const tag = args.tag.startsWith("#") ? args.tag : `#${args.tag}`;
+    const blocked = await blockedIdsFor(user.id);
+    const conds = [eq(schema.posts.hidden, 0), or(like(schema.posts.title, `%${tag}%`), like(schema.posts.description, `%${tag}%`))];
+    if (blocked.size) conds.push(notInArray(schema.posts.userId, [...blocked]));
+    const rows = await db.select().from(schema.posts).where(and(...conds)).orderBy(desc(schema.posts.createdAt)).limit(args.limit).offset(args.offset);
+    return { ok: true, tag, posts: await postDtos(rows, user) };
+  }),
+
+  getSounds: withValidation(z.object({ token: tokenArg, limit: z.number().int().min(1).max(50).default(30) }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    // Zoomly has no licensed music catalogue: a "sound" is the original audio of a creator's videos.
+    const rows = await db.select({ post: schema.posts, author: schema.users }).from(schema.posts).innerJoin(schema.users, eq(schema.posts.userId, schema.users.id)).where(eq(schema.posts.hidden, 0)).orderBy(desc(schema.posts.createdAt)).limit(300);
+    const byUser = new Map();
+    for (const r of rows) { if (!byUser.has(r.author.id)) byUser.set(r.author.id, { creator: authorDto(r.author), video_count: 0, latest: null }); const g = byUser.get(r.author.id); g.video_count += 1; if (!g.latest) g.latest = { id: r.post.id, title: r.post.title, video_url: r.post.videoUrl, thumbnail_url: r.post.thumbnailUrl ?? null }; }
+    return { ok: true, sounds: [...byUser.values()].slice(0, args.limit).map((s) => ({ title: `Original audio · @${s.creator.username}`, creator: s.creator, video_count: s.video_count, preview: s.latest })), note: "Only original audio is available — there is no licensed music catalogue." };
+  }),
+
+  getSoundVideos: withValidation(z.object({ token: tokenArg, user_id: z.number().int().positive(), limit: z.number().int().min(1).max(50).default(30) }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    if (await blockExistsBetween(user.id, args.user_id)) return { ok: true, posts: [] };
+    const rows = await db.select().from(schema.posts).where(and(eq(schema.posts.userId, args.user_id), eq(schema.posts.hidden, 0))).orderBy(desc(schema.posts.createdAt)).limit(args.limit);
+    return { ok: true, posts: await postDtos(rows, user) };
+  }),
+
+  toggleSave: withValidation(z.object({ token: tokenArg, post_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const post = (await db.select({ id: schema.posts.id }).from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
+    if (!post) return { ok: false, message: "Video not found." };
+    const existing = (await db.select({ id: schema.savedPosts.id }).from(schema.savedPosts).where(and(eq(schema.savedPosts.userId, user.id), eq(schema.savedPosts.postId, args.post_id))).limit(1))[0];
+    if (existing) { await db.delete(schema.savedPosts).where(eq(schema.savedPosts.id, existing.id)); return { ok: true, saved: false }; }
+    await db.insert(schema.savedPosts).values({ userId: user.id, postId: args.post_id });
+    return { ok: true, saved: true };
+  }),
+
+  getSavedPosts: withValidation(z.object({ token: tokenArg, limit: z.number().int().min(1).max(60).default(60) }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const saved = await db.select({ postId: schema.savedPosts.postId }).from(schema.savedPosts).where(eq(schema.savedPosts.userId, user.id)).orderBy(desc(schema.savedPosts.createdAt)).limit(args.limit);
+    if (saved.length === 0) return { ok: true, posts: [] };
+    const rows = await db.select().from(schema.posts).where(inArray(schema.posts.id, saved.map((s) => s.postId)));
+    const visible = rows.filter((p) => !p.hidden || p.userId === user.id);
+    return { ok: true, posts: await postDtos(visible, user) };
+  }),
+
+  hideNotInterested: withValidation(z.object({ token: tokenArg, post_id: z.number().int().positive().optional(), creator_id: z.number().int().positive().optional() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    if (args.post_id) await db.insert(schema.hiddenForViewer).values({ userId: user.id, scope: "post", targetId: args.post_id }).onConflictDoNothing();
+    if (args.creator_id && args.creator_id !== user.id) await db.insert(schema.hiddenForViewer).values({ userId: user.id, scope: "creator", targetId: args.creator_id }).onConflictDoNothing();
+    if (!args.post_id && !args.creator_id) return { ok: false, message: "Nothing to hide." };
+    return { ok: true, message: "Hidden — it will not be recommended again." };
+  }),
+
+  getHiddenItems: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const rows = await db.select().from(schema.hiddenForViewer).where(eq(schema.hiddenForViewer.userId, user.id)).orderBy(desc(schema.hiddenForViewer.createdAt)).limit(100);
+    const postIds = rows.filter((r) => r.scope === "post").map((r) => r.targetId);
+    const creatorIds = rows.filter((r) => r.scope === "creator").map((r) => r.targetId);
+    const posts = postIds.length ? await db.select().from(schema.posts).where(inArray(schema.posts.id, postIds)) : [];
+    const creators = creatorIds.length ? await db.select().from(schema.users).where(inArray(schema.users.id, creatorIds)) : [];
+    const postMap = new Map(posts.map((p) => [p.id, p]));
+    const creatorMap = new Map(creators.map((c) => [c.id, c]));
+    return { ok: true, items: rows.map((r) => ({ id: r.id, scope: r.scope, post: r.scope === "post" && postMap.has(r.targetId) ? { id: r.targetId, title: postMap.get(r.targetId).title } : null, creator: r.scope === "creator" && creatorMap.has(r.targetId) ? authorDto(creatorMap.get(r.targetId)) : null })) };
+  }),
+
+  unhideNotInterested: withValidation(z.object({ token: tokenArg, item_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    await db.delete(schema.hiddenForViewer).where(and(eq(schema.hiddenForViewer.id, args.item_id), eq(schema.hiddenForViewer.userId, user.id)));
+    return { ok: true, message: "Unhidden." };
+  }),
+
+  toggleMute: withValidation(z.object({ token: tokenArg, user_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    if (args.user_id === user.id) return { ok: false, message: "You can't mute yourself." };
+    const existing = (await db.select({ id: schema.mutedUsers.id }).from(schema.mutedUsers).where(and(eq(schema.mutedUsers.userId, user.id), eq(schema.mutedUsers.mutedId, args.user_id))).limit(1))[0];
+    if (existing) { await db.delete(schema.mutedUsers).where(eq(schema.mutedUsers.id, existing.id)); return { ok: true, muted: false }; }
+    await db.insert(schema.mutedUsers).values({ userId: user.id, mutedId: args.user_id });
+    return { ok: true, muted: true, message: "Muted — their videos and comments are hidden from you (blocking is separate and stronger)." };
+  }),
+
+  getMutedUsers: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const rows = await db.select({ muted: schema.users }).from(schema.mutedUsers).innerJoin(schema.users, eq(schema.mutedUsers.mutedId, schema.users.id)).where(eq(schema.mutedUsers.userId, user.id)).orderBy(desc(schema.mutedUsers.createdAt));
+    return { ok: true, muted: rows.map((r) => authorDto(r.muted)) };
+  }),
+
+  setCommentKeywords: withValidation(z.object({ token: tokenArg, keywords: z.array(z.string().trim().min(2).max(40)).max(20) }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    await db.delete(schema.commentKeywords).where(eq(schema.commentKeywords.userId, user.id));
+    const clean = [...new Set(args.keywords.map((k) => k.toLowerCase()))];
+    for (const k of clean) await db.insert(schema.commentKeywords).values({ userId: user.id, keyword: k });
+    return { ok: true, keywords: clean, message: "Comments containing these words are hidden from you." };
+  }),
+
+  getCommentKeywords: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const rows = await db.select({ keyword: schema.commentKeywords.keyword }).from(schema.commentKeywords).where(eq(schema.commentKeywords.userId, user.id));
+    return { ok: true, keywords: rows.map((r) => r.keyword) };
+  }),
+
+  setInterests: withValidation(z.object({ token: tokenArg, tags: z.array(z.string().trim().min(1).max(40)).max(30) }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    await db.delete(schema.userInterests).where(eq(schema.userInterests.userId, user.id));
+    const clean = [...new Set(args.tags.map((t) => t.replace(/^#/, "").toLowerCase()))].filter(Boolean);
+    for (const t of clean) await db.insert(schema.userInterests).values({ userId: user.id, tag: t });
+    return { ok: true, tags: clean, message: "Interests saved — For You ranking now uses them." };
+  }),
+
+  getInterests: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const rows = await db.select({ tag: schema.userInterests.tag }).from(schema.userInterests).where(eq(schema.userInterests.userId, user.id));
+    return { ok: true, tags: rows.map((r) => r.tag) };
+  }),
+
+  getPublicFeed: withValidation(z.object({ limit: z.number().int().min(1).max(50).default(20), offset: z.number().int().min(0).default(0) }), async (args) => {
+    // Guest browsing: no token, no personal data. Only public (non-private, non-hidden) videos.
+    const privateRows = await db.select({ id: schema.users.id }).from(schema.users).where(eq(schema.users.privateAccount, 1));
+    const privateIds = privateRows.map((r) => r.id);
+    const conds = [eq(schema.posts.hidden, 0)];
+    if (privateIds.length) conds.push(notInArray(schema.posts.userId, privateIds));
+    const rows = await db.select().from(schema.posts).where(and(...conds)).orderBy(desc(schema.posts.createdAt)).limit(args.limit).offset(args.offset);
+    // Guest DTOs: author only, no liked/follow state (there is no viewer).
+    const authorIds = [...new Set(rows.map((p) => p.userId))];
+    const authors = authorIds.length ? await db.select().from(schema.users).where(inArray(schema.users.id, authorIds)) : [];
+    const map = new Map(authors.map((a) => [a.id, a]));
+    return { ok: true, guest: true, posts: rows.map((p) => ({ id: p.id, title: p.title, description: p.description, video_url: p.videoUrl, thumbnail_url: p.thumbnailUrl ?? null, created_at: p.createdAt.getTime(), view_count: p.viewCount ?? 0, author: map.get(p.userId) ? authorDto(map.get(p.userId)) : null })) };
+  }),
+
+  requestAppeal: withValidation(z.object({ token: tokenArg, target_type: z.enum(["post", "live", "comment", "user"]), target_id: z.number().int().positive(), message: z.string().trim().min(3).max(500) }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const target = await resolveReportTarget(args.target_type, args.target_id);
+    if (!target || target.ownerId !== user.id) return { ok: false, message: "You can only appeal moderation on your own content or account." };
+    const hasAction = (args.target_type === "post" && target.post?.hidden) || (args.target_type === "live" && target.session?.hidden) || user.banned || (await db.select({ id: schema.reports.id }).from(schema.reports).where(and(eq(schema.reports.targetType, args.target_type), eq(schema.reports.targetId, args.target_id), eq(schema.reports.targetOwnerId, user.id))).limit(1)).length > 0;
+    if (!hasAction) return { ok: false, message: "There is no moderation action on this item to appeal." };
+    await db.insert(schema.moderationAppeals).values({ userId: user.id, targetType: args.target_type, targetId: args.target_id, message: args.message });
+    return { ok: true, message: "Appeal sent — the owner will review it." };
+  }),
+
+  getMyAppeals: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const rows = await db.select().from(schema.moderationAppeals).where(eq(schema.moderationAppeals.userId, user.id)).orderBy(desc(schema.moderationAppeals.createdAt)).limit(50);
+    return { ok: true, appeals: rows.map((r) => ({ id: r.id, target_type: r.targetType, target_id: r.targetId, message: r.message, status: r.status, created_at: r.createdAt.getTime(), decided_at: r.decidedAt ? r.decidedAt.getTime() : null })) };
+  }),
+
+  getAppeals: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const admin = await authUser(args.token);
+    if (!admin || !isAdminUser(admin)) return { ok: false, message: "Owner access required." };
+    const rows = await db.select().from(schema.moderationAppeals).where(eq(schema.moderationAppeals.status, "pending")).orderBy(desc(schema.moderationAppeals.createdAt)).limit(100);
+    const userIds = [...new Set(rows.map((r) => r.userId))];
+    const users = userIds.length ? await db.select().from(schema.users).where(inArray(schema.users.id, userIds)) : [];
+    const map = new Map(users.map((u) => [u.id, u]));
+    return { ok: true, appeals: rows.map((r) => ({ id: r.id, target_type: r.targetType, target_id: r.targetId, message: r.message, created_at: r.createdAt.getTime(), user: map.get(r.userId) ? authorDto(map.get(r.userId)) : null })) };
+  }),
+
+  reviewAppeal: withValidation(z.object({ token: tokenArg, appeal_id: z.number().int().positive(), decision: z.enum(["restore", "dismiss"]) }), async (args) => {
+    const admin = await authUser(args.token);
+    if (!admin || !isAdminUser(admin)) return { ok: false, message: "Owner access required." };
+    const appeal = (await db.select().from(schema.moderationAppeals).where(eq(schema.moderationAppeals.id, args.appeal_id)).limit(1))[0];
+    if (!appeal || appeal.status !== "pending") return { ok: false, message: "Appeal not found or already decided." };
+    if (args.decision === "restore") {
+      if (appeal.targetType === "post") await db.update(schema.posts).set({ hidden: 0 }).where(eq(schema.posts.id, appeal.targetId));
+      if (appeal.targetType === "live") await db.update(schema.liveSessions).set({ hidden: 0 }).where(eq(schema.liveSessions.id, appeal.targetId));
+      if (appeal.targetType === "user") await db.update(schema.users).set({ banned: 0, banReason: null }).where(eq(schema.users.id, appeal.targetId));
+    }
+    await db.update(schema.moderationAppeals).set({ status: args.decision === "restore" ? "restored" : "dismissed", decidedBy: admin.id, decidedAt: new Date() }).where(eq(schema.moderationAppeals.id, args.appeal_id));
+    await logAdmin(admin.id, `appeal_${args.decision}`, appeal.targetType, appeal.targetId, `appeal #${appeal.id}`);
+    return { ok: true, message: args.decision === "restore" ? "Appeal approved — content restored." : "Appeal dismissed." };
+  }),
+
+  restoreHiddenPost: withValidation(z.object({ token: tokenArg, post_id: z.number().int().positive() }), async (args) => {
+    const admin = await authUser(args.token);
+    if (!admin || !isAdminUser(admin)) return { ok: false, message: "Owner access required." };
+    const post = (await db.select({ id: schema.posts.id, hidden: schema.posts.hidden }).from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
+    if (!post) return { ok: false, message: "Video not found." };
+    await db.update(schema.posts).set({ hidden: 0 }).where(eq(schema.posts.id, args.post_id));
+    await logAdmin(admin.id, "restore_post", "post", args.post_id, "restored from hidden");
+    return { ok: true, message: "Video restored — it is visible again." };
+  }),
+
+  getAdminOverview: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const admin = await authUser(args.token);
+    if (!admin || !isAdminUser(admin)) return { ok: false, message: "Owner access required." };
+    const count = async (table, cond) => (await db.select({ count: sql`count(*)`.mapWith(Number) }).from(table).where(cond))[0]?.count ?? 0;
+    const weekAgo = new Date(Date.now() - 7 * 86400000);
+    const metricRows = await db.select({ kind: schema.clientMetrics.kind, count: sql`count(*)`.mapWith(Number), avg: sql`avg(${schema.clientMetrics.valueMs})`.mapWith(Number) }).from(schema.clientMetrics).where(gte(schema.clientMetrics.createdAt, weekAgo)).groupBy(schema.clientMetrics.kind);
+    const audit = await db.select().from(schema.adminAuditLog).orderBy(desc(schema.adminAuditLog.createdAt)).limit(50);
+    return { ok: true, overview: {
+      users: await count(schema.users), posts: await count(schema.posts), comments: await count(schema.comments), likes: await count(schema.likes),
+      pending_reports: await count(schema.reports, eq(schema.reports.status, "pending")),
+      pending_appeals: await count(schema.moderationAppeals, eq(schema.moderationAppeals.status, "pending")),
+      pending_coin_requests: await count(schema.coinRequests, eq(schema.coinRequests.status, "pending")),
+      pending_withdrawals: await count(schema.withdrawalRequests, eq(schema.withdrawalRequests.status, "pending")),
+      metrics_7d: metricRows.map((r) => ({ kind: r.kind, count: r.count, avg_ms: Math.round(r.avg ?? 0) })),
+      audit_log: audit.map((r) => ({ id: r.id, admin_id: r.adminId, action: r.action, target_type: r.targetType, target_id: r.targetId, details: r.details, created_at: r.createdAt.getTime() })),
+      storage_note: "Video/photo files live on Cloudinary (not in this database). This overview counts database rows only; Cloudinary storage size is not stored locally.",
+    } };
+  }),
+
+  getCreatorAnalytics: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const myPosts = await db.select().from(schema.posts).where(eq(schema.posts.userId, user.id)).orderBy(desc(schema.posts.createdAt));
+    const ids = myPosts.map((p) => p.id);
+    const [likeRows, commentRows, shareRows, eventRows, giftRows] = ids.length ? await Promise.all([
+      db.select({ postId: schema.likes.postId, count: sql`count(*)`.mapWith(Number) }).from(schema.likes).where(inArray(schema.likes.postId, ids)).groupBy(schema.likes.postId),
+      db.select({ postId: schema.comments.postId, count: sql`count(*)`.mapWith(Number) }).from(schema.comments).where(inArray(schema.comments.postId, ids)).groupBy(schema.comments.postId),
+      db.select({ postId: schema.postShares.postId, count: sql`count(*)`.mapWith(Number) }).from(schema.postShares).where(inArray(schema.postShares.postId, ids)).groupBy(schema.postShares.postId),
+      db.select({ postId: schema.postEvents.postId, event: schema.postEvents.event, count: sql`count(*)`.mapWith(Number), watch: sql`coalesce(sum(${schema.postEvents.watchMs}), 0)`.mapWith(Number) }).from(schema.postEvents).where(inArray(schema.postEvents.postId, ids)).groupBy(schema.postEvents.postId, schema.postEvents.event),
+      db.select({ coins: sql`coalesce(sum(${schema.giftEvents.coins}), 0)`.mapWith(Number), creator: sql`coalesce(sum(${schema.giftEvents.creatorCreditedCoins}), 0)`.mapWith(Number) }).from(schema.giftEvents).where(eq(schema.giftEvents.creatorId, user.id)),
+    ]) : [[], [], [], [], []];
+    const by = (rows) => new Map(rows.map((r) => [r.postId, r.count]));
+    const likes = by(likeRows), comments = by(commentRows), shares = by(shareRows);
+    const evMap = new Map(); const watchMap = new Map();
+    for (const r of eventRows) { const m = evMap.get(r.postId) ?? {}; m[r.event] = r.count; evMap.set(r.postId, m); watchMap.set(r.postId, (watchMap.get(r.postId) ?? 0) + (r.watch ?? 0)); }
+    const followRows = await db.select().from(schema.follows).where(eq(schema.follows.followeeId, user.id));
+    const growth = new Map();
+    for (const f of followRows) { const d = new Date(f.createdAt.getTime()).toISOString().slice(0, 10); growth.set(d, (growth.get(d) ?? 0) + 1); }
+    const mon = await monetizationStatus(user);
+    const perVideo = myPosts.map((p) => ({ id: p.id, title: p.title, created_at: p.createdAt.getTime(), hidden: Boolean(p.hidden), views: p.viewCount ?? 0, likes: likes.get(p.id) ?? 0, comments: comments.get(p.id) ?? 0, shares: shares.get(p.id) ?? 0, completions: evMap.get(p.id)?.completed ?? 0, replays: evMap.get(p.id)?.replay ?? 0, skips: evMap.get(p.id)?.skip ?? 0, watch_seconds: Math.round((watchMap.get(p.id) ?? 0) / 1000) }));
+    const totals = { videos: myPosts.length, views: myPosts.reduce((s, p) => s + (p.viewCount ?? 0), 0), likes: [...likes.values()].reduce((a, b) => a + b, 0), comments: [...comments.values()].reduce((a, b) => a + b, 0), shares: [...shares.values()].reduce((a, b) => a + b, 0), watch_seconds: [...watchMap.values()].reduce((a, b) => a + b, 0) / 1000, followers: followRows.length, gift_coins_gross: giftRows[0]?.coins ?? 0, gift_coins_creator_credited: giftRows[0]?.creator ?? 0 };
+    return { ok: true, analytics: { totals, per_video: perVideo, follower_growth_30d: [...growth.entries()].sort().slice(-30).map(([date, count]) => ({ date, count })), monetization: mon, fees_note: "Gift split is exactly 70% creator / 30% platform (milli-coin carry). Withdrawals: min 100 coins, owner approves and pays manually via JazzCash; coins are held at request and refunded on reject. No tax forms and no automated refunds exist — disputes are owner manual review only." } };
+  }),
+
+  exportMyData: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const [posts, comments, likes, following, followers, coinReq, wdReq] = await Promise.all([
+      db.select().from(schema.posts).where(eq(schema.posts.userId, user.id)),
+      db.select().from(schema.comments).where(eq(schema.comments.userId, user.id)),
+      db.select().from(schema.likes).where(eq(schema.likes.userId, user.id)),
+      db.select().from(schema.follows).where(eq(schema.follows.followerId, user.id)),
+      db.select().from(schema.follows).where(eq(schema.follows.followeeId, user.id)),
+      db.select().from(schema.coinRequests).where(eq(schema.coinRequests.userId, user.id)),
+      db.select().from(schema.withdrawalRequests).where(eq(schema.withdrawalRequests.userId, user.id)),
+    ]);
+    return { ok: true, data: { exported_at: Date.now(), user: { id: user.id, username: user.username, display_name: user.displayName, bio: user.bio, coin_balance: user.coinBalance, created_at: user.createdAt.getTime() }, posts: posts.map((p) => ({ id: p.id, title: p.title, description: p.description, video_url: p.videoUrl, view_count: p.viewCount, created_at: p.createdAt.getTime() })), comments: comments.map((c) => ({ id: c.id, post_id: c.postId, body: c.body, created_at: c.createdAt.getTime() })), liked_post_ids: likes.map((l) => l.postId), following_ids: following.map((f) => f.followeeId), follower_ids: followers.map((f) => f.followerId), coin_requests: coinReq.map((r) => ({ id: r.id, pack_coins: r.packCoins, price_pkr: r.pricePkr, status: r.status, created_at: r.createdAt.getTime() })), withdrawals: wdReq.map((r) => ({ id: r.id, coins: r.coins, status: r.status, created_at: r.createdAt.getTime() })), note: "Transaction IDs (TIDs) are intentionally omitted from this export." } };
+  }),
+
+  getFollowRecommendations: withValidation(z.object({ token: tokenArg, limit: z.number().int().min(1).max(30).default(12) }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const blocked = await blockedIdsFor(user.id);
+    const following = (await db.select({ followeeId: schema.follows.followeeId }).from(schema.follows).where(eq(schema.follows.followerId, user.id))).map((r) => r.followeeId);
+    const followSet = new Set(following);
+    const candidates = await db.select().from(schema.users).orderBy(desc(schema.users.createdAt)).limit(200);
+    const followerCounts = await db.select({ followeeId: schema.follows.followeeId, count: sql`count(*)`.mapWith(Number) }).from(schema.follows).groupBy(schema.follows.followeeId);
+    const fcMap = new Map(followerCounts.map((r) => [r.followeeId, r.count]));
+    const kept = candidates.filter((c) => c.id !== user.id && !followSet.has(c.id) && !blocked.has(c.id) && !c.banned);
+    const mutualMap = new Map();
+    if (followSet.size && kept.length) {
+      const mutualRows = await db.select({ followeeId: schema.follows.followeeId }).from(schema.follows).where(and(inArray(schema.follows.followerId, [...followSet]), inArray(schema.follows.followeeId, kept.map((c) => c.id))));
+      for (const r of mutualRows) mutualMap.set(r.followeeId, (mutualMap.get(r.followeeId) ?? 0) + 1);
+    }
+    const list = kept.map((c) => ({ ...authorDto(c), follower_count: fcMap.get(c.id) ?? 0, mutual: mutualMap.get(c.id) ?? 0 })).sort((a, b) => b.follower_count - a.follower_count).slice(0, args.limit);
+    return { ok: true, recommendations: list };
+  }),
+
+  getFollowersList: withValidation(z.object({ token: tokenArg, user_id: z.number().int().positive().optional() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const target = args.user_id ?? user.id;
+    if (target !== user.id && (await blockExistsBetween(user.id, target))) return { ok: true, users: [] };
+    const rows = await db.select({ follower: schema.users }).from(schema.follows).innerJoin(schema.users, eq(schema.follows.followerId, schema.users.id)).where(eq(schema.follows.followeeId, target)).orderBy(desc(schema.follows.createdAt)).limit(200);
+    return { ok: true, users: rows.map((r) => authorDto(r.follower)) };
+  }),
+
+  getFollowingList: withValidation(z.object({ token: tokenArg, user_id: z.number().int().positive().optional() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const target = args.user_id ?? user.id;
+    if (target !== user.id && (await blockExistsBetween(user.id, target))) return { ok: true, users: [] };
+    const rows = await db.select({ followee: schema.users }).from(schema.follows).innerJoin(schema.users, eq(schema.follows.followeeId, schema.users.id)).where(eq(schema.follows.followerId, target)).orderBy(desc(schema.follows.createdAt)).limit(200);
+    return { ok: true, users: rows.map((r) => authorDto(r.followee)) };
+  }),
+
+  createPlaylist: withValidation(z.object({ token: tokenArg, title: z.string().trim().min(1).max(80) }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const inserted = await db.insert(schema.playlists).values({ userId: user.id, title: args.title }).returning();
+    return { ok: true, playlist: { id: inserted[0].id, title: inserted[0].title, video_count: 0 } };
+  }),
+
+  listPlaylists: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const rows = await db.select().from(schema.playlists).where(eq(schema.playlists.userId, user.id)).orderBy(desc(schema.playlists.createdAt));
+    const counts = rows.length ? await db.select({ playlistId: schema.playlistItems.playlistId, count: sql`count(*)`.mapWith(Number) }).from(schema.playlistItems).where(inArray(schema.playlistItems.playlistId, rows.map((r) => r.id))).groupBy(schema.playlistItems.playlistId) : [];
+    const map = new Map(counts.map((r) => [r.playlistId, r.count]));
+    return { ok: true, playlists: rows.map((r) => ({ id: r.id, title: r.title, video_count: map.get(r.id) ?? 0, created_at: r.createdAt.getTime() })) };
+  }),
+
+  getPlaylist: withValidation(z.object({ token: tokenArg, playlist_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const pl = (await db.select().from(schema.playlists).where(eq(schema.playlists.id, args.playlist_id)).limit(1))[0];
+    if (!pl || pl.userId !== user.id) return { ok: false, message: "Playlist not found." };
+    const items = await db.select({ postId: schema.playlistItems.postId }).from(schema.playlistItems).where(eq(schema.playlistItems.playlistId, pl.id)).orderBy(schema.playlistItems.createdAt);
+    const posts = items.length ? await db.select().from(schema.posts).where(inArray(schema.posts.id, items.map((i) => i.postId))) : [];
+    return { ok: true, playlist: { id: pl.id, title: pl.title }, posts: await postDtos(posts, user) };
+  }),
+
+  addToPlaylist: withValidation(z.object({ token: tokenArg, playlist_id: z.number().int().positive(), post_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const pl = (await db.select().from(schema.playlists).where(eq(schema.playlists.id, args.playlist_id)).limit(1))[0];
+    if (!pl || pl.userId !== user.id) return { ok: false, message: "Playlist not found." };
+    const post = (await db.select({ id: schema.posts.id }).from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
+    if (!post) return { ok: false, message: "Video not found." };
+    await db.insert(schema.playlistItems).values({ playlistId: pl.id, postId: args.post_id }).onConflictDoNothing();
+    return { ok: true, message: "Added to playlist." };
+  }),
+
+  removeFromPlaylist: withValidation(z.object({ token: tokenArg, playlist_id: z.number().int().positive(), post_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const pl = (await db.select().from(schema.playlists).where(eq(schema.playlists.id, args.playlist_id)).limit(1))[0];
+    if (!pl || pl.userId !== user.id) return { ok: false, message: "Playlist not found." };
+    await db.delete(schema.playlistItems).where(and(eq(schema.playlistItems.playlistId, pl.id), eq(schema.playlistItems.postId, args.post_id)));
+    return { ok: true, message: "Removed from playlist." };
+  }),
+
+  deletePlaylist: withValidation(z.object({ token: tokenArg, playlist_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const pl = (await db.select().from(schema.playlists).where(eq(schema.playlists.id, args.playlist_id)).limit(1))[0];
+    if (!pl || pl.userId !== user.id) return { ok: false, message: "Playlist not found." };
+    await db.delete(schema.playlistItems).where(eq(schema.playlistItems.playlistId, pl.id));
+    await db.delete(schema.playlists).where(eq(schema.playlists.id, pl.id));
+    return { ok: true, message: "Playlist deleted." };
+  }),
+
+  pinComment: withValidation(z.object({ token: tokenArg, comment_id: z.number().int().positive(), pinned: z.boolean() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const comment = (await db.select().from(schema.comments).where(eq(schema.comments.id, args.comment_id)).limit(1))[0];
+    if (!comment) return { ok: false, message: "Comment not found." };
+    const post = (await db.select().from(schema.posts).where(eq(schema.posts.id, comment.postId)).limit(1))[0];
+    if (post?.userId !== user.id && !isAdminUser(user)) return { ok: false, message: "Only the video owner can pin comments." };
+    await db.update(schema.comments).set({ pinned: args.pinned ? 1 : 0 }).where(eq(schema.comments.id, args.comment_id));
+    return { ok: true, pinned: args.pinned };
+  }),
+
+  setVideoInteraction: withValidation(z.object({ token: tokenArg, post_id: z.number().int().positive(), comments_allowed: z.boolean().optional(), duet_allowed: z.boolean().optional() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const post = (await db.select().from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
+    if (!post || (post.userId !== user.id && !isAdminUser(user))) return { ok: false, message: "Video not found." };
+    const patch = {};
+    if (args.comments_allowed !== undefined) patch.commentsAllowed = args.comments_allowed ? 1 : 0;
+    if (args.duet_allowed !== undefined) patch.duetAllowed = args.duet_allowed ? 1 : 0;
+    if (Object.keys(patch).length) await db.update(schema.posts).set(patch).where(eq(schema.posts.id, args.post_id));
+    return { ok: true, message: "Video interaction settings saved." };
+  }),
+
+  getDuetPair: withValidation(z.object({ token: tokenArg, post_id: z.number().int().positive(), other_post_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const rows = await db.select().from(schema.posts).where(inArray(schema.posts.id, [args.post_id, args.other_post_id]));
+    if (rows.length !== 2) return { ok: false, message: "Both videos must exist." };
+    for (const p of rows) {
+      if (p.hidden && p.userId !== user.id) return { ok: false, message: "One video is not available." };
+      if (p.userId !== user.id && !p.duetAllowed && !isAdminUser(user)) return { ok: false, message: `Duet reuse is turned off for “${p.title}” by its creator.` };
+      if (await blockExistsBetween(user.id, p.userId)) return { ok: false, message: "One video is not available." };
+    }
+    return { ok: true, posts: await postDtos(rows, user) };
+  }),
+
+  recordMetric: withValidation(z.object({ token: tokenArg, kind: z.enum(["video_load", "playback_failure", "upload_success", "api_latency", "startup"]), value_ms: z.number().int().min(0).max(600000).optional() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    if (!checkRateLimit(user.id, "metric", 200, 3600000)) return { ok: false, message: "Too many metrics." };
+    // Aggregate-only by design: no video titles, no message bodies, no passwords are ever stored here.
+    await db.insert(schema.clientMetrics).values({ userId: user.id, kind: args.kind, valueMs: args.value_ms ?? 0 });
+    return { ok: true };
+  }),
+
+  getMyNotices: withValidation(z.object({ token: tokenArg }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const notices = [];
+    if (user.banned) notices.push({ kind: "account_suspended", text: `Your account is suspended. Reason: ${user.banReason ?? "moderation decision"}. You can appeal from the Appeals screen.` });
+    const hiddenPosts = await db.select({ id: schema.posts.id, title: schema.posts.title }).from(schema.posts).where(and(eq(schema.posts.userId, user.id), eq(schema.posts.hidden, 1))).limit(20);
+    for (const p of hiddenPosts) notices.push({ kind: "video_hidden", post_id: p.id, text: `Your video “${p.title}” is hidden pending owner review.` });
+    return { ok: true, notices };
+  }),
 };

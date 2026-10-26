@@ -61,7 +61,8 @@ export default function AdSlot() {
   if (!clientId || !adSlot) return null;
 
   return (
-    <div style={{ scrollSnapAlign: "start", padding: "14px 12px 24px" }}>
+    <div style={{ scrollSnapAlign: "start", padding: "14px 12px 24px" }} aria-label="Advertisement">
+      <div style={{ fontSize: 11, color: "var(--dim)", letterSpacing: 1, fontWeight: 800 }}>AD</div>
       <ins
         className="adsbygoogle"
         style={{ display: "block" }}

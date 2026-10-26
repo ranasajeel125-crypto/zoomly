@@ -700,6 +700,10 @@ function GoLiveSetup({ me, onStart, onCancel }) {
   const [stream, setStream] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [category, setCategory] = useState("");
+  const [audience, setAudience] = useState("everyone");
+  const [coverUrl, setCoverUrl] = useState("");
+  const [facing, setFacing] = useState("user");
   const previewRef = useRef(null);
   const streamRef = useRef(null);
   // The filter processor (filters.js): the camera runs through it and
@@ -785,6 +789,17 @@ function GoLiveSetup({ me, onStart, onCancel }) {
     }
   }
 
+  async function switchCamera() {
+    if (mode !== "video") return;
+    const next = facing === "user" ? "environment" : "user";
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: next }, audio: true });
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      processorRef.current?.stop(); processorRef.current = null;
+      streamRef.current = s; setStream(s); setFacing(next);
+    } catch { setError("Camera switch nahi ho saka — is device me doosra camera nahi mila."); }
+  }
+
   async function start(e) {
     e.preventDefault();
     if (!stream) {
@@ -797,7 +812,7 @@ function GoLiveSetup({ me, onStart, onCancel }) {
     // server reuses the saved title (or its default) — starting a live
     // never requires touching the title again.
     const typed = editingTitle ? title.trim() : "";
-    const res = await call("startLive", { ...(typed ? { title: typed } : {}), kind: mode });
+    const res = await call("startLive", { ...(typed ? { title: typed } : {}), kind: mode, category, audience, ...(coverUrl ? { cover_url: coverUrl } : {}) });
     setBusy(false);
     if (!res.ok) {
       setError(res.message || "Live start nahi ho saki.");
@@ -881,6 +896,24 @@ function GoLiveSetup({ me, onStart, onCancel }) {
             </button>
           </div>
         )}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <label style={{ flex: 1 }}>Category
+            <select className="input" value={category} onChange={(e) => setCategory(e.target.value)} aria-label="Live category" style={{ width: "100%" }}>
+              <option value="">General</option><option value="chat">Chat</option><option value="gaming">Gaming</option><option value="music">Music</option><option value="talk">Talk</option><option value="sports">Sports</option>
+            </select>
+          </label>
+          <label style={{ flex: 1 }}>Audience
+            <select className="input" value={audience} onChange={(e) => setAudience(e.target.value)} aria-label="Live audience" style={{ width: "100%" }}>
+              <option value="everyone">Everyone</option><option value="followers">Followers only</option>
+            </select>
+          </label>
+        </div>
+        <label style={{ display: "grid", gap: 4 }}>Cover image (optional)
+          <input type="file" accept="image/*" onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; const { uploadMedia } = await import("./api.js"); const up = await uploadMedia(f, "image"); if (up.ok) setCoverUrl(up.url); else setError(up.message); }} />
+          {coverUrl && <span style={{ color: "var(--dim)", fontSize: 13 }}>Cover set ✓ (validated as an image on the server before use)</span>}
+        </label>
+        {mode === "video" && stream && <button type="button" className="btn" onClick={switchCamera}>🔄 Switch camera (front/rear)</button>}
+        <p style={{ color: "var(--dim)", fontSize: 13, margin: 0 }}>Pre-broadcast checklist: signed in ✓ · camera/mic permission at tap time · preview above · title/category/audience set. Ending is confirmed, and leaving stops your camera/mic tracks. Live has no subtitles/closed captions — chat is text-only. No age gate applies to general live viewing (monetization is 18+ only).</p>
         <Notice text={error} bad />
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" type="button" onClick={cancel} style={{ flex: 1 }}>
@@ -1530,7 +1563,7 @@ function BroadcastRoom({ me, session, stream, processor, onDone }) {
           <button type="button" onClick={() => setShowFilters(true)} style={roundBtnStyle} aria-label="Filters" title="Face filters">
             🎨
           </button>
-          <button className="btn btn-danger" onClick={endLive} disabled={ending} style={{ borderRadius: 999, padding: "11px 16px", fontSize: 15, fontWeight: 800, whiteSpace: "nowrap", flexShrink: 0 }}>
+          <button className="btn btn-danger" onClick={() => { if (window.confirm("End this live? Viewers will be disconnected and a summary will be shown.")) endLive(); }} disabled={ending} style={{ borderRadius: 999, padding: "11px 16px", fontSize: 15, fontWeight: 800, whiteSpace: "nowrap", flexShrink: 0 }}>
             {ending ? "Ending…" : "⏹ End Live"}
           </button>
         </div>
@@ -2905,7 +2938,7 @@ function BroadHostRoom({ me, session, stream, onDone }) {
         <button className="btn" onClick={toggleMyMute} style={{ borderRadius: 999, padding: "9px 13px", fontWeight: 700 }} aria-label="Apna mic mute/unmute">
           {myMuted ? "🔇 Mic band" : "🎙️ Mic khula"}
         </button>
-        <button className="btn btn-danger" onClick={endLive} disabled={ending} style={{ borderRadius: 999, padding: "10px 15px", fontWeight: 800 }}>
+        <button className="btn btn-danger" onClick={() => { if (window.confirm("End this live? Viewers will be disconnected and a summary will be shown.")) endLive(); }} disabled={ending} style={{ borderRadius: 999, padding: "10px 15px", fontWeight: 800 }}>
           {ending ? "Ending…" : "End Broad"}
         </button>
       </div>

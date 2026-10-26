@@ -57,6 +57,10 @@ export const posts = sqliteTable("posts", {
   title: text("title").notNull(),
   description: text("description").notNull().default(""),
   hidden: integer("hidden").notNull().default(0), // 1 = auto-hidden by reports / owner moderation (owner still sees it)
+  commentsAllowed: integer("comments_allowed").notNull().default(1),
+  duetAllowed: integer("duet_allowed").notNull().default(1),
+  commentsAllowed: integer("comments_allowed").notNull().default(1),
+  duetAllowed: integer("duet_allowed").notNull().default(1),
   viewCount: integer("view_count").notNull().default(0), // distinct viewers who played this video (see post_views)
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
@@ -84,6 +88,7 @@ export const comments = sqliteTable("comments", {
   postId: integer("post_id").notNull().references(() => posts.id, { onDelete: "cascade" }),
   parentId: integer("parent_id").references(() => comments.id, { onDelete: "cascade" }), // null = top-level; set for a reply
   body: text("body").notNull(),
+  pinned: integer("pinned").notNull().default(0),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
@@ -157,6 +162,9 @@ export const liveSessions = sqliteTable("live_sessions", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   title: text("title").notNull(),
+  category: text("category").notNull().default(""),
+  coverUrl: text("cover_url"),
+  audience: text("audience").notNull().default("everyone"), // everyone | followers
   kind: text("kind").notNull().default("video"), // "video" | "broad" (audio-only voice room)
   startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
   endedAt: integer("ended_at", { mode: "timestamp_ms" }),
@@ -287,5 +295,103 @@ export const messages = sqliteTable("messages", {
   recipientId: integer("recipient_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   body: text("body").notNull(),
   readAt: integer("read_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+// ---- Phase 2 tables (2026-10-26): all additive, no existing row touched. ----
+export const postEvents = sqliteTable("post_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  postId: integer("post_id").notNull().references(() => posts.id, { onDelete: "cascade" }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  event: text("event").notNull(), // started | completed | replay | skip
+  durationMs: integer("duration_ms").notNull().default(0),
+  watchMs: integer("watch_ms").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const postShares = sqliteTable("post_shares", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  postId: integer("post_id").notNull().references(() => posts.id, { onDelete: "cascade" }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const hiddenForViewer = sqliteTable("hidden_for_viewer", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  scope: text("scope").notNull(), // post | creator
+  targetId: integer("target_id").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const savedPosts = sqliteTable("saved_posts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  postId: integer("post_id").notNull().references(() => posts.id, { onDelete: "cascade" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const mutedUsers = sqliteTable("muted_users", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  mutedId: integer("muted_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const commentKeywords = sqliteTable("comment_keywords", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  keyword: text("keyword").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const moderationAppeals = sqliteTable("moderation_appeals", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  targetType: text("target_type").notNull(),
+  targetId: integer("target_id").notNull(),
+  message: text("message").notNull(),
+  status: text("status").notNull().default("pending"),
+  decidedBy: integer("decided_by").references(() => users.id),
+  decidedAt: integer("decided_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const adminAuditLog = sqliteTable("admin_audit_log", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  adminId: integer("admin_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  action: text("action").notNull(),
+  targetType: text("target_type").notNull(),
+  targetId: integer("target_id").notNull(),
+  details: text("details").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const playlists = sqliteTable("playlists", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const playlistItems = sqliteTable("playlist_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  playlistId: integer("playlist_id").notNull().references(() => playlists.id, { onDelete: "cascade" }),
+  postId: integer("post_id").notNull().references(() => posts.id, { onDelete: "cascade" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const userInterests = sqliteTable("user_interests", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  tag: text("tag").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const clientMetrics = sqliteTable("client_metrics", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
+  kind: text("kind").notNull(), // video_load | playback_failure | upload_success | api_latency | startup
+  valueMs: integer("value_ms").notNull().default(0),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });

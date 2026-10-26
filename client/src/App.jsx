@@ -4,6 +4,7 @@ import { LiveView } from "./Live.jsx";
 import AdSlot from "./AdSlot.jsx";
 import { setViewerMuted, viewerMuted } from "./sound.js";
 import { InboxView, SearchView, SettingsView } from "./Redesign.jsx";
+import { GuestFeedView, Phase2Hub } from "./Phase2.jsx";
 
 // Shown while the (free-tier) server is waking up and the client is
 // retrying — a slow first load is normal, not an error.
@@ -419,7 +420,7 @@ function GoogleSetupView({ onAuthed, onCancel }) {
   );
 }
 
-function AuthView({ onAuthed }) {
+function AuthView({ onAuthed, onGuest }) {
   const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -499,6 +500,7 @@ function AuthView({ onAuthed }) {
         <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
       </div>
       <GoogleButton />
+      {onGuest && <button className="btn" type="button" onClick={onGuest} style={{ width: "100%", marginTop: 10 }}>👀 Browse as guest (no account needed)</button>}
       {mode === "signup" && <p style={{ color: "var(--dim)", fontSize: 13, marginTop: 12 }}>Signing up with a friend&apos;s referral code counts you as their referral.</p>}
     </div>
   );
@@ -506,7 +508,7 @@ function AuthView({ onAuthed }) {
 
 // ---------- comments ------------------------------------------------------------
 
-export function CommentsSheet({ post, onClose, onAdded }) {
+export function CommentsSheet({ post, onClose, onAdded, onHashtag, onMention }) {
   const [comments, setComments] = useState([]);
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
@@ -591,7 +593,10 @@ export function CommentsSheet({ post, onClose, onAdded }) {
               </button>
             </form>
           ) : (
-            <div style={{ fontSize: 15 }}>{c.body}</div>
+            <>
+              <div style={{ fontSize: 15 }}>{renderRichText(c.body, onHashtag, onMention)}{c.pinned ? " 📌" : ""}</div>
+              {(post.author?.is_me || false) && <button className="btn btn-small" onClick={async () => { await call("pinComment", { comment_id: c.id, pinned: !c.pinned }); const r = await call("getComments", { post_id: post.id }); if (r.ok) setComments(r.comments); }}>{c.pinned ? "Unpin" : "Pin comment"}</button>}
+            </>
           )}
           <div style={{ display: "flex", gap: 10, marginTop: 2, fontSize: 12.5 }}>
             {!indented && (
@@ -749,7 +754,16 @@ export function ReportDialog({ targetType, targetId, label, onClose }) {
 // no toggle. Tapping the caption text itself also toggles; the block
 // is not part of the <video> element, so this never fights the
 // play/pause tap on the video.
-function CaptionBlock({ title, description }) {
+export function renderRichText(text, onHashtag, onMention) {
+  const parts = String(text ?? "").split(/(#[\p{L}\p{N}_]+|@[A-Za-z0-9_]+)/gu);
+  return parts.map((part, i) => {
+    if (part.startsWith("#") && onHashtag) return <button key={i} type="button" onClick={(e) => { e.stopPropagation(); onHashtag(part); }} style={{ background: "none", border: "none", color: "var(--accent)", fontWeight: 700, padding: 0, cursor: "pointer", fontSize: "inherit" }}>{part}</button>;
+    if (part.startsWith("@") && onMention) return <button key={i} type="button" onClick={(e) => { e.stopPropagation(); onMention(part.slice(1)); }} style={{ background: "none", border: "none", color: "var(--accent)", fontWeight: 700, padding: 0, cursor: "pointer", fontSize: "inherit" }}>{part}</button>;
+    return <span key={i}>{part}</span>;
+  });
+}
+
+function CaptionBlock({ title, description, onHashtag, onMention }) {
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const textRef = useRef(null);
@@ -784,8 +798,8 @@ function CaptionBlock({ title, description }) {
             : { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", fontSize: 15, cursor: overflowing ? "pointer" : undefined }
         }
       >
-        <span style={{ fontWeight: 700 }}>{title}</span>
-        {description ? <span style={{ fontSize: 14, opacity: 0.9 }}> {description}</span> : null}
+        <span style={{ fontWeight: 700 }}>{renderRichText(title, onHashtag, onMention)}</span>
+        {description ? <span style={{ fontSize: 14, opacity: 0.9 }}> {renderRichText(description, onHashtag, onMention)}</span> : null}
       </div>
       {overflowing && !expanded && (
         <button
@@ -819,7 +833,7 @@ function CaptionBlock({ title, description }) {
   );
 }
 
-function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, badge, canModerate, onDelete }) {
+function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, badge, canModerate, onDelete, onHashtag, onMention }) {
   const videoRef = useRef(null);
   const cardRef = useRef(null);
   // Sound is ON by default; `muted` here is only ever the viewer's own
@@ -831,6 +845,13 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
   const [paused, setPaused] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [buffering, setBuffering] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [videoError, setVideoError] = useState(false);
+  const [videoKey, setVideoKey] = useState(0);
+  const holdTimerRef = useRef(0);
+  const holdFiredRef = useRef(false);
+  const completedRef = useRef(false);
+  const lastTimeRef = useRef(0);
   const [reportOpen, setReportOpen] = useState(false);
   const [shareNote, setShareNote] = useState("");
   // Feed tap gestures (owner spec): ONE tap toggles play/pause, a
@@ -853,6 +874,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
 
   async function shareVideo() {
     const url = `${window.location.origin}/?v=${post.id}`;
+    call("recordShare", { post_id: post.id }).catch(() => {});
     const result = await shareUrl({ url, text: `Watch “${post.title}” on Zoomly` });
     if (result === "copied") {
       setShareNote("Link copied ✓");
@@ -942,6 +964,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
   // land on the caption block (a separate element), and the rail
   // buttons are their own targets — neither reaches this handler.
   function handleVideoTap(e) {
+    if (holdFiredRef.current) { holdFiredRef.current = false; return; }
     if (tapTimerRef.current) {
       clearTimeout(tapTimerRef.current);
       tapTimerRef.current = 0;
@@ -981,6 +1004,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
   return (
     <div className="feed-item" ref={cardRef} style={{ background: "#000" }}>
       <video
+        key={videoKey}
         ref={videoRef}
         src={post.video_url}
         poster={post.thumbnail_url || undefined}
@@ -990,11 +1014,23 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
         playsInline
         preload="metadata"
         onClick={handleVideoTap}
-        onPlay={() => notePostView(post)}
+        onPointerDown={() => { holdTimerRef.current = setTimeout(() => { holdFiredRef.current = true; videoRef.current?.pause(); setPaused(true); }, 600); }}
+        onPointerUp={() => { clearTimeout(holdTimerRef.current); if (holdFiredRef.current) { videoRef.current?.play().catch(() => {}); setPaused(false); } }}
+        onPointerLeave={() => clearTimeout(holdTimerRef.current)}
+        onPlay={() => { notePostView(post); call("recordWatchEvent", { post_id: post.id, event: "started" }).catch(() => {}); }}
+        onTimeUpdate={(e) => { const v = e.target; if (v.duration) { setProgress(v.currentTime / v.duration); if (v.currentTime < lastTimeRef.current - 1) call("recordWatchEvent", { post_id: post.id, event: "replay" }).catch(() => {}); lastTimeRef.current = v.currentTime; if (v.currentTime / v.duration > 0.9 && !completedRef.current) { completedRef.current = true; call("recordWatchEvent", { post_id: post.id, event: "completed", duration_ms: Math.round(v.duration * 1000), watch_ms: Math.round(v.currentTime * 1000) }).catch(() => {}); } } }}
+        onError={() => { setVideoError(true); call("recordMetric", { kind: "playback_failure" }).catch(() => {}); }}
         onWaiting={() => setBuffering(true)}
         onPlaying={() => setBuffering(false)}
         onCanPlay={() => setBuffering(false)}
       />
+      <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 3, background: "rgba(255,255,255,0.25)", zIndex: 3 }} aria-label="Video progress"><div style={{ height: 3, width: `${Math.round(progress * 100)}%`, background: "var(--accent)" }} /></div>
+      {videoError && (
+        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, background: "rgba(0,0,0,0.6)", zIndex: 5 }}>
+          <span style={{ color: "#fff", fontWeight: 700 }}>Video could not play (network or file error)</span>
+          <button className="btn btn-primary" onClick={() => { setVideoError(false); setVideoKey((k) => k + 1); }}>↻ Retry video</button>
+        </div>
+      )}
       {buffering && !paused && (
         <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }} aria-label="Loading video">
           <div className="buffer-spinner" />
@@ -1087,6 +1123,13 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
               >
                 🚩 Report video
               </button>
+              <button className="btn btn-small" onClick={async () => { setMenuOpen(false); await call("toggleSave", { post_id: post.id }); }}>
+                💾 Save video
+              </button>
+              <button className="btn btn-small" onClick={async () => { setMenuOpen(false); await call("hideNotInterested", { post_id: post.id }); onBlock?.(null); }}>
+                🙈 Not interested
+              </button>
+              <div style={{ fontSize: 12, color: "var(--dim)", padding: "4px 8px" }}>Quality: single Cloudinary source — no quality selector exists (no variants are served).</div>
               {post.author && !post.author.is_me && (
                 <button
                   className="btn btn-small"
@@ -1123,7 +1166,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
           @{post.author?.username}
         </button>{" "}
         <OwnerBadge user={post.author} />
-        <CaptionBlock title={post.title} description={post.description} />
+        <CaptionBlock title={post.title} description={post.description} onHashtag={onHashtag} onMention={onMention} />
         <div style={{ fontSize: 13, marginTop: 4 }}>🎵 Original audio · @{post.author?.username}</div>
         <div style={{ fontSize: 12, opacity: 0.75, marginTop: 2 }}>{timeAgo(post.created_at)}</div>
       </div>
@@ -1342,12 +1385,13 @@ function StoriesRow({ me }) {
   );
 }
 
-function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications, sharedPostId }) {
+function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications, sharedPostId, onHashtag, onMention }) {
   const [stream, setStream] = useState("foryou");
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [commentPost, setCommentPost] = useState(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   // A video shared via /?v=<id> opens pinned at the top of the feed.
   const [sharedPost, setSharedPost] = useState(null);
   const [sharedMissing, setSharedMissing] = useState(false);
@@ -1403,6 +1447,17 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
       setPosts((prev) => prev.map(patch));
       setSharedPost((prev) => (prev ? patch(prev) : prev));
       refreshMe?.();
+    }
+  }
+
+  async function loadMore() {
+    if (loadingMore) return;
+    setLoadingMore(true);
+    const res = await call("getFeed", { stream, limit: 30, offset: posts.length });
+    setLoadingMore(false);
+    if (res.ok) {
+      const seen = new Set(posts.map((p) => p.id));
+      setPosts((prev) => [...prev, ...res.posts.filter((p) => !seen.has(p.id))]);
     }
   }
 
@@ -1495,6 +1550,8 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
             onFollow={handleFollow}
             onComment={setCommentPost}
             onOpenProfile={onOpenProfile}
+            onHashtag={onHashtag}
+            onMention={onMention}
             onBlock={(author) => {
               setSharedPost(null);
               setPosts((prev) => prev.filter((p) => p.author?.id !== author.id));
@@ -1518,11 +1575,13 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
               onDelete={handleDeleted}
             />
           ))}
-        {!loading && !loadError && posts.length > 0 && <AdSlot />}
+        {!loading && !loadError && posts.length > 0 && (<><button className="btn" onClick={loadMore} disabled={loadingMore} style={{ margin: "16px auto", display: "block" }}>{loadingMore ? "Loading…" : "Load more videos (pagination)"}</button><button className="btn" onClick={load} style={{ margin: "0 auto 16px", display: "block" }}>↻ Refresh feed</button><AdSlot /></>)}
       </div>
       {commentPost && (
         <CommentsSheet
           post={commentPost}
+          onHashtag={onHashtag}
+          onMention={onMention}
           onClose={() => setCommentPost(null)}
           onAdded={() => setPosts((prev) => prev.map((p) => (p.id === commentPost.id ? { ...p, comment_count: p.comment_count + 1 } : p)))}
         />
@@ -1668,6 +1727,7 @@ function UploadView({ onPosted }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [done, setDone] = useState("");
+  const abortRef = useRef(null);
 
   function pickFile(f) {
     setFile(f || null);
@@ -1692,7 +1752,10 @@ function UploadView({ onPosted }) {
     }
     setBusy(true);
     setError("");
-    const up = await uploadMedia(file, "video");
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    const up = await uploadMedia(file, "video", ctrl.signal);
+    abortRef.current = null;
     if (!up.ok) {
       setBusy(false);
       setError(up.message || "Upload failed.");
@@ -1767,6 +1830,11 @@ function UploadView({ onPosted }) {
         <button className="btn btn-primary" type="submit" disabled={busy} style={{ padding: "12px 16px", fontSize: 16 }}>
           {busy ? "Uploading… please keep this open" : "Post video"}
         </button>
+        {busy && (
+          <button className="btn btn-danger" type="button" onClick={() => { abortRef.current?.abort(); setBusy(false); setError("Upload cancelled — your video, title and description are kept. Retry when ready."); }}>
+            ✕ Cancel upload
+          </button>
+        )}
         {error && file && !busy && (
           <button className="btn" type="button" onClick={submit}>
             ↻ Retry upload (same video, title &amp; description kept)
@@ -2054,7 +2122,7 @@ export function InstallAppButton() {
   return null;
 }
 
-function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage, onGoMonetization, onOpenSettings }) {
+function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage, onGoMonetization, onOpenSettings, onOpenPhase2 }) {
   const isMe = !userId || userId === me.id;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -2252,6 +2320,7 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
           <button className="btn" onClick={() => setPwOpen((v) => !v)}>
             🔑 Change password
           </button>
+          {onOpenPhase2 && <button className="btn" onClick={onOpenPhase2}>⭐ Creator &amp; advanced tools</button>}
           <button className="btn" onClick={() => onOpenSettings?.()}>
             ⚙️ Settings &amp; Privacy
           </button>
@@ -3720,6 +3789,8 @@ export function App() {
   const [profileUserId, setProfileUserId] = useState(() => (tab === "profile" ? storedProfileUserId() : null));
   const [feedKey, setFeedKey] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [guest, setGuest] = useState(false);
+  const [phase2, setPhase2] = useState(null);
   const waking = useWaking();
 
   const refreshMe = useCallback(async () => {
@@ -3780,6 +3851,12 @@ export function App() {
     saveTab(tab, profileUserId);
   }, [me, tab, profileUserId]);
 
+  async function openHashtag(tag) { setPhase2({ screen: "hashtag", tag }); }
+  async function openMention(username) {
+    const res = await call("getPeople", { query: username });
+    const match = res.ok ? res.people.find((p) => p.username === username.toLowerCase()) : null;
+    if (match) openProfile(match.id);
+  }
   function openProfile(userId) {
     setProfileUserId(userId ?? null);
     setTab("profile");
@@ -3858,13 +3935,14 @@ export function App() {
         />
       );
     }
-    return <AuthView onAuthed={afterAuth} />;
+    if (guest) return <GuestFeedView onSignIn={() => setGuest(false)} />;
+    return <AuthView onAuthed={afterAuth} onGuest={() => setGuest(true)} />;
   }
 
   return (
     <div style={{ height: "100dvh", display: "flex", flexDirection: "column", maxWidth: tab === "feed" ? 480 : 860, margin: "0 auto" }}>
       <div style={{ flex: 1, minHeight: 0, overflowY: tab === "feed" ? "hidden" : "auto" }} className={tab === "feed" ? "" : "no-scrollbar"}>
-        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} onOpenNotifications={() => setShowNotifs(true)} sharedPostId={sharedPostId} />}
+        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} onOpenNotifications={() => setShowNotifs(true)} sharedPostId={sharedPostId} onHashtag={openHashtag} onMention={openMention} />}
         {tab === "watch" && <WatchView me={me} onOpenProfile={openProfile} />}
         {tab === "search" && <SearchView me={me} onOpenProfile={openProfile} />}
         {tab === "inbox" && <InboxView me={me} onOpenChat={(u) => setChatPeer(u)} onGoLive={() => setTab("live")} refreshMe={refreshMe} />}
@@ -3887,6 +3965,7 @@ export function App() {
             onLogout={logout}
             onMessage={(u) => setChatPeer(u)}
             onOpenSettings={() => setSettingsOpen(true)}
+            onOpenPhase2={() => setPhase2({ screen: "menu" })}
             onGoMonetization={() => {
               try {
                 sessionStorage.setItem("zoomly_open_monetization", "1");
@@ -3917,6 +3996,7 @@ export function App() {
       )}
       {chatPeer && <ChatScreen me={me} peer={chatPeer} onClose={() => setChatPeer(null)} refreshMe={refreshMe} />}
       {settingsOpen && <SettingsView me={me} onClose={() => setSettingsOpen(false)} onLogout={logout} refreshMe={refreshMe} />}
+      {phase2 && <Phase2Hub me={me} onClose={() => setPhase2(null)} onGoLive={() => { setPhase2(null); setTab("live"); }} onGoUpload={() => { setPhase2(null); setTab("upload"); }} initialScreen={phase2.screen} initialTag={phase2.tag} />}
       <nav className="tiktok-nav" aria-label="Main navigation">
         {NAV.map((item) =>
           item.create ? (
