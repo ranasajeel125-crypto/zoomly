@@ -833,7 +833,49 @@ function CaptionBlock({ title, description, onHashtag, onMention }) {
   );
 }
 
-function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, badge, canModerate, onDelete, onHashtag, onMention }) {
+// Section 71 rail icons: vector strokes (lime = active), not emoji, so the
+// right-side column reads the same at any density. Colours are the old
+// Zoomly palette only — accent is lime, never TikTok pink/cyan.
+function HeartIcon({ filled }) {
+  return (
+    <svg width="30" height="30" viewBox="0 0 24 24" fill={filled ? "var(--accent)" : "none"} stroke={filled ? "var(--accent)" : "#fff"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+    </svg>
+  );
+}
+function CommentIcon() {
+  return (
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+    </svg>
+  );
+}
+function BookmarkIcon({ filled }) {
+  return (
+    <svg width="28" height="28" viewBox="0 0 24 24" fill={filled ? "var(--accent)" : "none"} stroke={filled ? "var(--accent)" : "#fff"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+function ShareIcon() {
+  return (
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7" />
+      <path d="M16 6l-4-4-4 4" />
+      <path d="M12 2v13" />
+    </svg>
+  );
+}
+function SearchIcon() {
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+      <circle cx="11" cy="11" r="7" />
+      <path d="M21 21l-4.35-4.35" />
+    </svg>
+  );
+}
+
+function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, badge, canModerate, onDelete, onHashtag, onMention, saved, onToggleSave }) {
   const videoRef = useRef(null);
   const cardRef = useRef(null);
   // Sound is ON by default; `muted` here is only ever the viewer's own
@@ -929,6 +971,28 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
     return () => observer.disconnect();
   }, []);
 
+  // Section 71: pause when the app/tab goes to the background; resume on
+  // return only if this card is still the on-screen one (the observer
+  // above owns the normal in/out-of-viewport pauses).
+  useEffect(() => {
+    function onVis() {
+      const video = videoRef.current;
+      if (!video) return;
+      if (document.hidden) {
+        video.pause();
+        setPaused(true);
+      } else {
+        const rect = cardRef.current?.getBoundingClientRect();
+        if (rect && rect.top < window.innerHeight && rect.bottom > 0 && !videoError) {
+          video.play().catch(() => {});
+          setPaused(false);
+        }
+      }
+    }
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [videoError]);
+
   function togglePlay() {
     const video = videoRef.current;
     if (!video) return;
@@ -1002,13 +1066,13 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
   }
 
   return (
-    <div className="feed-item" ref={cardRef} style={{ background: "#000" }}>
+    <div className="feed-item" ref={cardRef} style={{ background: "var(--bg)" }}>
       <video
         key={videoKey}
         ref={videoRef}
         src={post.video_url}
         poster={post.thumbnail_url || undefined}
-        style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }}
+        style={{ width: "100%", height: "100%", objectFit: "cover", background: "var(--bg)" }}
         loop
         muted={muted}
         playsInline
@@ -1084,29 +1148,45 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
           🔊 Sound on
         </button>
       )}
-      <div style={{ position: "absolute", right: 10, bottom: 96, display: "flex", flexDirection: "column", gap: 16, alignItems: "center" }}>
-        <button onClick={() => onOpenProfile(post.author.id)} style={{ background: "none", border: "none", padding: 0 }} aria-label="Open profile">
-          <Avatar user={post.author} size={48} />
-        </button>
-        {post.author && !post.author.is_me && (
-          <button className="btn btn-primary btn-small" onClick={() => onFollow(post.author)}>
-            {post.author.followed_by_me ? "Following" : "Follow"}
+      <div style={{ position: "absolute", right: 12, bottom: 96, display: "flex", flexDirection: "column", gap: 12, alignItems: "center", zIndex: 3 }}>
+        <div style={{ position: "relative", width: 52, height: 52 }}>
+          <button onClick={() => onOpenProfile(post.author.id)} style={{ background: "none", border: "none", padding: 0, display: "block" }} aria-label="Open profile">
+            <Avatar user={post.author} size={52} />
           </button>
-        )}
-        <button onClick={() => onLike(post)} className={`like-btn ${post.liked_by_me ? "liked like-pop" : ""}`} style={{ background: "none", border: "none", color: post.liked_by_me ? "var(--accent)" : "#fff", fontSize: 30, lineHeight: 1 }} aria-label={post.liked_by_me ? "Unlike" : "Like"}>
-          ♥
-          <div style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>{post.like_count}</div>
+          {post.author && !post.author.is_me && (
+            <button
+              onClick={() => onFollow(post.author)}
+              aria-label={post.author.followed_by_me ? "Unfollow" : "Follow"}
+              title={post.author.followed_by_me ? "Unfollow" : "Follow"}
+              style={{ position: "absolute", right: 0, bottom: -2, width: 22, height: 22, borderRadius: "50%", background: "var(--accent)", color: "#131a02", border: "2px solid var(--bg)", fontSize: 16, fontWeight: 900, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}
+            >
+              {post.author.followed_by_me ? "✓" : "+"}
+            </button>
+          )}
+        </div>
+        <button onClick={() => onLike(post)} className={`rail-btn like-btn ${post.liked_by_me ? "liked like-pop" : ""}`} aria-label={post.liked_by_me ? "Unlike" : "Like"}>
+          <HeartIcon filled={post.liked_by_me} />
+          <span className="rail-count">{post.like_count}</span>
         </button>
-        <button onClick={() => onComment(post)} style={{ background: "none", border: "none", color: "#fff", fontSize: 28, lineHeight: 1 }} aria-label="Comments">
-          💬
-          <div style={{ fontSize: 13, fontWeight: 700 }}>{post.comment_count}</div>
+        <button onClick={() => onComment(post)} className="rail-btn" aria-label="Comments">
+          <CommentIcon />
+          <span className="rail-count">{post.comment_count}</span>
         </button>
-        <button onClick={shareVideo} style={{ background: "none", border: "none", color: "#fff", fontSize: 24, lineHeight: 1 }} aria-label="Share video" title="Share video">
-          🔗
-          <div style={{ fontSize: 12, fontWeight: 700 }}>{shareNote || "Share"}</div>
+        <button
+          onClick={() => onToggleSave?.(post)}
+          className="rail-btn"
+          aria-label={saved ? "Remove bookmark" : "Bookmark video"}
+          title={saved ? "Saved" : "Save video"}
+        >
+          <BookmarkIcon filled={!!saved} />
+          <span className="rail-label">{saved ? "Saved" : "Save"}</span>
         </button>
-        <button onClick={toggleMute} style={{ background: "none", border: "none", color: "#fff", fontSize: 24, lineHeight: 1 }} aria-label="Music / sound" title="Music / sound">
-          {muted ? "🔇" : "🔊"}
+        <button onClick={shareVideo} className="rail-btn" aria-label="Share video" title="Share video">
+          <ShareIcon />
+          <span className="rail-label">{shareNote || "Share"}</span>
+        </button>
+        <button onClick={toggleMute} className={`sound-disc ${muted ? "muted" : ""}`} aria-label={muted ? "Unmute original audio" : "Mute original audio"} title="Original audio">
+          ♪
         </button>
         <div style={{ position: "relative" }}>
           <button onClick={() => setMenuOpen((v) => !v)} style={{ background: "none", border: "none", color: "#fff", fontSize: 24, lineHeight: 1 }} aria-label="More options">
@@ -1161,13 +1241,15 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
           )}
         </div>
       </div>
-      <div style={{ position: "absolute", left: 12, right: 84, bottom: 86, color: "#fff", textShadow: "0 1px 6px rgba(0,0,0,0.8)" }}>
+      <div style={{ position: "absolute", left: 0, right: 84, bottom: 86, color: "#fff", textShadow: "0 1px 6px rgba(0,0,0,0.8)", background: "linear-gradient(to top, rgba(10,15,13,0.65), rgba(10,15,13,0))", padding: "24px 12px 6px", zIndex: 2 }}>
         <button onClick={() => onOpenProfile(post.author.id)} style={{ background: "none", border: "none", color: "#fff", padding: 0, fontWeight: 800, fontSize: 16 }}>
           @{post.author?.username}
         </button>{" "}
         <OwnerBadge user={post.author} />
         <CaptionBlock title={post.title} description={post.description} onHashtag={onHashtag} onMention={onMention} />
-        <div style={{ fontSize: 13, marginTop: 4 }}>🎵 Original audio · @{post.author?.username}</div>
+        <button onClick={toggleMute} style={{ background: "none", border: "none", color: "#fff", padding: 0, fontSize: 13, marginTop: 4, textAlign: "left" }} aria-label="Original audio — toggle sound">
+          ♪ Original audio · @{post.author?.username} {muted ? "(muted)" : ""}
+        </button>
         <div style={{ fontSize: 12, opacity: 0.75, marginTop: 2 }}>{timeAgo(post.created_at)}</div>
       </div>
       {reportOpen && <ReportDialog targetType="post" targetId={post.id} label="video" onClose={() => setReportOpen(false)} />}
@@ -1385,9 +1467,10 @@ function StoriesRow({ me }) {
   );
 }
 
-function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications, sharedPostId, onHashtag, onMention }) {
+function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications, onOpenSearch, onOpenCommunity, sharedPostId, onHashtag, onMention }) {
   const [stream, setStream] = useState("foryou");
   const [posts, setPosts] = useState([]);
+  const [savedIds, setSavedIds] = useState(() => new Set());
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [commentPost, setCommentPost] = useState(null);
@@ -1450,6 +1533,28 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
     }
   }
 
+  // Section 71 bookmark state comes from the real saved list (getSavedPosts,
+  // max 60) — the feed payload itself carries no saved flag, so the rail
+  // shows the server list, never a guessed state.
+  useEffect(() => {
+    (async () => {
+      const res = await call("getSavedPosts", {});
+      if (res.ok) setSavedIds(new Set((res.posts ?? []).map((p) => p.id)));
+    })();
+  }, []);
+
+  async function handleToggleSave(post) {
+    const res = await call("toggleSave", { post_id: post.id });
+    if (res.ok) {
+      setSavedIds((prev) => {
+        const next = new Set(prev);
+        if (res.saved) next.add(post.id);
+        else next.delete(post.id);
+        return next;
+      });
+    }
+  }
+
   async function loadMore() {
     if (loadingMore) return;
     setLoadingMore(true);
@@ -1470,7 +1575,7 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px 0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "calc(env(safe-area-inset-top) + 4px) 8px 0 8px" }}>
         <button
           onClick={onGoLive}
           aria-label="Open Live"
@@ -1488,6 +1593,8 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
             flexShrink: 0,
             lineHeight: 1,
             opacity: 0.92,
+            minWidth: 48,
+            minHeight: 48,
           }}
         >
           <svg width="25" height="19" viewBox="0 0 28 22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1497,24 +1604,32 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
           </svg>
           <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, marginTop: 1 }}>LIVE</span>
         </button>
-        <Logo size={30} />
-        <div style={{ display: "flex", flex: 1, gap: 6 }}>
-          <button className={`tab-btn ${stream === "following" ? "active" : ""}`} onClick={() => setStream("following")}>
+        <div className="feed-top-tabs no-scrollbar" role="tablist" aria-label="Feed">
+          <button className="feed-top-tab" onClick={() => onOpenSearch?.()} aria-label="Discover">
+            Discover
+          </button>
+          <button className="feed-top-tab" onClick={() => onOpenCommunity?.()} aria-label="Community">
+            Community
+          </button>
+          <button className={`feed-top-tab ${stream === "following" ? "active" : ""}`} onClick={() => setStream("following")} role="tab" aria-selected={stream === "following"}>
             Following
           </button>
-          <button className={`tab-btn ${stream === "foryou" ? "active" : ""}`} onClick={() => setStream("foryou")}>
+          <button className={`feed-top-tab ${stream === "foryou" ? "active" : ""}`} onClick={() => setStream("foryou")} role="tab" aria-selected={stream === "foryou"}>
             For You
           </button>
         </div>
-        <button onClick={onOpenNotifications} aria-label="Notifications" title="Notifications" style={{ position: "relative", background: "none", border: "none", fontSize: 21, cursor: "pointer", padding: 2, flexShrink: 0 }}>
+        <button onClick={() => onOpenSearch?.()} aria-label="Search" title="Search" style={{ background: "none", border: "none", padding: 0, flexShrink: 0, width: 48, height: 48, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <SearchIcon />
+        </button>
+        <button onClick={onOpenNotifications} aria-label="Notifications" title="Notifications" style={{ position: "relative", background: "none", border: "none", fontSize: 21, cursor: "pointer", padding: 2, flexShrink: 0, width: 48, height: 48 }}>
           🔔
           {(me?.unread_notifications ?? 0) + (me?.unread_messages ?? 0) > 0 && (
-            <span style={{ position: "absolute", top: -3, right: -5, background: "#e0245e", color: "#fff", borderRadius: 999, fontSize: 10, fontWeight: 800, padding: "1px 5px" }}>
+            <span style={{ position: "absolute", top: 4, right: 2, background: "var(--accent)", color: "#131a02", borderRadius: 999, fontSize: 10, fontWeight: 800, padding: "1px 5px" }}>
               {(me?.unread_notifications ?? 0) + (me?.unread_messages ?? 0) > 99 ? "99+" : (me?.unread_notifications ?? 0) + (me?.unread_messages ?? 0)}
             </span>
           )}
         </button>
-        <span className="chip" title="Your coin balance">
+        <span className="chip" title="Your coin balance" style={{ flexShrink: 0 }}>
           🪙 {me?.coin_balance ?? 0}
         </span>
       </div>
@@ -1552,6 +1667,8 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
             onOpenProfile={onOpenProfile}
             onHashtag={onHashtag}
             onMention={onMention}
+            saved={savedIds.has(sharedPost.id)}
+            onToggleSave={handleToggleSave}
             onBlock={(author) => {
               setSharedPost(null);
               setPosts((prev) => prev.filter((p) => p.author?.id !== author.id));
@@ -1570,6 +1687,10 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
               onFollow={handleFollow}
               onComment={setCommentPost}
               onOpenProfile={onOpenProfile}
+              onHashtag={onHashtag}
+              onMention={onMention}
+              saved={savedIds.has(post.id)}
+              onToggleSave={handleToggleSave}
               onBlock={(author) => setPosts((prev) => prev.filter((p) => p.author?.id !== author.id))}
               canModerate={me?.is_owner === true}
               onDelete={handleDeleted}
@@ -1719,7 +1840,7 @@ function WatchView({ me, onOpenProfile }) {
 
 // ---------- upload ---------------------------------------------------------------
 
-function UploadView({ onPosted }) {
+function UploadView({ onPosted, onGoLive }) {
   const [file, setFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [title, setTitle] = useState("");
@@ -1782,6 +1903,17 @@ function UploadView({ onPosted }) {
   return (
     <div style={{ padding: "14px 14px 20px", maxWidth: 560, margin: "0 auto" }}>
       <h2 style={{ margin: "2px 0 12px" }}>＋ Create a video</h2>
+      <div className="card" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <strong style={{ fontSize: 16 }}>🔴 Go Live</strong>
+          <p style={{ color: "var(--dim)", fontSize: 13, margin: "2px 0 0" }}>
+            Live rooms, gifts aur PK matches — yehi Zoomly ka existing Live system hai, yahan se seedha khulta hai.
+          </p>
+        </div>
+        <button type="button" className="btn btn-primary" onClick={() => onGoLive?.()} style={{ flexShrink: 0 }}>
+          Go Live →
+        </button>
+      </div>
       <form onSubmit={submit} style={{ display: "grid", gap: 12 }}>
         <div style={{ display: "flex", gap: 8 }}>
           <label className="btn btn-primary" style={{ flex: 1, cursor: "pointer" }}>
@@ -2122,7 +2254,7 @@ export function InstallAppButton() {
   return null;
 }
 
-function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage, onGoMonetization, onOpenSettings, onOpenPhase2 }) {
+function ProfileView({ me, userId, onOpenProfile, onOpenVideo, refreshMe, onLogout, onMessage, onGoMonetization, onOpenSettings, onOpenPhase2 }) {
   const isMe = !userId || userId === me.id;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -2257,6 +2389,10 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
   if (loading) return <p style={{ padding: 20, color: "var(--dim)" }}>Loading profile…</p>;
   if (!data) return <p style={{ padding: 20, color: "var(--dim)" }}>Profile not found.</p>;
   const profile = data.profile;
+  // Section 71 profile "likes" total: sum of real like_counts on the posts
+  // returned with this profile (getProfile caps at 60 posts) — no invented
+  // figure, and no separate total-likes field exists in the payload.
+  const totalLikes = (data.posts ?? []).reduce((s, p) => s + (p.like_count ?? 0), 0);
 
   return (
     <div style={{ padding: "14px 14px 20px", maxWidth: 640, margin: "0 auto" }}>
@@ -2283,9 +2419,12 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
         </div>
       </div>
       {profile.bio && <p style={{ margin: "12px 0 0", fontSize: 15 }}>{profile.bio}</p>}
-      <div style={{ display: "flex", gap: 18, marginTop: 14, fontSize: 14 }}>
+      <div style={{ display: "flex", gap: 18, marginTop: 14, fontSize: 14, flexWrap: "wrap" }}>
         <span>
           <strong>{profile.video_count}</strong> <span style={{ color: "var(--dim)" }}>Videos</span>
+        </span>
+        <span>
+          <strong>{totalLikes}</strong> <span style={{ color: "var(--dim)" }}>Likes</span>
         </span>
         <span>
           <strong>{profile.follower_count}</strong> <span style={{ color: "var(--dim)" }}>Followers</span>
@@ -2462,24 +2601,30 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
       {profileTab === "liked" && !likedLoading && likedPosts.length === 0 && <p style={{ color: "var(--dim)" }}>No liked videos yet.</p>}
       {profileTab === "private" && data.posts.filter((x) => x.hidden).length === 0 && <p style={{ color: "var(--dim)" }}>No videos under review — this is where your hidden/private videos appear.</p>}
       {profileTab === "posted" && data.posts.filter((x) => !x.hidden).length === 0 && <p style={{ color: "var(--dim)" }}>No videos yet.</p>}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 3 }}>
         {(profileTab === "liked" ? likedPosts : profileTab === "private" ? data.posts.filter((x) => x.hidden) : data.posts.filter((x) => !x.hidden)).map((post) => (
-          <div key={post.id} style={{ position: "relative", borderRadius: 10, overflow: "hidden", background: "#000", aspectRatio: "3/4" }}>
+          <div key={post.id} style={{ position: "relative", borderRadius: 8, overflow: "hidden", background: "var(--surface-2)", aspectRatio: "1/1" }}>
             {post.thumbnail_url ? (
               <img src={post.thumbnail_url} alt={post.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
             ) : (
               <video src={post.video_url} preload="metadata" muted style={{ width: "100%", height: "100%", objectFit: "cover" }} />
             )}
-            <div style={{ position: "absolute", left: 6, bottom: 6, right: 6, color: "#fff", fontSize: 12, fontWeight: 600, textShadow: "0 1px 4px rgba(0,0,0,0.9)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              ▶ {post.title}
+            <button
+              onClick={() => onOpenVideo?.(post.id)}
+              aria-label={`Open video: ${post.title}`}
+              title={post.title}
+              style={{ position: "absolute", inset: 0, background: "none", border: "none", padding: 0, cursor: "pointer", zIndex: 1 }}
+            />
+            <div style={{ position: "absolute", left: 6, bottom: 6, right: 6, color: "#fff", fontSize: 12, fontWeight: 700, textShadow: "0 1px 4px rgba(0,0,0,0.9)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", zIndex: 2, pointerEvents: "none" }}>
+              ▶ {post.view_count ?? 0}
             </div>
             {isMe && profileTab !== "liked" && (
-              <button onClick={() => handleDelete(post)} style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.65)", color: "#ff9a8a", border: "1px solid rgba(255,255,255,0.25)", borderRadius: 8, fontSize: 12, padding: "3px 7px" }}>
+              <button onClick={() => handleDelete(post)} style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.65)", color: "#ff9a8a", border: "1px solid rgba(255,255,255,0.25)", borderRadius: 8, fontSize: 12, padding: "3px 7px", zIndex: 3 }}>
                 Delete
               </button>
             )}
             {!isMe && me?.is_owner === true && (
-              <button data-admin-delete="" onClick={() => handleAdminDelete(post)} style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.65)", color: "#ff9a8a", border: "1px solid rgba(255,255,255,0.25)", borderRadius: 8, fontSize: 12, padding: "3px 7px" }}>
+              <button data-admin-delete="" onClick={() => handleAdminDelete(post)} style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.65)", color: "#ff9a8a", border: "1px solid rgba(255,255,255,0.25)", borderRadius: 8, fontSize: 12, padding: "3px 7px", zIndex: 3 }}>
                 Delete
               </button>
             )}
@@ -3765,7 +3910,7 @@ function NotificationsPanel({ onClose, refreshMe, onGoLive }) {
 // tabs (watch/people/live/rewards) still render if restored on refresh.
 const NAV = [
   { key: "feed", label: "Home", icon: "🏠" },
-  { key: "search", label: "Search", icon: "🔍" },
+  { key: "people", label: "Friends", icon: "👥" },
   { key: "upload", label: "Create", icon: "＋", create: true },
   { key: "inbox", label: "Inbox", icon: "✉️" },
   { key: "profile", label: "Profile", icon: "👤" },
@@ -3942,13 +4087,14 @@ export function App() {
   return (
     <div style={{ height: "100dvh", display: "flex", flexDirection: "column", maxWidth: tab === "feed" ? 480 : 860, margin: "0 auto" }}>
       <div style={{ flex: 1, minHeight: 0, overflowY: tab === "feed" ? "hidden" : "auto" }} className={tab === "feed" ? "" : "no-scrollbar"}>
-        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} onOpenNotifications={() => setShowNotifs(true)} sharedPostId={sharedPostId} onHashtag={openHashtag} onMention={openMention} />}
+        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} onOpenNotifications={() => setShowNotifs(true)} onOpenSearch={() => setTab("search")} onOpenCommunity={() => setTab("people")} sharedPostId={sharedPostId} onHashtag={openHashtag} onMention={openMention} />}
         {tab === "watch" && <WatchView me={me} onOpenProfile={openProfile} />}
         {tab === "search" && <SearchView me={me} onOpenProfile={openProfile} />}
         {tab === "inbox" && <InboxView me={me} onOpenChat={(u) => setChatPeer(u)} onGoLive={() => setTab("live")} refreshMe={refreshMe} />}
         {tab === "live" && <LiveView me={me} refreshMe={refreshMe} onOpenProfile={openProfile} />}
         {tab === "upload" && (
           <UploadView
+            onGoLive={() => setTab("live")}
             onPosted={() => {
               setFeedKey((k) => k + 1);
             }}
@@ -3961,6 +4107,11 @@ export function App() {
             me={me}
             userId={profileUserId}
             onOpenProfile={openProfile}
+            onOpenVideo={(postId) => {
+              setSharedPostId(postId);
+              setFeedKey((k) => k + 1);
+              setTab("feed");
+            }}
             refreshMe={refreshMe}
             onLogout={logout}
             onMessage={(u) => setChatPeer(u)}
