@@ -1255,7 +1255,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
           the dark gradient/shadow beside the caption text is removed
           entirely, by the user's explicit choice. Plain text on the
           video only; do NOT reintroduce a scrim in another form. */}
-      <div style={{ position: "absolute", left: 0, right: 84, bottom: 8, color: "#fff", textShadow: "none", padding: "6px 12px", zIndex: 2 }}>
+      <div style={{ position: "absolute", left: 0, right: 84, bottom: 0, color: "#fff", textShadow: "none", padding: "2px 12px 2px", zIndex: 2 }}>
         <button onClick={() => onOpenProfile(post.author.id)} style={{ background: "none", border: "none", color: "#fff", padding: 0, fontWeight: 800, fontSize: 16 }}>
           @{post.author?.username}
         </button>{" "}
@@ -1655,7 +1655,10 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
             )}
           </button>
           <span className="chip" title="Your coin balance" style={{ flexShrink: 0 }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--accent)", display: "inline-block" }} aria-hidden="true" /> {me?.coin_balance ?? 0}
+            <svg width="17" height="17" viewBox="0 0 20 20" aria-hidden="true" style={{ display: "inline-block", verticalAlign: "-3px" }}>
+              <circle cx="10" cy="10" r="9" fill="#FFD700" stroke="#B8860B" strokeWidth="1.5" />
+              <circle cx="10" cy="10" r="5.5" fill="none" stroke="#B8860B" strokeWidth="1" />
+            </svg> {me?.coin_balance ?? 0}
           </span>
         </div>
       </div>
