@@ -19,6 +19,7 @@
 }
 
 :root {
+  /* ORIGINAL Zoomly palette, preserved per owner correction 2026-10-26 (TikTok pink/cyan palette NOT used). */
   color-scheme: dark;
   --bg: #0a0f0d;
   --surface: #131a17;
@@ -28,8 +29,25 @@
   --border: #243129;
   --accent: #a3e635;
   --accent-dark: #3f6212;
+  --danger: #ff7a66;
   --bad: #ff7a66;
   --shadow: 0 22px 60px rgba(0, 0, 0, 0.45);
+}
+/* Light mode: same original lime accent, light surfaces. Applied by
+   App.jsx via document.documentElement.dataset.theme, persisted in
+   localStorage (see zoomly_prefs) — never by a server call. */
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --surface: #f2f2f2;
+  --surface-2: #e6e6e6;
+  --text: #000000;
+  --dim: #666666;
+  --border: #dddddd;
+  --shadow: 0 22px 60px rgba(0, 0, 0, 0.18);
+}
+[data-text="large"] {
+  font-size: 18px;
 }
 
 html,
@@ -38,7 +56,8 @@ body {
   padding: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans Arabic", "Noto Nastaliq Urdu", sans-serif;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -321,4 +340,71 @@ select {
     opacity: 0;
     transform: scale(1.15);
   }
+}
+
+/* ---- TikTok redesign additions (2026-10-26) ---- */
+.tiktok-nav {
+  display: flex;
+  border-top: 1px solid var(--border);
+  background: #000000;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+[data-theme="light"] .tiktok-nav { background: #ffffff; }
+.tiktok-nav button {
+  flex: 1;
+  background: none;
+  border: none;
+  padding: 8px 2px 7px;
+  color: var(--dim);
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-height: 48px;
+}
+.tiktok-nav button.active { color: var(--text); }
+.tiktok-nav .nav-create {
+  color: #fff;
+}
+.tiktok-nav .nav-create-badge {
+  display: flex; align-items: center; justify-content: center;
+  width: 46px; height: 28px; border-radius: 8px;
+  background: var(--accent); color: #fff; font-size: 22px; line-height: 1;
+  box-shadow: 0 4px 16px rgba(163,230,53,0.45);
+}
+.sheet-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 60;
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.panel {
+  background: var(--surface); width: 100%; border-radius: 18px 18px 0 0;
+  box-shadow: var(--shadow);
+}
+.like-btn { transition: transform 0.15s ease; }
+.like-btn:active { transform: scale(1.25); }
+.like-btn.liked { color: var(--accent) !important; }
+@keyframes zoomly-spin { to { transform: rotate(360deg); } }
+.buffer-spinner {
+  width: 44px; height: 44px; border-radius: 50%;
+  border: 4px solid rgba(255,255,255,0.25); border-top-color: #fff;
+  animation: zoomly-spin 0.8s linear infinite;
+}
+@keyframes zoomly-like-pop {
+  0% { transform: scale(0.6); } 50% { transform: scale(1.3); } 100% { transform: scale(1); }
+}
+.like-pop { animation: zoomly-like-pop 0.3s ease-out; }
+.upload-progress { height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.upload-progress > div { height: 100%; background: var(--accent); animation: zoomly-upload 1.2s ease-in-out infinite alternate; }
+@keyframes zoomly-upload { from { width: 15%; } to { width: 85%; } }
+.toggle { position: relative; width: 48px; height: 28px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); flex-shrink: 0; }
+.toggle[aria-checked="true"] { background: var(--accent); border-color: var(--accent); }
+.toggle span { position: absolute; top: 2px; left: 2px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: left 0.15s ease; }
+.toggle[aria-checked="true"] span { left: 22px; }
+.settings-row { display: flex; align-items: center; gap: 12px; padding: 12px 2px; border-bottom: 1px solid var(--border); text-align: left; width: 100%; background: none; border-left: none; border-right: none; border-top: none; color: var(--text); }
+.settings-row > span:first-child { flex: 1; min-width: 0; }
+.search-chip { cursor: pointer; }
+@media (prefers-reduced-motion: reduce) {
+  .like-pop, .buffer-spinner, .upload-progress > div { animation: none; }
 }

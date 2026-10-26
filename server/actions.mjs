@@ -381,6 +381,9 @@ async function meDto(user) {
     .where(and(eq(schema.messages.recipientId, user.id), isNull(schema.messages.readAt)));
   return {
     ...publicUserDto(user, counts.get(user.id) ?? 0),
+    private_account: Boolean(user.privateAccount),
+    comment_permission: user.commentPermission ?? "everyone",
+    message_permission: user.messagePermission ?? "everyone",
     referral_code: user.referralCode,
     referred_by: user.referredBy ?? null,
     live_title: user.liveTitle ?? null,
@@ -736,7 +739,14 @@ export const Actions = {
       if (!user) return { ok: false, message: "Please sign in." };
       // Hidden posts (auto-hidden by reports / moderation) show only to
       // their owner; blocked users' posts never reach this viewer.
+      // Private accounts (Settings & Privacy, 2026-10-26) likewise only
+      // reach followers + themselves in For You / Watch.
       const blocked = await blockedIdsFor(user.id);
+      const privateRows = await db.select({ id: schema.users.id }).from(schema.users).where(eq(schema.users.privateAccount, 1));
+      const privateIds = new Set(privateRows.map((r) => r.id));
+      const followRows = await db.select({ followeeId: schema.follows.followeeId }).from(schema.follows).where(eq(schema.follows.followerId, user.id));
+      const followSet = new Set(followRows.map((r) => r.followeeId));
+      const hiddenPrivateIds = [...privateIds].filter((id) => id !== user.id && !followSet.has(id));
       const visible = or(eq(schema.posts.hidden, 0), eq(schema.posts.userId, user.id));
       // Seen-first ordering (owner fix 2026-10-23): videos this user has
       // already watched (a post_views row — written when a video plays)
@@ -767,6 +777,7 @@ export const Actions = {
       } else {
         const conds = [visible];
         if (blocked.size > 0) conds.push(notInArray(schema.posts.userId, [...blocked]));
+        if (hiddenPrivateIds.length > 0) conds.push(notInArray(schema.posts.userId, hiddenPrivateIds));
         const joined = await db
           .select({ post: schema.posts })
           .from(schema.posts)
@@ -789,6 +800,13 @@ export const Actions = {
       const blocked = await blockedIdsFor(user.id);
       const conds = [or(eq(schema.posts.hidden, 0), eq(schema.posts.userId, user.id))];
       if (blocked.size > 0) conds.push(notInArray(schema.posts.userId, [...blocked]));
+      {
+        const privateRows = await db.select({ id: schema.users.id }).from(schema.users).where(eq(schema.users.privateAccount, 1));
+        const followRows = await db.select({ followeeId: schema.follows.followeeId }).from(schema.follows).where(eq(schema.follows.followerId, user.id));
+        const followSet = new Set(followRows.map((r) => r.followeeId));
+        const hiddenPrivateIds = privateRows.map((r) => r.id).filter((id) => id !== user.id && !followSet.has(id));
+        if (hiddenPrivateIds.length > 0) conds.push(notInArray(schema.posts.userId, hiddenPrivateIds));
+      }
       if (args.query) {
         const term = `%${args.query}%`;
         conds.push(or(like(schema.posts.title, term), like(schema.posts.description, term)));
@@ -807,6 +825,11 @@ export const Actions = {
     const post = (await db.select().from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
     if (!post) return { ok: false, message: "Video not found." };
     if (post.hidden && post.userId !== user.id) return { ok: false, message: "Ye video abhi available nahi hai (review me hai)." };
+    if (post.userId !== user.id) {
+      const author = (await db.select({ privateAccount: schema.users.privateAccount }).from(schema.users).where(eq(schema.users.id, post.userId)).limit(1))[0];
+      const followsAuthor = (await db.select({ id: schema.follows.id }).from(schema.follows).where(and(eq(schema.follows.followerId, user.id), eq(schema.follows.followeeId, post.userId))).limit(1)).length > 0;
+      if (author?.privateAccount && !followsAuthor && !isAdminUser(user)) return { ok: false, message: "Video not available." };
+    }
     if (post.userId !== user.id && (await blockExistsBetween(user.id, post.userId))) return { ok: false, message: "Video not available." };
     return { ok: true, post: (await postDtos([post], user))[0] };
   }),
@@ -896,6 +919,8 @@ export const Actions = {
     const user = await authUser(args.token);
     if (!user) return { ok: false, message: "Please sign in." };
     const blocked = await blockedIdsFor(user.id);
+    const post = (await db.select().from(schema.posts).where(eq(schema.posts.id, args.post_id)).limit(1))[0];
+    if (!post) return { ok: false, message: "Video not found." };
     const rows = await db
       .select({ comment: schema.comments, author: schema.users })
       .from(schema.comments)
@@ -906,11 +931,69 @@ export const Actions = {
       ok: true,
       comments: rows
         .filter((r) => !blocked.has(r.author.id))
-        .map((r) => ({ id: r.comment.id, body: r.comment.body, created_at: r.comment.createdAt.getTime(), author: authorDto(r.author) })),
+        .map((r) => ({
+          id: r.comment.id,
+          parent_id: r.comment.parentId ?? null,
+          body: r.comment.body,
+          created_at: r.comment.createdAt.getTime(),
+          author: authorDto(r.author),
+          is_mine: r.author.id === user.id,
+          can_delete: r.author.id === user.id || post.userId === user.id || isAdminUser(user),
+        })),
     };
   }),
 
-  addComment: withValidation(z.object({ token: tokenArg, post_id: z.number().int().positive(), body: z.string().trim().min(1).max(500) }), async (args) => {
+  // Edit your own comment (body only, same banned-content + length rules).
+  editComment: withValidation(
+    z.object({ token: tokenArg, comment_id: z.number().int().positive(), body: z.string().trim().min(1).max(500) }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      if (findBannedContent(args.body)) return { ok: false, message: "Comment me aisi language ya link allowed nahi hai." };
+      const row = (await db.select().from(schema.comments).where(eq(schema.comments.id, args.comment_id)).limit(1))[0];
+      if (!row) return { ok: false, message: "Comment not found." };
+      if (row.userId !== user.id) return { ok: false, message: "You can only edit your own comments." };
+      await db.update(schema.comments).set({ body: args.body }).where(eq(schema.comments.id, args.comment_id));
+      return { ok: true, message: "Comment updated." };
+    }
+  ),
+
+  // Delete a comment: its author, the video owner, or the app owner.
+  deleteComment: withValidation(z.object({ token: tokenArg, comment_id: z.number().int().positive() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const row = (await db.select().from(schema.comments).where(eq(schema.comments.id, args.comment_id)).limit(1))[0];
+    if (!row) return { ok: false, message: "Comment not found." };
+    const post = (await db.select().from(schema.posts).where(eq(schema.posts.id, row.postId)).limit(1))[0];
+    if (row.userId !== user.id && post?.userId !== user.id && !isAdminUser(user)) return { ok: false, message: "You can't delete this comment." };
+    // Delete the comment AND its replies (SQLite FK cascade is off by
+    // default, so orphans would otherwise survive a parent deletion).
+    const toDelete = new Set([args.comment_id]);
+    for (;;) {
+      const kids = await db.select({ id: schema.comments.id }).from(schema.comments).where(inArray(schema.comments.parentId, [...toDelete]));
+      const fresh = kids.map((k) => k.id).filter((id) => !toDelete.has(id));
+      if (fresh.length === 0) break;
+      fresh.forEach((id) => toDelete.add(id));
+    }
+    await db.delete(schema.comments).where(inArray(schema.comments.id, [...toDelete]));
+    return { ok: true, message: "Comment deleted." };
+  }),
+
+  // Videos a user liked (own profile tab; other profiles only when the
+  // viewer may see them — blocks + private lock apply, same as feed).
+  getLikedPosts: withValidation(z.object({ token: tokenArg, user_id: z.number().int().positive().optional() }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const targetId = args.user_id ?? user.id;
+    if (targetId !== user.id && (await blockExistsBetween(user.id, targetId))) return { ok: true, posts: [] };
+    const liked = await db.select({ postId: schema.likes.postId }).from(schema.likes).where(eq(schema.likes.userId, targetId)).orderBy(desc(schema.likes.createdAt)).limit(60);
+    if (liked.length === 0) return { ok: true, posts: [] };
+    const rows = await db.select().from(schema.posts).where(inArray(schema.posts.id, liked.map((l) => l.postId))).orderBy(desc(schema.posts.createdAt));
+    const visible = rows.filter((p) => !p.hidden || p.userId === user.id);
+    return { ok: true, posts: await postDtos(visible, user) };
+  }),
+
+  addComment: withValidation(z.object({ token: tokenArg, post_id: z.number().int().positive(), body: z.string().trim().min(1).max(500), parent_id: z.number().int().positive().optional() }), async (args) => {
     const user = await authUser(args.token);
     if (!user) return { ok: false, message: "Please sign in." };
     if (findBannedContent(args.body)) {
@@ -922,13 +1005,26 @@ export const Actions = {
     if (post.userId !== user.id && (await blockExistsBetween(user.id, post.userId))) {
       return { ok: false, message: "You can't comment on this video." };
     }
-    const inserted = await db.insert(schema.comments).values({ userId: user.id, postId: args.post_id, body: args.body }).returning();
+    if (args.parent_id) {
+      const parent = (await db.select().from(schema.comments).where(eq(schema.comments.id, args.parent_id)).limit(1))[0];
+      if (!parent || parent.postId !== args.post_id) return { ok: false, message: "Reply target not found." };
+    }
+    if (post.userId !== user.id) {
+      const owner = (await db.select().from(schema.users).where(eq(schema.users.id, post.userId)).limit(1))[0];
+      const perm = owner?.commentPermission ?? "everyone";
+      if (perm === "nobody") return { ok: false, message: "Comments are turned off for this video's owner." };
+      if (perm === "followers") {
+        const followsOwner = (await db.select({ id: schema.follows.id }).from(schema.follows).where(and(eq(schema.follows.followerId, user.id), eq(schema.follows.followeeId, post.userId))).limit(1)).length > 0;
+        if (!followsOwner && !isAdminUser(user)) return { ok: false, message: "Only followers can comment here." };
+      }
+    }
+    const inserted = await db.insert(schema.comments).values({ userId: user.id, postId: args.post_id, parentId: args.parent_id ?? null, body: args.body }).returning();
     const comment = inserted[0];
     if (!comment) return { ok: false, message: "Comment could not be posted." };
     if (post.userId !== user.id) {
       await notify({ userId: post.userId, type: "comment", actorId: user.id, postId: post.id, text: `@${user.username} commented: “${args.body.slice(0, 80)}”` });
     }
-    return { ok: true, message: "Comment posted.", comment: { id: comment.id, body: comment.body, created_at: comment.createdAt.getTime(), author: authorDto(user) } };
+    return { ok: true, message: "Comment posted.", comment: { id: comment.id, parent_id: comment.parentId ?? null, body: comment.body, created_at: comment.createdAt.getTime(), author: authorDto(user), is_mine: true, can_delete: true } };
   }),
 
   toggleFollow: withValidation(z.object({ token: tokenArg, user_id: z.number().int().positive() }), async (args) => {
@@ -994,8 +1090,9 @@ export const Actions = {
     const blockedByMe =
       target.id !== viewer.id &&
       (await db.select({ id: schema.blocks.id }).from(schema.blocks).where(and(eq(schema.blocks.userId, viewer.id), eq(schema.blocks.blockedId, target.id))).limit(1)).length > 0;
-    const postRows = blockedPair ? [] : target.id === viewer.id ? allPostRows : allPostRows.filter((p) => !p.hidden);
     const isFollowing = target.id === viewer.id ? false : (await db.select({ id: schema.follows.id }).from(schema.follows).where(and(eq(schema.follows.followerId, viewer.id), eq(schema.follows.followeeId, target.id))).limit(1)).length > 0;
+    const isPrivateLocked = Boolean(target.privateAccount) && target.id !== viewer.id && !isFollowing && !isAdminUser(viewer);
+    const postRows = blockedPair || isPrivateLocked ? [] : target.id === viewer.id ? allPostRows : allPostRows.filter((p) => !p.hidden);
     let referrals = null;
     if (target.id === viewer.id) {
       const referred = await db.select().from(schema.users).where(eq(schema.users.referredBy, target.id)).orderBy(desc(schema.users.createdAt));
@@ -1014,6 +1111,8 @@ export const Actions = {
         is_me: target.id === viewer.id,
         followed_by_me: isFollowing,
         blocked_by_me: blockedByMe,
+        private_account: Boolean(target.privateAccount),
+        private_locked: isPrivateLocked,
       },
       posts: await postDtos(postRows, viewer),
       referrals,
@@ -1975,6 +2074,62 @@ export const Actions = {
     }
   ),
 
+  // Settings & Privacy (2026-10-26): the three server-backed toggles.
+  // Theme/language/accessibility/notification-badge prefs live in
+  // localStorage on the client (see zoomly_prefs) — there is no push
+  // notification infrastructure to gate server-side.
+  updateSettings: withValidation(
+    z.object({
+      token: tokenArg,
+      private_account: z.boolean().optional(),
+      comment_permission: z.enum(["everyone", "followers", "nobody"]).optional(),
+      message_permission: z.enum(["everyone", "followers", "nobody"]).optional(),
+    }),
+    async (args) => {
+      const user = await authUser(args.token);
+      if (!user) return { ok: false, message: "Please sign in." };
+      const patch = {};
+      if (args.private_account !== undefined) patch.privateAccount = args.private_account ? 1 : 0;
+      if (args.comment_permission) patch.commentPermission = args.comment_permission;
+      if (args.message_permission) patch.messagePermission = args.message_permission;
+      if (Object.keys(patch).length === 0) return { ok: false, message: "Nothing to update." };
+      await db.update(schema.users).set(patch).where(eq(schema.users.id, user.id));
+      const fresh = await db.select().from(schema.users).where(eq(schema.users.id, user.id)).limit(1);
+      return { ok: true, message: "Settings saved.", user: await meDto(fresh[0]) };
+    }
+  ),
+
+  // Permanent account deletion: removes the user's sessions, posts,
+  // comments, likes, follows, blocks, messages, stories, coin/withdrawal
+  // and monetization rows, then the user row itself. Cloudinary media
+  // for their posts/DP is destroyed best-effort; a failure there never
+  // blocks the deletion. The caller must sign the user out afterwards.
+  deleteAccount: withValidation(z.object({ token: tokenArg, confirm: z.literal("DELETE") }), async (args) => {
+    const user = await authUser(args.token);
+    if (!user) return { ok: false, message: "Please sign in." };
+    const posts = await db.select().from(schema.posts).where(eq(schema.posts.userId, user.id));
+    for (const post of posts) {
+      if (post.videoPublicId) { try { await destroyFromCloudinary(post.videoPublicId, "video"); } catch { /* best effort */ } }
+    }
+    if (user.avatarPublicId) { try { await destroyFromCloudinary(user.avatarPublicId, "image"); } catch { /* best effort */ } }
+    await db.delete(schema.sessions).where(eq(schema.sessions.userId, user.id));
+    await db.delete(schema.postViews).where(eq(schema.postViews.userId, user.id));
+    await db.delete(schema.likes).where(eq(schema.likes.userId, user.id));
+    await db.delete(schema.comments).where(eq(schema.comments.userId, user.id));
+    await db.delete(schema.follows).where(or(eq(schema.follows.followerId, user.id), eq(schema.follows.followeeId, user.id)));
+    await db.delete(schema.blocks).where(or(eq(schema.blocks.userId, user.id), eq(schema.blocks.blockedId, user.id)));
+    await db.delete(schema.notifications).where(eq(schema.notifications.userId, user.id));
+    await db.delete(schema.messages).where(or(eq(schema.messages.senderId, user.id), eq(schema.messages.recipientId, user.id)));
+    await db.delete(schema.storyViews).where(eq(schema.storyViews.viewerId, user.id));
+    await db.delete(schema.stories).where(eq(schema.stories.userId, user.id));
+    await db.delete(schema.coinRequests).where(eq(schema.coinRequests.userId, user.id));
+    await db.delete(schema.withdrawalRequests).where(eq(schema.withdrawalRequests.userId, user.id));
+    await db.delete(schema.monetizationApplications).where(eq(schema.monetizationApplications.userId, user.id));
+    await db.delete(schema.posts).where(eq(schema.posts.userId, user.id));
+    await db.delete(schema.users).where(eq(schema.users.id, user.id));
+    return { ok: true, message: "Account deleted." };
+  }),
+
   getBlockedUsers: withValidation(z.object({ token: tokenArg }), async (args) => {
     const user = await authUser(args.token);
     if (!user) return { ok: false, message: "Please sign in." };
@@ -2143,6 +2298,14 @@ export const Actions = {
       const target = (await db.select().from(schema.users).where(eq(schema.users.id, args.user_id)).limit(1))[0];
       if (!target) return { ok: false, message: "User not found." };
       if (await blockExistsBetween(user.id, target.id)) return { ok: false, message: "Messaging is not available with this user." };
+      {
+        const perm = target.messagePermission ?? "everyone";
+        if (perm === "nobody" && !isAdminUser(user)) return { ok: false, message: "This user does not accept messages." };
+        if (perm === "followers" && !isAdminUser(user)) {
+          const followsTarget = (await db.select({ id: schema.follows.id }).from(schema.follows).where(and(eq(schema.follows.followerId, user.id), eq(schema.follows.followeeId, target.id))).limit(1)).length > 0;
+          if (!followsTarget) return { ok: false, message: "Only followers can message this user." };
+        }
+      }
       if (findBannedContent(args.body)) return { ok: false, message: "Message me aisi language ya link allowed nahi hai — message nahi bheja gaya." };
       const inserted = await db.insert(schema.messages).values({ senderId: user.id, recipientId: target.id, body: args.body }).returning();
       const msg = inserted[0];

@@ -44,7 +44,10 @@ export async function initDb() {
       signup_device TEXT,
       signup_ip TEXT,
       created_at INTEGER NOT NULL,
-      gift_earned_milli INTEGER NOT NULL DEFAULT 0
+      gift_earned_milli INTEGER NOT NULL DEFAULT 0,
+      private_account INTEGER NOT NULL DEFAULT 0,
+      comment_permission TEXT NOT NULL DEFAULT 'everyone',
+      message_permission TEXT NOT NULL DEFAULT 'everyone'
     )`,
     `CREATE TABLE IF NOT EXISTS sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,6 +99,7 @@ export async function initDb() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+      parent_id INTEGER REFERENCES comments(id) ON DELETE CASCADE,
       body TEXT NOT NULL,
       created_at INTEGER NOT NULL
     )`,
@@ -295,6 +299,13 @@ export async function initDb() {
   // gifts under the new rule credit exactly floor(new exact / 1000)
   // and the carry remainder starts at 0 for every creator. No old
   // balance is touched: coin_balance keeps what was already credited.
+  // Settings & Privacy columns (2026-10-26): additive-only.
+  if (!colNames.has("private_account")) await client.execute("ALTER TABLE users ADD COLUMN private_account INTEGER NOT NULL DEFAULT 0");
+  if (!colNames.has("comment_permission")) await client.execute("ALTER TABLE users ADD COLUMN comment_permission TEXT NOT NULL DEFAULT 'everyone'");
+  if (!colNames.has("message_permission")) await client.execute("ALTER TABLE users ADD COLUMN message_permission TEXT NOT NULL DEFAULT 'everyone'");
+  const commentCols = await client.execute("PRAGMA table_info(comments)");
+  const commentColNames = new Set(commentCols.rows.map((r) => r.name));
+  if (!commentColNames.has("parent_id")) await client.execute("ALTER TABLE comments ADD COLUMN parent_id INTEGER REFERENCES comments(id) ON DELETE CASCADE");
   if (!colNames.has("gift_earned_milli")) {
     await client.execute("ALTER TABLE users ADD COLUMN gift_earned_milli INTEGER NOT NULL DEFAULT 0");
     await client.execute(

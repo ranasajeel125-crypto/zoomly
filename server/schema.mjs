@@ -29,6 +29,13 @@ export const users = sqliteTable("users", {
   referralCode: text("referral_code").notNull().unique(), // e.g. ZOOM-3-ALI
   referredBy: integer("referred_by").references(() => users.id, { onDelete: "set null" }),
   signupDevice: text("signup_device"), // device id the client sent at signup (anti-self-referral guard); null for older accounts
+  // Settings & Privacy (2026-10-26 redesign): persisted account
+  // preferences, edited via updateSettings. privateAccount hides the
+  // user's videos from non-followers (see getFeed/getProfile); the
+  // permission fields are "everyone" | "followers" | "nobody".
+  privateAccount: integer("private_account").notNull().default(0),
+  commentPermission: text("comment_permission").notNull().default("everyone"),
+  messagePermission: text("message_permission").notNull().default("everyone"),
   signupIp: text("signup_ip"), // IP the account signed up from (anti-self-referral guard); null for older accounts
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
@@ -75,6 +82,7 @@ export const comments = sqliteTable("comments", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   postId: integer("post_id").notNull().references(() => posts.id, { onDelete: "cascade" }),
+  parentId: integer("parent_id").references(() => comments.id, { onDelete: "cascade" }), // null = top-level; set for a reply
   body: text("body").notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });

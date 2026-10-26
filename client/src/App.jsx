@@ -3,6 +3,7 @@ import { call, getToken, isWaking, setToken, subscribeWaking, uploadMedia } from
 import { LiveView } from "./Live.jsx";
 import AdSlot from "./AdSlot.jsx";
 import { setViewerMuted, viewerMuted } from "./sound.js";
+import { InboxView, SearchView, SettingsView } from "./Redesign.jsx";
 
 // Shown while the (free-tier) server is waking up and the client is
 // retrying — a slow first load is normal, not an error.
@@ -103,7 +104,7 @@ export function OwnerBadge({ user, full = false }) {
   );
 }
 
-function timeAgo(ts) {
+export function timeAgo(ts) {
   const s = Math.max(1, Math.floor((Date.now() - ts) / 1000));
   if (s < 60) return "just now";
   const m = Math.floor(s / 60);
@@ -226,7 +227,7 @@ export function captureSharedPostId() {
 // shared video is pinned.
 const TAB_STORAGE_KEY = "zoomly_tab";
 const PROFILE_USER_STORAGE_KEY = "zoomly_profile_user";
-const TAB_KEYS = ["feed", "watch", "people", "live", "upload", "rewards", "profile"];
+const TAB_KEYS = ["feed", "watch", "people", "live", "upload", "rewards", "profile", "search", "inbox"];
 
 export function storedTab() {
   try {
@@ -505,12 +506,15 @@ function AuthView({ onAuthed }) {
 
 // ---------- comments ------------------------------------------------------------
 
-function CommentsSheet({ post, onClose, onAdded }) {
+export function CommentsSheet({ post, onClose, onAdded }) {
   const [comments, setComments] = useState([]);
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [reportComment, setReportComment] = useState(null);
+  const [replyTo, setReplyTo] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editBody, setEditBody] = useState("");
 
   const load = useCallback(async () => {
     const res = await call("getComments", { post_id: post.id });
@@ -526,16 +530,96 @@ function CommentsSheet({ post, onClose, onAdded }) {
     if (!body.trim()) return;
     setBusy(true);
     setError("");
-    const res = await call("addComment", { post_id: post.id, body });
+    const res = await call("addComment", { post_id: post.id, body, parent_id: replyTo?.id });
     setBusy(false);
     if (!res.ok) {
       setError(res.message || "Could not post the comment.");
       return;
     }
     setBody("");
+    setReplyTo(null);
     setComments((prev) => [...prev, res.comment]);
     onAdded?.();
   }
+
+  async function saveEdit(comment) {
+    if (!editBody.trim()) return;
+    const res = await call("editComment", { comment_id: comment.id, body: editBody });
+    if (!res.ok) {
+      setError(res.message || "Could not edit the comment.");
+      return;
+    }
+    setEditingId(null);
+    load();
+  }
+
+  async function removeComment(comment) {
+    if (!window.confirm("Delete this comment?")) return;
+    const res = await call("deleteComment", { comment_id: comment.id });
+    if (!res.ok) {
+      setError(res.message || "Could not delete the comment.");
+      return;
+    }
+    load();
+  }
+
+  const tops = comments.filter((c) => !c.parent_id);
+  const repliesOf = (id) => comments.filter((c) => c.parent_id === id);
+
+  function renderComment(c, indented) {
+    return (
+      <div key={c.id} style={{ display: "flex", gap: 10, marginLeft: indented ? 34 : 0 }}>
+        <Avatar user={c.author} size={indented ? 28 : 34} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13 }}>
+            <strong>{c.author.display_name}</strong> <OwnerBadge user={c.author} /> <span style={{ color: "var(--dim)" }}>@{c.author.username} · {timeAgo(c.created_at)}</span>
+          </div>
+          {editingId === c.id ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                saveEdit(c);
+              }}
+              style={{ display: "flex", gap: 6, marginTop: 4 }}
+            >
+              <input className="input" value={editBody} onChange={(e) => setEditBody(e.target.value)} maxLength={500} />
+              <button className="btn btn-primary btn-small" type="submit">
+                Save
+              </button>
+              <button className="btn btn-small" type="button" onClick={() => setEditingId(null)}>
+                Cancel
+              </button>
+            </form>
+          ) : (
+            <div style={{ fontSize: 15 }}>{c.body}</div>
+          )}
+          <div style={{ display: "flex", gap: 10, marginTop: 2, fontSize: 12.5 }}>
+            {!indented && (
+              <button onClick={() => setReplyTo(c)} style={{ background: "none", border: "none", color: "var(--dim)", padding: 0, fontWeight: 700 }}>
+                Reply
+              </button>
+            )}
+            {c.is_mine && (
+              <button
+                onClick={() => {
+                  setEditingId(c.id);
+                  setEditBody(c.body);
+                }}
+                style={{ background: "none", border: "none", color: "var(--dim)", padding: 0, fontWeight: 700 }}
+              >
+                Edit
+              </button>
+            )}
+            {c.can_delete && (
+              <button onClick={() => removeComment(c)} style={{ background: "none", border: "none", color: "var(--bad)", padding: 0, fontWeight: 700 }}>
+                Delete
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+      );
+    }
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 60, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
@@ -545,30 +629,37 @@ function CommentsSheet({ post, onClose, onAdded }) {
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
           <strong>Comments ({comments.length})</strong>
-          <button className="btn btn-small" onClick={onClose}>
+          <button className="btn btn-small" onClick={onClose} aria-label="Close comments">
             ✕
           </button>
         </div>
         <div style={{ overflowY: "auto", flex: 1, display: "grid", gap: 12, padding: "6px 0" }}>
           {comments.length === 0 && <p style={{ color: "var(--dim)" }}>No comments yet — be the first!</p>}
-          {comments.map((c) => (
-            <div key={c.id} style={{ display: "flex", gap: 10 }}>
-              <Avatar user={c.author} size={34} />
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13 }}>
-                  <strong>{c.author.display_name}</strong> <OwnerBadge user={c.author} /> <span style={{ color: "var(--dim)" }}>@{c.author.username} · {timeAgo(c.created_at)}</span>
-                </div>
-                <div style={{ fontSize: 15 }}>{c.body}</div>
+          {tops.map((c) => (
+            <div key={c.id} style={{ display: "grid", gap: 10 }}>
+              <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                <div style={{ flex: 1 }}>{renderComment(c, false)}</div>
+                <button onClick={() => setReportComment(c)} style={{ background: "none", border: "none", fontSize: 14, opacity: 0.65, alignSelf: "flex-start" }} aria-label="Report comment" title="Report comment">
+                  🚩
+                </button>
               </div>
-              <button onClick={() => setReportComment(c)} style={{ background: "none", border: "none", fontSize: 14, opacity: 0.65, alignSelf: "flex-start" }} aria-label="Report comment" title="Report comment">
-                🚩
-              </button>
+              {repliesOf(c.id).map((r) => renderComment(r, true))}
             </div>
           ))}
         </div>
         <Notice text={error} bad />
+        {replyTo && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, color: "var(--dim)", marginBottom: 4 }}>
+            <span>
+              Replying to <strong style={{ color: "var(--text)" }}>@{replyTo.author.username}</strong>
+            </span>
+            <button onClick={() => setReplyTo(null)} style={{ background: "none", border: "none", color: "var(--dim)" }}>
+              ✕ Cancel reply
+            </button>
+          </div>
+        )}
         <form onSubmit={submit} style={{ display: "flex", gap: 8, marginTop: 8 }}>
-          <input className="input" placeholder="Add a comment…" value={body} onChange={(e) => setBody(e.target.value)} maxLength={500} />
+          <input className="input" placeholder={replyTo ? `Reply to @${replyTo.author.username}…` : "Add a comment…"} value={body} onChange={(e) => setBody(e.target.value)} maxLength={500} aria-label="Comment text" />
           <button className="btn btn-primary" type="submit" disabled={busy}>
             Post
           </button>
@@ -739,6 +830,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
   const [forcedMute, setForcedMute] = useState(false);
   const [paused, setPaused] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [buffering, setBuffering] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [shareNote, setShareNote] = useState("");
   // Feed tap gestures (owner spec): ONE tap toggles play/pause, a
@@ -899,7 +991,15 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
         preload="metadata"
         onClick={handleVideoTap}
         onPlay={() => notePostView(post)}
+        onWaiting={() => setBuffering(true)}
+        onPlaying={() => setBuffering(false)}
+        onCanPlay={() => setBuffering(false)}
       />
+      {buffering && !paused && (
+        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }} aria-label="Loading video">
+          <div className="buffer-spinner" />
+        </div>
+      )}
       {(flash || paused) && (
         <div
           data-tap-flash={flash ?? undefined}
@@ -957,7 +1057,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
             {post.author.followed_by_me ? "Following" : "Follow"}
           </button>
         )}
-        <button onClick={() => onLike(post)} style={{ background: "none", border: "none", color: post.liked_by_me ? "var(--accent)" : "#fff", fontSize: 30, lineHeight: 1 }} aria-label="Like">
+        <button onClick={() => onLike(post)} className={`like-btn ${post.liked_by_me ? "liked like-pop" : ""}`} style={{ background: "none", border: "none", color: post.liked_by_me ? "var(--accent)" : "#fff", fontSize: 30, lineHeight: 1 }} aria-label={post.liked_by_me ? "Unlike" : "Like"}>
           ♥
           <div style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>{post.like_count}</div>
         </button>
@@ -969,7 +1069,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
           🔗
           <div style={{ fontSize: 12, fontWeight: 700 }}>{shareNote || "Share"}</div>
         </button>
-        <button onClick={toggleMute} style={{ background: "none", border: "none", color: "#fff", fontSize: 24, lineHeight: 1 }} aria-label="Sound">
+        <button onClick={toggleMute} style={{ background: "none", border: "none", color: "#fff", fontSize: 24, lineHeight: 1 }} aria-label="Music / sound" title="Music / sound">
           {muted ? "🔇" : "🔊"}
         </button>
         <div style={{ position: "relative" }}>
@@ -1024,6 +1124,7 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
         </button>{" "}
         <OwnerBadge user={post.author} />
         <CaptionBlock title={post.title} description={post.description} />
+        <div style={{ fontSize: 13, marginTop: 4 }}>🎵 Original audio · @{post.author?.username}</div>
         <div style={{ fontSize: 12, opacity: 0.75, marginTop: 2 }}>{timeAgo(post.created_at)}</div>
       </div>
       {reportOpen && <ReportDialog targetType="post" targetId={post.id} label="video" onClose={() => setReportOpen(false)} />}
@@ -1576,8 +1677,11 @@ function UploadView({ onPosted }) {
     setPreviewUrl(f ? URL.createObjectURL(f) : "");
   }
 
+  // Retry re-uses the kept file + title + description — nothing is lost
+  // on a failed upload, and the media step is NOT retried blindly by
+  // the RPC client (writes are never auto-retried).
   async function submit(e) {
-    e.preventDefault();
+    e?.preventDefault();
     if (!file) {
       setError("Choose a video file first.");
       return;
@@ -1608,41 +1712,69 @@ function UploadView({ onPosted }) {
     onPosted?.();
   }
 
+  function addHashtag(tag) {
+    setDescription((prev) => (prev.includes(tag) ? prev : `${prev ? `${prev} ` : ""}${tag}`));
+  }
+
   return (
     <div style={{ padding: "14px 14px 20px", maxWidth: 560, margin: "0 auto" }}>
-      <h2 style={{ margin: "2px 0 12px" }}>Upload a video</h2>
+      <h2 style={{ margin: "2px 0 12px" }}>＋ Create a video</h2>
       <form onSubmit={submit} style={{ display: "grid", gap: 12 }}>
-        <label className="card" style={{ textAlign: "center", cursor: "pointer", borderStyle: "dashed" }}>
-          <input type="file" accept="video/*" style={{ display: "none" }} onChange={(e) => pickFile(e.target.files?.[0])} />
+        <div style={{ display: "flex", gap: 8 }}>
+          <label className="btn btn-primary" style={{ flex: 1, cursor: "pointer" }}>
+            <input type="file" accept="video/*" capture="environment" style={{ display: "none" }} onChange={(e) => pickFile(e.target.files?.[0])} />
+            📷 Record with camera
+          </label>
+          <label className="btn" style={{ flex: 1, cursor: "pointer" }}>
+            <input type="file" accept="video/*" style={{ display: "none" }} onChange={(e) => pickFile(e.target.files?.[0])} />
+            🖼️ Choose from gallery
+          </label>
+        </div>
+        <p style={{ color: "var(--dim)", fontSize: 13, margin: 0 }}>
+          Camera / gallery access is requested by your device when you pick a file (Android permissions: Camera, Microphone, Media). Preview below uses the player's own volume control for sound.
+        </p>
+        <label className="card" style={{ textAlign: "center", borderStyle: "dashed" }}>
           {previewUrl ? (
-            <video
-              src={previewUrl}
-              style={{ width: "100%", maxHeight: 320, borderRadius: 12, background: "#000" }}
-              controls
-              playsInline
-              ref={(el) => {
-                if (el && el.dataset.mutedInit !== "1") {
-                  el.muted = viewerMuted();
-                  el.dataset.mutedInit = "1";
-                }
-              }}
-            />
+            <video src={previewUrl} style={{ width: "100%", maxHeight: 320, borderRadius: 12, background: "#000" }} controls playsInline />
           ) : (
             <div style={{ padding: "18px 0" }}>
               <div style={{ fontSize: 36 }}>⬆️</div>
-              <div style={{ fontWeight: 700, marginTop: 4 }}>Tap to choose a video</div>
-              <div style={{ color: "var(--dim)", fontSize: 13 }}>MP4 and other video formats, up to 100 MB</div>
+              <div style={{ fontWeight: 700, marginTop: 4 }}>No video chosen yet</div>
+              <div style={{ color: "var(--dim)", fontSize: 13 }}>MP4 and other video formats, up to 100 MB. Cover = the video's first frame (Cloudinary thumbnail).</div>
             </div>
           )}
           {file && <div style={{ color: "var(--dim)", fontSize: 13, marginTop: 6 }}>{file.name}</div>}
         </label>
-        <input className="input" placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={140} />
-        <textarea className="input" placeholder="Description (optional)" value={description} onChange={(e) => setDescription(e.target.value)} maxLength={1000} rows={3} />
+        <input className="input" placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={140} aria-label="Video title" />
+        <textarea className="input" placeholder="Description + hashtags (optional)" value={description} onChange={(e) => setDescription(e.target.value)} maxLength={1000} rows={3} aria-label="Video description and hashtags" />
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {["#fyp", "#zoomly", "#trending", "#viral"].map((tag) => (
+            <button key={tag} type="button" className="chip search-chip" onClick={() => addHashtag(tag)}>
+              {tag}
+            </button>
+          ))}
+        </div>
         <Notice text={error} bad />
         <Notice text={done} />
+        {busy && (
+          <div>
+            <div className="upload-progress" aria-label="Uploading">
+              <div />
+            </div>
+            <p style={{ color: "var(--dim)", fontSize: 13, marginTop: 6 }}>Uploading… please keep this open. (Exact % is not shown: the browser upload API reports no progress events, so no fake percentage is displayed.)</p>
+          </div>
+        )}
         <button className="btn btn-primary" type="submit" disabled={busy} style={{ padding: "12px 16px", fontSize: 16 }}>
           {busy ? "Uploading… please keep this open" : "Post video"}
         </button>
+        {error && file && !busy && (
+          <button className="btn" type="button" onClick={submit}>
+            ↻ Retry upload (same video, title &amp; description kept)
+          </button>
+        )}
+        <p style={{ color: "var(--dim)", fontSize: 13, margin: 0 }}>
+          Trimming on upload is not available in this web client (it needs a native editor) — preview the full clip above before posting; only the full video is uploaded.
+        </p>
       </form>
     </div>
   );
@@ -1922,7 +2054,7 @@ export function InstallAppButton() {
   return null;
 }
 
-function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage, onGoMonetization }) {
+function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage, onGoMonetization, onOpenSettings }) {
   const isMe = !userId || userId === me.id;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1935,6 +2067,9 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
   const [reportOpen, setReportOpen] = useState(false);
   const [storyOpen, setStoryOpen] = useState(false);
   const [pwOpen, setPwOpen] = useState(false);
+  const [profileTab, setProfileTab] = useState("posted"); // posted | liked | private
+  const [likedPosts, setLikedPosts] = useState([]);
+  const [likedLoading, setLikedLoading] = useState(false);
   const [pwCurrent, setPwCurrent] = useState("");
   const [pwNew, setPwNew] = useState("");
   const [pwConfirm, setPwConfirm] = useState("");
@@ -1954,6 +2089,16 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (profileTab !== "liked" || !isMe) return;
+    (async () => {
+      setLikedLoading(true);
+      const res = await call("getLikedPosts", {});
+      if (res.ok) setLikedPosts(res.posts);
+      setLikedLoading(false);
+    })();
+  }, [profileTab, isMe]);
 
   async function saveProfile(e) {
     e.preventDefault();
@@ -2107,6 +2252,9 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
           <button className="btn" onClick={() => setPwOpen((v) => !v)}>
             🔑 Change password
           </button>
+          <button className="btn" onClick={() => onOpenSettings?.()}>
+            ⚙️ Settings &amp; Privacy
+          </button>
           <button className="btn" data-start-monetization="" onClick={() => onGoMonetization?.()}>
             💰 Start Monetization
           </button>
@@ -2225,9 +2373,28 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
       )}
 
       <h3 style={{ margin: "22px 0 10px" }}>Videos</h3>
-      {data.posts.length === 0 && <p style={{ color: "var(--dim)" }}>No videos yet.</p>}
+      {data.profile.private_locked && <p style={{ color: "var(--dim)" }}>🔒 This account is private — follow to see their videos.</p>}
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        <button className={`tab-btn ${profileTab === "posted" ? "active" : ""}`} onClick={() => setProfileTab("posted")}>
+          Posted
+        </button>
+        {isMe && (
+          <button className={`tab-btn ${profileTab === "liked" ? "active" : ""}`} onClick={() => setProfileTab("liked")}>
+            Liked
+          </button>
+        )}
+        {isMe && (
+          <button className={`tab-btn ${profileTab === "private" ? "active" : ""}`} onClick={() => setProfileTab("private")}>
+            Private (review)
+          </button>
+        )}
+      </div>
+      {profileTab === "liked" && likedLoading && <p style={{ color: "var(--dim)" }}>Loading liked videos…</p>}
+      {profileTab === "liked" && !likedLoading && likedPosts.length === 0 && <p style={{ color: "var(--dim)" }}>No liked videos yet.</p>}
+      {profileTab === "private" && data.posts.filter((x) => x.hidden).length === 0 && <p style={{ color: "var(--dim)" }}>No videos under review — this is where your hidden/private videos appear.</p>}
+      {profileTab === "posted" && data.posts.filter((x) => !x.hidden).length === 0 && <p style={{ color: "var(--dim)" }}>No videos yet.</p>}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
-        {data.posts.map((post) => (
+        {(profileTab === "liked" ? likedPosts : profileTab === "private" ? data.posts.filter((x) => x.hidden) : data.posts.filter((x) => !x.hidden)).map((post) => (
           <div key={post.id} style={{ position: "relative", borderRadius: 10, overflow: "hidden", background: "#000", aspectRatio: "3/4" }}>
             {post.thumbnail_url ? (
               <img src={post.thumbnail_url} alt={post.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
@@ -2237,7 +2404,7 @@ function ProfileView({ me, userId, onOpenProfile, refreshMe, onLogout, onMessage
             <div style={{ position: "absolute", left: 6, bottom: 6, right: 6, color: "#fff", fontSize: 12, fontWeight: 600, textShadow: "0 1px 4px rgba(0,0,0,0.9)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               ▶ {post.title}
             </div>
-            {isMe && (
+            {isMe && profileTab !== "liked" && (
               <button onClick={() => handleDelete(post)} style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.65)", color: "#ff9a8a", border: "1px solid rgba(255,255,255,0.25)", borderRadius: 8, fontSize: 12, padding: "3px 7px" }}>
                 Delete
               </button>
@@ -3522,13 +3689,16 @@ function NotificationsPanel({ onClose, refreshMe, onGoLive }) {
 
 // Bottom navigation: 3 + center + 3, with Live as the prominent raised
 // center button (TikTok-style) — it is the app's headline action.
+// Bottom navigation (2026-10-26 redesign): exactly the 5 requested tabs.
+// Legacy screens are NOT deleted: Live stays reachable from the feed
+// header's LIVE button, Watch/People from Search results, and Rewards +
+// Monetization from the profile's Start Monetization button. Old stored
+// tabs (watch/people/live/rewards) still render if restored on refresh.
 const NAV = [
   { key: "feed", label: "Home", icon: "🏠" },
-  { key: "watch", label: "Watch", icon: "▶️" },
-  { key: "people", label: "People", icon: "👥" },
-  { key: "live", label: "Live", icon: "🔴" },
-  { key: "upload", label: "Upload", icon: "＋" },
-  { key: "rewards", label: "Rewards + Monetization", icon: "🏆" },
+  { key: "search", label: "Search", icon: "🔍" },
+  { key: "upload", label: "Create", icon: "＋", create: true },
+  { key: "inbox", label: "Inbox", icon: "✉️" },
   { key: "profile", label: "Profile", icon: "👤" },
 ];
 
@@ -3549,6 +3719,7 @@ export function App() {
   // (null = the user's own profile).
   const [profileUserId, setProfileUserId] = useState(() => (tab === "profile" ? storedProfileUserId() : null));
   const [feedKey, setFeedKey] = useState(0);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const waking = useWaking();
 
   const refreshMe = useCallback(async () => {
@@ -3691,10 +3862,12 @@ export function App() {
   }
 
   return (
-    <div style={{ height: "100dvh", display: "flex", flexDirection: "column", maxWidth: 860, margin: "0 auto" }}>
+    <div style={{ height: "100dvh", display: "flex", flexDirection: "column", maxWidth: tab === "feed" ? 480 : 860, margin: "0 auto" }}>
       <div style={{ flex: 1, minHeight: 0, overflowY: tab === "feed" ? "hidden" : "auto" }} className={tab === "feed" ? "" : "no-scrollbar"}>
         {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} onOpenNotifications={() => setShowNotifs(true)} sharedPostId={sharedPostId} />}
         {tab === "watch" && <WatchView me={me} onOpenProfile={openProfile} />}
+        {tab === "search" && <SearchView me={me} onOpenProfile={openProfile} />}
+        {tab === "inbox" && <InboxView me={me} onOpenChat={(u) => setChatPeer(u)} onGoLive={() => setTab("live")} refreshMe={refreshMe} />}
         {tab === "live" && <LiveView me={me} refreshMe={refreshMe} onOpenProfile={openProfile} />}
         {tab === "upload" && (
           <UploadView
@@ -3713,6 +3886,7 @@ export function App() {
             refreshMe={refreshMe}
             onLogout={logout}
             onMessage={(u) => setChatPeer(u)}
+            onOpenSettings={() => setSettingsOpen(true)}
             onGoMonetization={() => {
               try {
                 sessionStorage.setItem("zoomly_open_monetization", "1");
@@ -3742,53 +3916,19 @@ export function App() {
         />
       )}
       {chatPeer && <ChatScreen me={me} peer={chatPeer} onClose={() => setChatPeer(null)} refreshMe={refreshMe} />}
-      <nav
-        style={{
-          display: "flex",
-          borderTop: "1px solid var(--border)",
-          background: "var(--surface)",
-          paddingBottom: "env(safe-area-inset-bottom)",
-        }}
-      >
+      {settingsOpen && <SettingsView me={me} onClose={() => setSettingsOpen(false)} onLogout={logout} refreshMe={refreshMe} />}
+      <nav className="tiktok-nav" aria-label="Main navigation">
         {NAV.map((item) =>
-          item.key === "live" ? (
+          item.create ? (
             <button
               key={item.key}
-              onClick={() => setTab("live")}
-              aria-label="Live"
-              style={{
-                flex: 1,
-                background: "none",
-                border: "none",
-                padding: "8px 2px 7px",
-                color: tab === "live" ? "#ff7aa8" : "var(--dim)",
-                fontSize: 11,
-                fontWeight: 700,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: 2,
-              }}
+              onClick={() => setTab("upload")}
+              aria-label="Create video"
+              className={tab === "upload" ? "active" : ""}
+              style={{ color: tab === "upload" ? "var(--text)" : "var(--dim)" }}
             >
-              <span
-                style={{
-                  width: 54,
-                  height: 54,
-                  borderRadius: "50%",
-                  background: "#e0245e",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: 25,
-                  marginTop: -26,
-                  border: `3px solid ${tab === "live" ? "var(--accent)" : "var(--surface)"}`,
-                  boxShadow: "0 6px 18px rgba(224,36,94,0.5)",
-                  flexShrink: 0,
-                }}
-              >
-                🔴
-              </span>
-              <span style={{ fontSize: 10, lineHeight: 1.1 }}>Go Live</span>
+              <span className="nav-create-badge" aria-hidden="true">＋</span>
+              Create
             </button>
           ) : (
             <button
@@ -3797,22 +3937,17 @@ export function App() {
                 if (item.key === "profile") setProfileUserId(null);
                 setTab(item.key);
               }}
-              style={{
-                flex: 1,
-                background: "none",
-                border: "none",
-                padding: "8px 2px 7px",
-                color: tab === item.key ? "var(--accent)" : "var(--dim)",
-                fontSize: 11,
-                fontWeight: 700,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: 2,
-              }}
+              className={tab === item.key ? "active" : ""}
+              aria-label={item.label}
+              style={{ position: "relative" }}
             >
-              <span style={{ fontSize: item.key === "upload" ? 24 : 20, lineHeight: 1 }}>{item.icon}</span>
+              <span style={{ fontSize: 22, lineHeight: 1 }}>{item.icon}</span>
               {item.label}
+              {item.key === "inbox" && (me?.unread_notifications ?? 0) + (me?.unread_messages ?? 0) > 0 && (
+                <span style={{ position: "absolute", top: 4, right: "calc(50% - 26px)", background: "var(--accent)", color: "#131a02", borderRadius: 999, minWidth: 18, height: 18, padding: "0 5px", fontSize: 11, fontWeight: 800, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+                  {(me.unread_notifications + me.unread_messages) > 99 ? "99+" : me.unread_notifications + me.unread_messages}
+                </span>
+              )}
             </button>
           )
         )}
