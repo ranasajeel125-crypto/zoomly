@@ -352,16 +352,21 @@ select {
   overflow-x: auto;
   gap: 2px;
   align-items: stretch;
+  flex-wrap: nowrap;
 }
 .feed-top-tab {
-  flex-shrink: 0;
+  /* Header fix 2026-10-26: tabs share the row equally and scale with the
+     viewport, so all four fit on a 360px phone instead of hiding in a
+     scrollbar-less scroll strip. Scroll remains only as a <360px fallback. */
+  flex: 1 1 0;
+  min-width: 0;
   background: none;
   border: none;
   color: var(--dim);
   font-weight: 700;
-  font-size: 15px;
-  padding: 10px 10px 8px;
-  min-height: 48px;
+  font-size: clamp(11px, 3.2vw, 13px);
+  padding: 10px 3px 8px;
+  min-height: 44px;
   position: relative;
   white-space: nowrap;
 }

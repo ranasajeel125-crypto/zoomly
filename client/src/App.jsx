@@ -784,7 +784,7 @@ function CaptionBlock({ title, description, onHashtag, onMention }) {
   }, [combined]);
 
   return (
-    <div style={{ position: "relative", marginTop: 2 }}>
+    <div style={{ marginTop: 2 }}>
       <div
         ref={textRef}
         data-caption-text=""
@@ -810,7 +810,7 @@ function CaptionBlock({ title, description, onHashtag, onMention }) {
             e.stopPropagation();
             setExpanded(true);
           }}
-          style={{ position: "absolute", right: 0, bottom: 0, background: "rgba(0,0,0,0.45)", color: "#fff", border: "none", borderRadius: 6, padding: "1px 7px", fontSize: 13.5, fontWeight: 700, textShadow: "none", cursor: "pointer" }}
+          style={{ display: "block", background: "none", border: "none", color: "var(--accent)", padding: "3px 0 0", fontSize: 13.5, fontWeight: 700, textShadow: "none", cursor: "pointer", textAlign: "left" }}
         >
           … more
         </button>
@@ -826,7 +826,7 @@ function CaptionBlock({ title, description, onHashtag, onMention }) {
           }}
           style={{ background: "none", border: "none", color: "inherit", padding: "2px 0 0", fontSize: 13.5, fontWeight: 700, opacity: 0.85, cursor: "pointer", textShadow: "none" }}
         >
-          bandh karo ▲
+          bandh karo
         </button>
       )}
     </div>
@@ -1088,7 +1088,10 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
         onPlaying={() => setBuffering(false)}
         onCanPlay={() => setBuffering(false)}
       />
-      <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 3, background: "rgba(255,255,255,0.25)", zIndex: 3 }} aria-label="Video progress"><div style={{ height: 3, width: `${Math.round(progress * 100)}%`, background: "var(--accent)" }} /></div>
+      {/* No bottom progress bar: the old 3px lime/white strip at the very
+          bottom edge of the video read as a stray line cutting across
+          the video on phones, so it was removed (looped short videos
+          do not need it; progress state is still tracked internally). */}
       {videoError && (
         <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, background: "rgba(0,0,0,0.6)", zIndex: 5 }}>
           <span style={{ color: "#fff", fontWeight: 700 }}>Video could not play (network or file error)</span>
@@ -1186,7 +1189,11 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
           <span className="rail-label">{shareNote || "Share"}</span>
         </button>
         <button onClick={toggleMute} className={`sound-disc ${muted ? "muted" : ""}`} aria-label={muted ? "Unmute original audio" : "Mute original audio"} title="Original audio">
-          ♪
+          {/* Vector note — replaces the spinning ♪ text glyph, which rendered
+              as a printed-looking mark on Android. */}
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M9 18.5A2.5 2.5 0 1 1 6.5 16c.4 0 .8.1 1.1.3V5.5L19 3v11a2.5 2.5 0 1 1-1.5-2.3V6.2L9 8.4v10.1z" />
+          </svg>
         </button>
         <div style={{ position: "relative" }}>
           <button onClick={() => setMenuOpen((v) => !v)} style={{ background: "none", border: "none", color: "#fff", fontSize: 24, lineHeight: 1 }} aria-label="More options">
@@ -1241,14 +1248,21 @@ function VideoCard({ post, onLike, onFollow, onComment, onOpenProfile, onBlock, 
           )}
         </div>
       </div>
-      <div style={{ position: "absolute", left: 0, right: 84, bottom: 86, color: "#fff", textShadow: "0 1px 6px rgba(0,0,0,0.8)", background: "linear-gradient(to top, rgba(10,15,13,0.65), rgba(10,15,13,0))", padding: "24px 12px 6px", zIndex: 2 }}>
+      {/* Full-width bottom scrim (separate layer, pointer-transparent):
+          fades smoothly upward into the video with NO box around the
+          text and NO sharp vertical edge — the old caption container
+          ended at right:84 with its own gradient, which drew a hard
+          dark vertical edge mid-video and dark boxes beside the lines. */}
+      <div aria-hidden="true" style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 260, background: "linear-gradient(to top, rgba(10,15,13,0.82) 0%, rgba(10,15,13,0.5) 45%, rgba(10,15,13,0) 100%)", zIndex: 1, pointerEvents: "none" }} />
+      <div style={{ position: "absolute", left: 0, right: 84, bottom: 86, color: "#fff", textShadow: "0 1px 6px rgba(0,0,0,0.8)", padding: "6px 12px", zIndex: 2 }}>
         <button onClick={() => onOpenProfile(post.author.id)} style={{ background: "none", border: "none", color: "#fff", padding: 0, fontWeight: 800, fontSize: 16 }}>
           @{post.author?.username}
         </button>{" "}
         <OwnerBadge user={post.author} />
         <CaptionBlock title={post.title} description={post.description} onHashtag={onHashtag} onMention={onMention} />
-        <button onClick={toggleMute} style={{ background: "none", border: "none", color: "#fff", padding: 0, fontSize: 13, marginTop: 4, textAlign: "left" }} aria-label="Original audio — toggle sound">
-          ♪ Original audio · @{post.author?.username} {muted ? "(muted)" : ""}
+        <button onClick={toggleMute} style={{ background: "none", border: "none", color: "#fff", padding: 0, fontSize: 13, marginTop: 4, textAlign: "left", display: "flex", alignItems: "center", gap: 5 }} aria-label="Original audio — toggle sound">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M9 18.5A2.5 2.5 0 1 1 6.5 16c.4 0 .8.1 1.1.3V5.5L19 3v11a2.5 2.5 0 1 1-1.5-2.3V6.2L9 8.4v10.1z" /></svg>
+          Original audio · @{post.author?.username} {muted ? "(muted)" : ""}
         </button>
         <div style={{ fontSize: 12, opacity: 0.75, marginTop: 2 }}>{timeAgo(post.created_at)}</div>
       </div>
@@ -1575,63 +1589,74 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "calc(env(safe-area-inset-top) + 4px) 8px 0 8px" }}>
-        <button
-          onClick={onGoLive}
-          aria-label="Open Live"
-          title="Watch live broadcasts"
-          style={{
-            background: "none",
-            border: "none",
-            padding: "1px 2px 0",
-            cursor: "pointer",
-            color: "#fff",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: 0,
-            flexShrink: 0,
-            lineHeight: 1,
-            opacity: 0.92,
-            minWidth: 48,
-            minHeight: 48,
-          }}
-        >
-          <svg width="25" height="19" viewBox="0 0 28 22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M9 2.5 14 6l5-3.5" />
-            <rect x="3" y="6" width="22" height="14" rx="3" />
-            <path d="M10.5 13h7" strokeWidth="2.4" />
-          </svg>
-          <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, marginTop: 1 }}>LIVE</span>
-        </button>
-        <div className="feed-top-tabs no-scrollbar" role="tablist" aria-label="Feed">
-          <button className="feed-top-tab" onClick={() => onOpenSearch?.()} aria-label="Discover">
-            Discover
+      {/* Feed header, fixed 2026-10-26: row 1 holds ONLY Live + the 4 tabs +
+          Search, so every tab fits on a 360px phone. Bell + coins moved to
+          a small second row below (still reachable, same actions). */}
+      <div style={{ padding: "calc(env(safe-area-inset-top) + 4px) 6px 0 6px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <button
+            onClick={onGoLive}
+            aria-label="Open Live"
+            title="Watch live broadcasts"
+            style={{
+              background: "none",
+              border: "none",
+              padding: "0 2px",
+              cursor: "pointer",
+              color: "#fff",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 0,
+              flexShrink: 0,
+              lineHeight: 1,
+              opacity: 0.92,
+              minWidth: 38,
+              minHeight: 44,
+            }}
+          >
+            {/* Clean record-dot pill — replaces the old TV line-art SVG, whose
+                stray strokes read as printed marks on small screens. */}
+            <svg width="26" height="18" viewBox="0 0 26 18" fill="none" aria-hidden="true">
+              <rect x="1" y="1" width="24" height="16" rx="8" stroke="var(--accent)" strokeWidth="1.6" />
+              <circle cx="13" cy="9" r="3.5" fill="var(--accent)" />
+            </svg>
+            <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, marginTop: 1 }}>LIVE</span>
           </button>
-          <button className="feed-top-tab" onClick={() => onOpenCommunity?.()} aria-label="Community">
-            Community
-          </button>
-          <button className={`feed-top-tab ${stream === "following" ? "active" : ""}`} onClick={() => setStream("following")} role="tab" aria-selected={stream === "following"}>
-            Following
-          </button>
-          <button className={`feed-top-tab ${stream === "foryou" ? "active" : ""}`} onClick={() => setStream("foryou")} role="tab" aria-selected={stream === "foryou"}>
-            For You
+          <div className="feed-top-tabs no-scrollbar" role="tablist" aria-label="Feed">
+            <button className="feed-top-tab" onClick={() => onOpenSearch?.()} aria-label="Discover">
+              Discover
+            </button>
+            <button className="feed-top-tab" onClick={() => onOpenCommunity?.()} aria-label="Community">
+              Community
+            </button>
+            <button className={`feed-top-tab ${stream === "following" ? "active" : ""}`} onClick={() => setStream("following")} role="tab" aria-selected={stream === "following"}>
+              Following
+            </button>
+            <button className={`feed-top-tab ${stream === "foryou" ? "active" : ""}`} onClick={() => setStream("foryou")} role="tab" aria-selected={stream === "foryou"}>
+              For You
+            </button>
+          </div>
+          <button onClick={() => onOpenSearch?.()} aria-label="Search" title="Search" style={{ background: "none", border: "none", padding: 0, flexShrink: 0, width: 38, height: 44, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <SearchIcon />
           </button>
         </div>
-        <button onClick={() => onOpenSearch?.()} aria-label="Search" title="Search" style={{ background: "none", border: "none", padding: 0, flexShrink: 0, width: 48, height: 48, display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <SearchIcon />
-        </button>
-        <button onClick={onOpenNotifications} aria-label="Notifications" title="Notifications" style={{ position: "relative", background: "none", border: "none", fontSize: 21, cursor: "pointer", padding: 2, flexShrink: 0, width: 48, height: 48 }}>
-          🔔
-          {(me?.unread_notifications ?? 0) + (me?.unread_messages ?? 0) > 0 && (
-            <span style={{ position: "absolute", top: 4, right: 2, background: "var(--accent)", color: "#131a02", borderRadius: 999, fontSize: 10, fontWeight: 800, padding: "1px 5px" }}>
-              {(me?.unread_notifications ?? 0) + (me?.unread_messages ?? 0) > 99 ? "99+" : (me?.unread_notifications ?? 0) + (me?.unread_messages ?? 0)}
-            </span>
-          )}
-        </button>
-        <span className="chip" title="Your coin balance" style={{ flexShrink: 0 }}>
-          🪙 {me?.coin_balance ?? 0}
-        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 2px 0 2px" }}>
+          <button onClick={onOpenNotifications} aria-label="Notifications" title="Notifications" style={{ position: "relative", background: "none", border: "none", cursor: "pointer", padding: 0, flexShrink: 0, width: 40, height: 34, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+              <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+            </svg>
+            {(me?.unread_notifications ?? 0) + (me?.unread_messages ?? 0) > 0 && (
+              <span style={{ position: "absolute", top: 1, right: 2, background: "var(--accent)", color: "#131a02", borderRadius: 999, fontSize: 10, fontWeight: 800, padding: "1px 5px" }}>
+                {(me?.unread_notifications ?? 0) + (me?.unread_messages ?? 0) > 99 ? "99+" : (me?.unread_notifications ?? 0) + (me?.unread_messages ?? 0)}
+              </span>
+            )}
+          </button>
+          <span className="chip" title="Your coin balance" style={{ flexShrink: 0 }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--accent)", display: "inline-block" }} aria-hidden="true" /> {me?.coin_balance ?? 0}
+          </span>
+        </div>
       </div>
       <div className="feed-snap" style={{ flex: 1, marginTop: 8 }}>
         {loading && <p style={{ padding: 20, color: "var(--dim)" }}>{waking ? WAKING_TEXT : "Loading videos…"}</p>}
