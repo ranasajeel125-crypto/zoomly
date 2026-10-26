@@ -1655,10 +1655,7 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
             )}
           </button>
           <span className="chip" title="Your coin balance" style={{ flexShrink: 0 }}>
-            <svg width="17" height="17" viewBox="0 0 20 20" aria-hidden="true" style={{ display: "inline-block", verticalAlign: "-3px" }}>
-              <circle cx="10" cy="10" r="9" fill="#FFD700" stroke="#B8860B" strokeWidth="1.5" />
-              <circle cx="10" cy="10" r="5.5" fill="none" stroke="#B8860B" strokeWidth="1" />
-            </svg> {me?.coin_balance ?? 0}
+            <img src="/coin.png" alt="" aria-hidden="true" width="17" height="17" style={{ display: "inline-block", verticalAlign: "-3px", borderRadius: "50%" }} /> {me?.coin_balance ?? 0}
           </span>
         </div>
       </div>
