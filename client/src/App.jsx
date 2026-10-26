@@ -1482,7 +1482,7 @@ function StoriesRow({ me }) {
   );
 }
 
-function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications, onOpenSearch, onOpenCommunity, sharedPostId, onHashtag, onMention }) {
+function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications, onOpenSearch, onOpenCommunity, onOpenRewards, sharedPostId, onHashtag, onMention }) {
   const [stream, setStream] = useState("foryou");
   const [posts, setPosts] = useState([]);
   const [savedIds, setSavedIds] = useState(() => new Set());
@@ -1654,9 +1654,9 @@ function FeedView({ me, onOpenProfile, refreshMe, onGoLive, onOpenNotifications,
               </span>
             )}
           </button>
-          <span className="chip" title="Your coin balance" style={{ flexShrink: 0 }}>
+          <button className="chip" title="Open Rewards" aria-label="Open Rewards" onClick={() => onOpenRewards?.()} style={{ flexShrink: 0, cursor: "pointer", color: "var(--text)", fontSize: 13 }}>
             <img src="/coin.png" alt="" aria-hidden="true" width="17" height="17" style={{ display: "inline-block", verticalAlign: "-3px", borderRadius: "50%" }} /> {me?.coin_balance ?? 0}
-          </span>
+          </button>
         </div>
       </div>
       <div className="feed-snap" style={{ flex: 1, marginTop: 8 }}>
@@ -2482,6 +2482,9 @@ function ProfileView({ me, userId, onOpenProfile, onOpenVideo, refreshMe, onLogo
         <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
           <button className="btn" onClick={() => setEditing((v) => !v)}>
             {editing ? "Close editor" : "Edit profile"}
+          </button>
+          <button className="btn btn-primary" onClick={() => onGoMonetization?.()}>
+            💰 Rewards
           </button>
           <button className="btn" onClick={() => dpInputRef.current?.click()} disabled={dpBusy}>
             {dpBusy ? "Uploading…" : profile.avatar_url ? "Change profile photo (DP)" : "Upload profile photo (DP)"}
@@ -4117,7 +4120,7 @@ export function App() {
   return (
     <div style={{ height: "100dvh", display: "flex", flexDirection: "column", maxWidth: tab === "feed" ? 480 : 860, margin: "0 auto" }}>
       <div style={{ flex: 1, minHeight: 0, overflowY: tab === "feed" ? "hidden" : "auto" }} className={tab === "feed" ? "" : "no-scrollbar"}>
-        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} onOpenNotifications={() => setShowNotifs(true)} onOpenSearch={() => setTab("search")} onOpenCommunity={() => setTab("people")} sharedPostId={sharedPostId} onHashtag={openHashtag} onMention={openMention} />}
+        {tab === "feed" && <FeedView key={feedKey} me={me} onOpenProfile={openProfile} refreshMe={refreshMe} onGoLive={() => setTab("live")} onOpenNotifications={() => setShowNotifs(true)} onOpenSearch={() => setTab("search")} onOpenCommunity={() => setTab("people")} onOpenRewards={() => setTab("rewards")} sharedPostId={sharedPostId} onHashtag={openHashtag} onMention={openMention} />}
         {tab === "watch" && <WatchView me={me} onOpenProfile={openProfile} />}
         {tab === "search" && <SearchView me={me} onOpenProfile={openProfile} />}
         {tab === "inbox" && <InboxView me={me} onOpenChat={(u) => setChatPeer(u)} onGoLive={() => setTab("live")} refreshMe={refreshMe} />}
