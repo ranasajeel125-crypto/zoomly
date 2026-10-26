@@ -1954,7 +1954,7 @@ function UploadView({ onPosted, onGoLive }) {
         <p style={{ color: "var(--dim)", fontSize: 13, margin: 0 }}>
           Camera / gallery access is requested by your device when you pick a file (Android permissions: Camera, Microphone, Media). Preview below uses the player's own volume control for sound.
         </p>
-        <label className="card" style={{ textAlign: "center", borderStyle: "dashed" }}>
+        <div className="card" style={{ textAlign: "center", borderStyle: "dashed" }}>
           {previewUrl ? (
             <video src={previewUrl} style={{ width: "100%", maxHeight: 320, borderRadius: 12, background: "#000" }} controls playsInline />
           ) : (
@@ -1962,10 +1962,14 @@ function UploadView({ onPosted, onGoLive }) {
               <div style={{ fontSize: 36 }}>⬆️</div>
               <div style={{ fontWeight: 700, marginTop: 4 }}>No video chosen yet</div>
               <div style={{ color: "var(--dim)", fontSize: 13 }}>MP4 and other video formats, up to 100 MB. Cover = the video's first frame (Cloudinary thumbnail).</div>
+              <label className="btn" style={{ cursor: "pointer", display: "inline-block", marginTop: 12 }}>
+                <input type="file" accept="video/*" style={{ display: "none" }} onChange={(e) => pickFile(e.target.files?.[0])} />
+                🖼️ Choose from gallery
+              </label>
             </div>
           )}
           {file && <div style={{ color: "var(--dim)", fontSize: 13, marginTop: 6 }}>{file.name}</div>}
-        </label>
+        </div>
         <input className="input" placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={140} aria-label="Video title" />
         <textarea className="input" placeholder="Description + hashtags (optional)" value={description} onChange={(e) => setDescription(e.target.value)} maxLength={1000} rows={3} aria-label="Video description and hashtags" />
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
