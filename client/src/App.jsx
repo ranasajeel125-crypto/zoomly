@@ -1951,6 +1951,11 @@ function UploadView({ onPosted, onGoLive }) {
             🖼️ Choose from gallery
           </label>
         </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <label htmlFor="zoomly-video-file" style={{ fontWeight: 700, fontSize: 14 }}>Video file</label>
+          <input id="zoomly-video-file" type="file" accept="video/*" aria-label="Choose video file" onChange={(e) => pickFile(e.target.files?.[0])} style={{ width: "100%" }} />
+          {file && <div style={{ color: "var(--dim)", fontSize: 13 }}>{file.name}</div>}
+        </div>
         <p style={{ color: "var(--dim)", fontSize: 13, margin: 0 }}>
           Camera / gallery access is requested by your device when you pick a file (Android permissions: Camera, Microphone, Media). Preview below uses the player's own volume control for sound.
         </p>
