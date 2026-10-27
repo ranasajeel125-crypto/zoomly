@@ -2284,7 +2284,7 @@ export function InstallAppButton() {
   return null;
 }
 
-function ProfileView({ me, userId, onOpenProfile, onOpenVideo, refreshMe, onLogout, onMessage, onGoMonetization, onOpenSettings, onOpenPhase2 }) {
+function ProfileView({ me, userId, onOpenProfile, onOpenVideo, refreshMe, onLogout, onMessage, onGoMonetization, onOpenRewards, onOpenSettings, onOpenPhase2 }) {
   const isMe = !userId || userId === me.id;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -2483,7 +2483,7 @@ function ProfileView({ me, userId, onOpenProfile, onOpenVideo, refreshMe, onLogo
           <button className="btn" onClick={() => setEditing((v) => !v)}>
             {editing ? "Close editor" : "Edit profile"}
           </button>
-          <button className="btn btn-primary" onClick={() => onGoMonetization?.()}>
+          <button className="btn btn-primary" onClick={() => onOpenRewards?.()}>
             💰 Rewards
           </button>
           <button className="btn" onClick={() => dpInputRef.current?.click()} disabled={dpBusy}>
@@ -4154,10 +4154,11 @@ export function App() {
               try {
                 sessionStorage.setItem("zoomly_open_monetization", "1");
               } catch {
-                /* storage unavailable — the Rewards button still works */
+                /* storage unavailable — the Start Monetization button still works */
               }
               setTab("rewards");
             }}
+            onOpenRewards={() => setTab("rewards")}
           />
         )}
       </div>
